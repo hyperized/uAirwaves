@@ -4,58 +4,59 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"time"
 
 	"github.com/stratoberry/go-gpsd"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
 )
 
-const ConnectionTimeout = 2 * time.Second
+var errDial = errors.New("failed to dial gpsd service")
 
+// GPS represents a GPS daemon connection.
 type GPS struct {
 	gpsAddress, serviceName, protocol string
 	session                           *gpsd.Session
 }
 
-// Option defines the function signature for configuring a GPS instance
+// Option defines the function signature for configuring a GPS instance.
 type Option func(*GPS)
 
-// New creates a new GPS instance with default values and applies provided options
+// New creates a new GPS instance with default values and applies provided options.
 func New(opts ...Option) *GPS {
-	g := &GPS{
+	gps := &GPS{
 		gpsAddress:  "127.0.0.1:2947",
 		serviceName: "gpsd.service",
 		protocol:    "tcp",
 	}
 
 	for _, opt := range opts {
-		opt(g)
+		opt(gps)
 	}
 
-	return g
+	return gps
 }
 
-// WithGpsAddress sets the address for the gpsd connection
+// WithGpsAddress sets the address for the gpsd connection.
 func WithGpsAddress(address string) Option {
 	return func(g *GPS) {
 		g.gpsAddress = address
 	}
 }
 
-// WithServiceName sets the systemd service name to manage
+// WithServiceName sets the systemd service name to manage.
 func WithServiceName(name string) Option {
 	return func(g *GPS) {
 		g.serviceName = name
 	}
 }
 
+// WithProtocol sets the protocol to use for the gpsd connection.
 func WithProtocol(protocol string) Option {
 	return func(g *GPS) {
 		g.protocol = protocol
 	}
 }
 
-// Watch starts the GPS monitoring process
+// Watch starts the GPS monitoring process.
 func (g *GPS) Watch(ctx context.Context, myLocation *location.Location) error {
 	err := g.connect()
 	if err != nil {
@@ -65,7 +66,7 @@ func (g *GPS) Watch(ctx context.Context, myLocation *location.Location) error {
 	defer g.disconnect()
 
 	// Read the Time-Position-Velocity report
-	g.session.AddFilter("TPV", func(r interface{}) {
+	g.session.AddFilter("TPV", func(r any) {
 		if tpvReport, ok := r.(*gpsd.TPVReport); ok {
 			myLocation.Update(
 				location.WithMode(int(tpvReport.Mode)),
@@ -88,10 +89,12 @@ func (g *GPS) Watch(ctx context.Context, myLocation *location.Location) error {
 
 func (g *GPS) connect() error {
 	var err error
+
 	g.session, err = gpsd.Dial(g.gpsAddress)
 	if err != nil {
-		return errors.Join(err, errors.New("failed to connect to address ("+g.gpsAddress+")"))
+		return errors.Join(err, errDial)
 	}
+
 	return nil
 }
 

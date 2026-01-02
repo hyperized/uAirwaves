@@ -12,46 +12,57 @@ import (
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/scope"
 )
 
-const YMultiplier = 1        // 2 before
-const HeadingLineLength = 12 // pixels for heading indicator
+const (
+	yMultiplier            = 1
+	terminalCharacterRatio = 2.0
+	headingLineLength      = 12
+	degreesToRadiansRatio  = math.Pi / 180
+	nauticalMilePerDegree  = 60.0
+	fastVerticalRate       = 500
+	slowVerticalRate       = 100
+	altitudeMultiplier     = 1000
+	circleSteps            = 8
+	circleMaxWidth         = 5
+)
 
-// TODO: filter altitudes
-
-// View is a custom tview component
+// View is a custom tview component.
 type View struct {
 	*tview.Box
-	showTrails bool
-	autoScope  bool
-	planes     *airplanes.Airplanes
-	myLocation *location.Location
-	myScope    *scope.Scope
-	mu         sync.RWMutex
+
+	headingIndicator bool
+	autoScope        bool
+	planes           *airplanes.Airplanes
+	myLocation       *location.Location
+	myScope          *scope.Scope
+	mu               sync.RWMutex
 }
 
+// New initializes a new radar scope view.
 func New(planes *airplanes.Airplanes, myLocation *location.Location) *View {
 	return &View{
-		Box:        tview.NewBox().SetBorder(true).SetTitle("Radar Scope (5-20nm)"),
-		showTrails: true,
-		myScope:    scope.New(),
-		autoScope:  true,
-		planes:     planes,
-		myLocation: myLocation,
+		Box:              tview.NewBox().SetBorder(true).SetTitle("Radar Scope (5-20nm)"),
+		headingIndicator: true,
+		myScope:          scope.New(),
+		autoScope:        true,
+		planes:           planes,
+		myLocation:       myLocation,
 	}
 }
 
-// SetScopeRange sets the radar scope range in nautical miles
+// SetScopeRange sets the radar scope range in nautical miles.
 func (r *View) SetScopeRange(rangeNm float64) {
 	r.myScope.Update(scope.WithCurrent(rangeNm))
 }
 
-// ToggleTrails toggles the display of heading trails
-func (r *View) ToggleTrails() {
+// ToggleHeadingIndicator toggles the display of heading trails.
+func (r *View) ToggleHeadingIndicator() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.showTrails = !r.showTrails
+	r.headingIndicator = !r.headingIndicator
 }
 
+// ToggleAutoScope toggles the automatic scope range adjustment.
 func (r *View) ToggleAutoScope() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -59,19 +70,20 @@ func (r *View) ToggleAutoScope() {
 	r.autoScope = !r.autoScope
 }
 
-// GetScopeRange returns the current scope range
+// GetScopeRange returns the current scope range.
 func (r *View) GetScopeRange() float64 {
 	return r.myScope.GetCurrent()
 }
 
-// GetTrailsEnabled returns whether trails are enabled
-func (r *View) GetTrailsEnabled() bool {
+// GetHeadingIndicatorEnabled returns whether headings are enabled.
+func (r *View) GetHeadingIndicatorEnabled() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	return r.showTrails
+	return r.headingIndicator
 }
 
+// GetAutoScopeEnabled returns whether auto scope is enabled.
 func (r *View) GetAutoScopeEnabled() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -79,11 +91,12 @@ func (r *View) GetAutoScopeEnabled() bool {
 	return r.autoScope
 }
 
+// Draw draws the radar scope view on the screen.
 func (r *View) Draw(screen tcell.Screen) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	r.Box.DrawForSubclass(screen, r)
+	r.DrawForSubclass(screen, r)
 	x, y, width, height := r.GetInnerRect()
 
 	centerX, centerY := x+width/2, y+height/2
@@ -91,16 +104,10 @@ func (r *View) Draw(screen tcell.Screen) {
 	// Scales: Terminal characters are usually ~2x taller than wide.
 	// We adjust yScale to keep the rings circular.
 	xScale := float64(width) / (r.myScope.GetCurrent() * 2)
-	yScale := float64(height) / (r.myScope.GetCurrent() * 2) * 2.0 // 2.0
-
-	increments := r.myScope.GetCurrent() / r.myScope.GetSteps()
+	yScale := float64(height) / (r.myScope.GetCurrent() * 2) * terminalCharacterRatio
 
 	// 1. Draw Scope Rings
-	ringStyle := tcell.StyleDefault.Foreground(tcell.ColorGreen).Background(tcell.ColorBlack)
-	for ring := increments; ring <= r.myScope.GetCurrent(); ring += increments {
-		drawCircle(screen, centerX, centerY, int(ring*xScale), int(ring*yScale/2), ringStyle)
-		tview.Print(screen, fmt.Sprintf("%0.0fnm", ring), centerX+int(ring*xScale), centerY, 5, tview.AlignLeft, tcell.ColorGreen)
-	}
+	r.drawScopeRings(screen, centerX, centerY, xScale, yScale)
 
 	// 2. Draw Center Point (You)
 	screen.SetContent(centerX, centerY, 'X', nil, tcell.StyleDefault.Foreground(tcell.ColorRed))
@@ -109,14 +116,14 @@ func (r *View) Draw(screen tcell.Screen) {
 	planeStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
 	centerLatitude, centerLongitude := r.myLocation.GetCoordinates()
 
-	pl := r.planes.Sorted(centerLatitude, centerLongitude)
-	if len(pl) == 0 && r.autoScope {
+	planeList := r.planes.Sorted(centerLatitude, centerLongitude)
+	if len(planeList) == 0 && r.autoScope {
 		// If there are no planes, reset the scope view
 		r.myScope.Update(scope.WithCurrent(r.myScope.GetMin()))
 	}
 
 	// If there are planes, display them
-	for _, p := range pl {
+	for _, p := range planeList {
 		plane := p.GetSnapshot()
 
 		lat := plane.Latitude
@@ -130,11 +137,11 @@ func (r *View) Draw(screen tcell.Screen) {
 
 		// Calculate delta in degrees
 		dLat := lat - centerLatitude
-		dLon := (lon - centerLongitude) * math.Cos(centerLatitude*math.Pi/180.0)
+		dLon := (lon - centerLongitude) * math.Cos(centerLatitude*degreesToRadiansRatio)
 
 		// Convert degrees to Nautical Miles (~60nm per degree)
-		nmY := dLat * 60.0
-		nmX := dLon * 60.0
+		nmY := dLat * nauticalMilePerDegree
+		nmX := dLon * nauticalMilePerDegree
 
 		// Skip if outside scope
 		dist := math.Sqrt(nmX*nmX + nmY*nmY)
@@ -143,68 +150,88 @@ func (r *View) Draw(screen tcell.Screen) {
 			if r.autoScope {
 				r.myScope.Update(scope.WithCurrent(r.myScope.GetCurrent() + r.myScope.GetMin()))
 			}
+
 			continue
 		}
 
-		// TODO: if there's no plane in the outer ring, shrink
+		// TODO: if there's no planeList in the outer ring, shrink
 
-		// Map to screen coordinates
+		// airplaneMap to screen coordinates
 		// Note: Y is inverted in screen space (up is negative)
 		px := centerX + int(nmX*xScale)
-		py := centerY - int(nmY*yScale/YMultiplier)
+		py := centerY - int(nmY*yScale/yMultiplier)
 
 		// Use color-coded altitude display
-		altColor := getAltitudeColor(plane.Altitude)
+		altColor := getFlightLevelColor(plane.Altitude)
 
 		// Draw heading indicator line if heading is valid
-		if plane.Heading != -1 && r.showTrails {
+		if plane.Heading != -1 && r.headingIndicator {
 			headingStyle := tcell.StyleDefault.Foreground(altColor).Background(tcell.ColorBlack)
 			drawHeadingLine(screen, px, py, plane.Heading, headingStyle)
 		}
 
 		screen.SetContent(px, py, '+', nil, planeStyle)
+
 		if callsign == "" {
 			tview.Print(screen, fmt.Sprintf("%s", plane.ICAO), px+1, py, 20, tview.AlignLeft, tcell.ColorYellow)
 		} else {
 			tview.Print(screen, fmt.Sprintf("%s", plane.Callsign), px+1, py, 20, tview.AlignLeft, tcell.ColorYellow)
 		}
 
-		/// Display altitude with a vertical rate symbol
+		// Display altitude with a vertical rate symbol
 		vertSymbol := getVertRateSymbol(plane.VertRate)
 		vertColor := getVerticalRateColor(plane.VertRate)
 
 		// Print altitude in altitude color, then vertical rate symbol in vert rate color
-		altText := fmt.Sprintf("%s ", altitudeToFL(plane.Altitude))
+		altText := altitudeToFL(plane.Altitude) + " "
 		tview.Print(screen, altText, px+1, py+1, len(altText), tview.AlignLeft, altColor)
 		tview.Print(screen, vertSymbol, px+1+len(altText), py+1, 1, tview.AlignLeft, vertColor)
 	}
 
 	// Set title
-	r.Box = tview.NewBox().SetBorder(true).SetTitle(fmt.Sprintf(
+	r.SetTitle(fmt.Sprintf(
 		"Radar Scope (%.0f-%.0fnm)",
 		r.myScope.GetCurrent()/r.myScope.GetSteps(),
 		r.myScope.GetCurrent(),
 	))
 }
 
+func (r *View) drawScopeRings(screen tcell.Screen, centerX, centerY int, xScale, yScale float64) {
+	ringStyle := tcell.StyleDefault.Foreground(tcell.ColorGreen).Background(tcell.ColorBlack)
+	increments := r.myScope.GetCurrent() / r.myScope.GetSteps()
+	for ring := increments; ring <= r.myScope.GetCurrent(); ring += increments {
+		drawCircle(screen, centerX, centerY, int(ring*xScale), int(ring*yScale/2), ringStyle)
+		tview.Print(screen,
+			fmt.Sprintf("%0.0fnm", ring),
+			centerX+int(ring*xScale),
+			centerY,
+			circleMaxWidth,
+			tview.AlignLeft,
+			tcell.ColorGreen,
+		)
+	}
+}
+
 func drawHeadingLine(screen tcell.Screen, x, y int, heading float64, style tcell.Style) {
+	const lineRounding = 0.5
+
 	// Convert heading to radians
 	// Aviation: 0° = North, 90° = East, 180° = South, 270° = West (clockwise)
 	// Screen: X increases right, Y increases down
 	// North (0°) should point up (-Y), East (90°) should point right (+X)
-	radians := heading * math.Pi / 180.0
+	radians := heading * degreesToRadiansRatio
 
 	// Calculate direction vector
 	// sin(heading) gives us X component (East/West)
 	// -cos(heading) gives us Y component (North is up, so negative)
 	dx := math.Sin(radians)
-	dy := -math.Cos(radians) * 0.5 // 0.5 to compensate for terminal character aspect ratio
+	dy := -math.Cos(radians) * lineRounding // to compensate for the terminal character aspect ratio
 
 	// Draw a dotted line using a Bresenham-like approach
-	for i := 1; i <= HeadingLineLength; i++ {
+	for i := 1; i <= headingLineLength; i++ {
 		// Calculate position along the line
-		px := x + int(float64(i)*dx+0.5) // +0.5 for rounding
-		py := y + int(float64(i)*dy+0.5)
+		px := x + int(float64(i)*dx+lineRounding) // +0.5 for rounding
+		py := y + int(float64(i)*dy+lineRounding)
 
 		// Draw dot every other step for dotted appearance
 		if i%2 == 1 {
@@ -213,75 +240,66 @@ func drawHeadingLine(screen tcell.Screen, x, y int, heading float64, style tcell
 	}
 }
 
-// Simple Bresenham-like circle helper for terminal
+// Simple Bresenham-like circle helper for terminal.
 func drawCircle(screen tcell.Screen, cx, cy, rx, ry int, style tcell.Style) {
-	step := 8
-	for i := 0; i < 360; i += step {
-		rad := float64(i) * math.Pi / 180.0
+	for degrees := 0; degrees < 360; degrees += circleSteps {
+		rad := float64(degrees) * degreesToRadiansRatio
 		x := cx + int(float64(rx)*math.Cos(rad))
 		y := cy + int(float64(ry)*math.Sin(rad))
 		screen.SetContent(x, y, '.', nil, style)
 	}
 }
 
+// getVerticalRateColor returns a color based on vertical rate in fpm.
 func getVerticalRateColor(vertRate float64) tcell.Color {
 	switch {
-	case vertRate > 500:
+	case vertRate > fastVerticalRate:
 		return tcell.ColorGreen
-	case vertRate < -500:
+	case vertRate < -fastVerticalRate:
 		return tcell.ColorRed
 	default:
 		return tcell.ColorLightBlue
 	}
 }
 
-// getVertRateSymbol returns an ASCII symbol for vertical rate
+// getVertRateSymbol returns an ASCII symbol for vertical rate.
 func getVertRateSymbol(vertRate float64) string {
 	switch {
-	case vertRate > 500:
+	case vertRate > fastVerticalRate:
 		return "^" // Climbing significantly
-	case vertRate > 100:
+	case vertRate > slowVerticalRate:
 		return "+" // Climbing
-	case vertRate < -500:
+	case vertRate < -fastVerticalRate:
 		return "v" // Descending significantly
-	case vertRate < -100:
+	case vertRate < -slowVerticalRate:
 		return "-" // Descending
 	default:
 		return "=" // Level flight (within ±100 fpm)
 	}
 }
 
-// altitudeToFL converts altitude in feet to flight level format (three digits max)
-// Example: 35000 ft -> "350", 5000 ft -> "050", 500 ft -> "005"
+// altitudeToFL converts altitude in feet to flight level format (three digits max).
 func altitudeToFL(altitude float64) string {
-	fl := int(altitude / 100)
-	return fmt.Sprintf("FL%03d", fl)
+	return fmt.Sprintf("FL%03d", int(altitude/altitudeMultiplier))
 }
 
-// getAltitudeColor returns a color based on altitude in 5,000 ft increments
-// 0-5k: Dark Blue, 5-10k: Blue, 10-15k: Cyan, 15-20k: Green, 20-25k: Yellow,
-// 25-30k: Orange, 30-35k: Red, 35-40k: Magenta, 40-45k: Purple, 45k+: White
-
-func getAltitudeColor(altitude float64) tcell.Color {
+// getFlightLevelColor returns a color based on altitude.
+func getFlightLevelColor(altitude float64) tcell.Color {
 	switch {
-	case altitude < 5000:
-		return tcell.ColorDarkBlue
-	case altitude < 10000:
-		return tcell.ColorBlue
-	case altitude < 15000:
-		return tcell.ColorDarkCyan
-	case altitude < 20000:
-		return tcell.ColorGreen
-	case altitude < 25000:
+	case altitude < 500: //nolint:mnd
+		return tcell.ColorWhite
+	case altitude < 10000: //nolint:mnd
 		return tcell.ColorYellow
-	case altitude < 30000:
-		return tcell.ColorOrange
-	case altitude < 35000:
-		return tcell.ColorRed
-	case altitude < 40000:
+	case altitude < 20000: //nolint:mnd
+		return tcell.ColorGreen
+	case altitude < 30000: //nolint:mnd
+		return tcell.ColorLightBlue
+	case altitude < 40000: //nolint:mnd
+		return tcell.ColorDarkBlue
+	case altitude < 50000: //nolint:mnd
 		return tcell.ColorPurple
-	case altitude < 45000:
-		return tcell.ColorDarkMagenta
+	case altitude < 60000: //nolint:mnd
+		return tcell.ColorRed
 	default:
 		return tcell.ColorWhite
 	}

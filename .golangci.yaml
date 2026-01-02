@@ -1,0 +1,29 @@
+---
+version: '2'
+
+linters:
+  default: all
+  disable:
+    - depguard # We don't use dep
+    - exhaustruct # mutexes don't require exhaustive structs
+    - tagliatelle # We don't need opinions on struct tags
+    - noinlineerr # We don't need opinions on error handling'
+  settings:
+    revive:
+      enable-all-rules: true
+      rules:
+        - name: package-comments
+          disabled: true
+        - name: line-length-limit
+          arguments: [ 120 ]
+        - name: confusing-results
+          disabled: true # it conflicts with nonamedreturns
+        - name: add-constant
+          disabled: true
+    mnd:
+      ignored-numbers: [ 0,1,2 ] # These are often used as defaults, not magic numbers
+
+formatters:
+  enable:
+    - gci
+    - gofmt

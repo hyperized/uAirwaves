@@ -29,16 +29,11 @@ func main() {
 		batteryStatus = battery.NewStatus()
 	)
 
-	slog.Info("Setting up TUI")
-	clock := tview.NewTextView().
-		SetTextAlign(tview.AlignLeft).
-		SetText("..:..:..")
+	clock := tview.NewTextView().SetTextAlign(tview.AlignLeft).SetText("..:..:..")
 	clock.SetDynamicColors(true)
 	clock.SetBackgroundColor(tcell.ColorDarkBlue)
 
-	statusBar := tview.NewTextView().
-		SetTextAlign(tview.AlignRight).
-		SetText("loading...")
+	statusBar := tview.NewTextView().SetTextAlign(tview.AlignRight).SetText("loading...")
 	statusBar.SetDynamicColors(true)
 	statusBar.SetBackgroundColor(tcell.ColorDarkBlue)
 
@@ -48,10 +43,8 @@ func main() {
 
 	radarPanel := radar.New(planeList, myLocation)
 
-	planeListPanel := tview.NewList().
-		ShowSecondaryText(true)
-	planeListPanel.SetBorder(true).
-		SetTitle("Airplanes").SetTitleColor(tcell.ColorGreen)
+	planeListPanel := tview.NewList().ShowSecondaryText(true)
+	planeListPanel.SetBorder(true).SetTitle("Airplanes").SetTitleColor(tcell.ColorGreen)
 
 	commands := tview.NewTextView().SetTextAlign(tview.AlignLeft)
 	commands.SetDynamicColors(true)
@@ -65,22 +58,13 @@ func main() {
 		AddItem(commands, 0, 1, false).
 		AddItem(gpsStatus, 0, 1, false)
 
-	grid := tview.NewGrid().
-		SetRows(1, 0, 1).
-		SetColumns(0, 50).
-		SetBorders(false)
+	grid := tview.NewGrid().SetRows(1, 0, 1).SetColumns(0, 50).SetBorders(false)
 
-	// Top Row spans both columns
 	grid.AddItem(headerPanel, 0, 0, 1, 2, 0, 0, false)
-
-	//// Middle Row
 	grid.AddItem(radarPanel, 1, 0, 1, 1, 0, 0, false)
-	grid.AddItem(planeListPanel, 1, 1, 1, 1, 0, 0, true) // ADSB on the right
-
-	// The bottom Row spans both columns
+	grid.AddItem(planeListPanel, 1, 1, 1, 1, 0, 0, true)
 	grid.AddItem(footer, 2, 0, 1, 2, 0, 0, false)
 
-	slog.Debug("Battery monitoring")
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -90,7 +74,6 @@ func main() {
 		}
 	}()
 
-	slog.Debug("GPS service")
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -100,7 +83,6 @@ func main() {
 		}
 	}()
 
-	slog.Debug("ADSB service")
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -115,7 +97,7 @@ func main() {
 	go func() {
 		defer wg.Done()
 
-		ticker := time.NewTicker(1 * time.Second)
+		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 
 		for { // Added loop
@@ -142,13 +124,13 @@ func main() {
 						}
 
 						sqk := ""
-						if plane.Squawk != nil {
+						if plane.Squawk != "" {
 							sqk = fmt.Sprintf(" squawk %s", plane.Squawk)
 						}
 
 						// Format the main text with heading arrow and emergency highlighting
 						mainText := fmt.Sprintf("%s%s", ident, sqk)
-						if isEmergencySquawk(plane.Squawk) {
+						if plane.Emergency {
 							mainText = fmt.Sprintf("[red]%s%s (!)[white]", ident, sqk)
 						}
 
@@ -156,13 +138,14 @@ func main() {
 					}
 
 					// Update footer commands
-					commands.SetText(fmt.Sprintf("[::b]Range (+/-): %0.0f nm - [::b]Trails (t): %t - [::b]Autoscope (a): %t",
+					commands.SetText(fmt.Sprintf(
+						"[::b]Range (+/-): %0.0f nm - [::b]Heading indicator (h): %t - [::b]Autoscope (a): %t",
 						radarPanel.GetScopeRange(),
-						radarPanel.GetTrailsEnabled(),
+						radarPanel.GetHeadingIndicatorEnabled(),
 						radarPanel.GetAutoScopeEnabled(),
 					))
 
-					gpsStatus.SetText(fmt.Sprintf("GPS: %s", myLocation.String()))
+					gpsStatus.SetText("GPS: " + myLocation.String())
 				})
 			}
 		}
@@ -186,8 +169,8 @@ func main() {
 			}
 		case 'a':
 			radarPanel.ToggleAutoScope()
-		case 't': // Toggle trails
-			radarPanel.ToggleTrails()
+		case 'h': // Toggle heading indicator
+			radarPanel.ToggleHeadingIndicator()
 		case 'q': // Quit
 			app.Stop()
 		}
@@ -199,9 +182,7 @@ func main() {
 		slog.Error("tview error", slog.Any("error", err))
 	}
 
-	slog.Debug("Issuing context cancellation")
 	cancel()
-	slog.Debug("Waiting for goroutines to finish")
 	wg.Wait()
 
 	slog.Info("Well, that was some experience...")
@@ -209,9 +190,4 @@ func main() {
 	slog.Info("And we'll move to another observation point.")
 
 	os.Exit(0)
-}
-
-func isEmergencySquawk(squawk []byte) bool {
-	squawkStr := string(squawk)
-	return squawkStr == "7500" || squawkStr == "7600" || squawkStr == "7700"
 }
