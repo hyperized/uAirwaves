@@ -3,86 +3,86 @@ package radar
 import (
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
+	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
+	"lab.hyperized.net/hyperized/uAirwaves/pkg/scope"
 )
 
 const YMultiplier = 1        // 2 before
 const HeadingLineLength = 12 // pixels for heading indicator
-const CircleCount = 4
-const MinNauticalMiles = 20
-const MaxNauticalMiles = 200
 
 // TODO: filter altitudes
 
 // View is a custom tview component
 type View struct {
 	*tview.Box
-	scopeRange float64
-	centerLat  float64
-	centerLon  float64
-	planes     airplanes.List
 	showTrails bool
 	autoScope  bool
+	planes     *airplanes.Airplanes
+	myLocation *location.Location
+	myScope    *scope.Scope
+	mu         sync.RWMutex
 }
 
-type PlanePos struct {
-	Lat      float64
-	Lon      float64
-	Callsign string
-}
-
-func NewView() *View {
+func New(planes *airplanes.Airplanes, myLocation *location.Location) *View {
 	return &View{
 		Box:        tview.NewBox().SetBorder(true).SetTitle("Radar Scope (5-20nm)"),
 		showTrails: true,
-		scopeRange: 20,
+		myScope:    scope.New(),
 		autoScope:  true,
+		planes:     planes,
+		myLocation: myLocation,
 	}
-}
-
-func (r *View) SetCenter(lat, lon float64) {
-	r.centerLat = lat
-	r.centerLon = lon
-}
-
-func (r *View) SetPlanes(planes airplanes.List) {
-	r.planes = planes
 }
 
 // SetScopeRange sets the radar scope range in nautical miles
 func (r *View) SetScopeRange(rangeNm float64) {
-	rangeNm = min(max(rangeNm, MinNauticalMiles), MaxNauticalMiles)
-	r.scopeRange = rangeNm
-	r.Box = tview.NewBox().SetBorder(true).SetTitle(fmt.Sprintf("Radar Scope (%.0f-%.0fnm)", r.scopeRange/CircleCount, r.scopeRange))
+	r.myScope.Update(scope.WithCurrent(rangeNm))
 }
 
 // ToggleTrails toggles the display of heading trails
 func (r *View) ToggleTrails() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	r.showTrails = !r.showTrails
 }
 
 func (r *View) ToggleAutoScope() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	r.autoScope = !r.autoScope
 }
 
 // GetScopeRange returns the current scope range
 func (r *View) GetScopeRange() float64 {
-	return r.scopeRange
+	return r.myScope.GetCurrent()
 }
 
 // GetTrailsEnabled returns whether trails are enabled
 func (r *View) GetTrailsEnabled() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	return r.showTrails
 }
 
 func (r *View) GetAutoScopeEnabled() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	return r.autoScope
 }
 
 func (r *View) Draw(screen tcell.Screen) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	r.Box.DrawForSubclass(screen, r)
 	x, y, width, height := r.GetInnerRect()
 
@@ -90,15 +90,14 @@ func (r *View) Draw(screen tcell.Screen) {
 
 	// Scales: Terminal characters are usually ~2x taller than wide.
 	// We adjust yScale to keep the rings circular.
-	const nmToDegree = 1.0 / 60.0
-	xScale := float64(width) / (r.scopeRange * 2)
-	yScale := float64(height) / (r.scopeRange * 2) * 2.0 // 2.0
+	xScale := float64(width) / (r.myScope.GetCurrent() * 2)
+	yScale := float64(height) / (r.myScope.GetCurrent() * 2) * 2.0 // 2.0
 
-	increments := r.scopeRange / CircleCount
+	increments := r.myScope.GetCurrent() / r.myScope.GetSteps()
 
 	// 1. Draw Scope Rings
 	ringStyle := tcell.StyleDefault.Foreground(tcell.ColorGreen).Background(tcell.ColorBlack)
-	for ring := increments; ring <= r.scopeRange; ring += increments {
+	for ring := increments; ring <= r.myScope.GetCurrent(); ring += increments {
 		drawCircle(screen, centerX, centerY, int(ring*xScale), int(ring*yScale/2), ringStyle)
 		tview.Print(screen, fmt.Sprintf("%0.0fnm", ring), centerX+int(ring*xScale), centerY, 5, tview.AlignLeft, tcell.ColorGreen)
 	}
@@ -108,8 +107,16 @@ func (r *View) Draw(screen tcell.Screen) {
 
 	// 3. Draw Planes
 	planeStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
+	centerLatitude, centerLongitude := r.myLocation.GetCoordinates()
 
-	for _, p := range r.planes {
+	pl := r.planes.Sorted(centerLatitude, centerLongitude)
+	if len(pl) == 0 && r.autoScope {
+		// If there are no planes, reset the scope view
+		r.myScope.Update(scope.WithCurrent(r.myScope.GetMin()))
+	}
+
+	// If there are planes, display them
+	for _, p := range pl {
 		plane := p.GetSnapshot()
 
 		lat := plane.Latitude
@@ -117,12 +124,13 @@ func (r *View) Draw(screen tcell.Screen) {
 		callsign := plane.Callsign
 
 		if lat == 0 || lon == 0 {
-			continue // Skip planes without a location
+			// Skip planes without a location, as they can't be plotted
+			continue
 		}
 
 		// Calculate delta in degrees
-		dLat := lat - r.centerLat
-		dLon := (lon - r.centerLon) * math.Cos(r.centerLat*math.Pi/180.0)
+		dLat := lat - centerLatitude
+		dLon := (lon - centerLongitude) * math.Cos(centerLatitude*math.Pi/180.0)
 
 		// Convert degrees to Nautical Miles (~60nm per degree)
 		nmY := dLat * 60.0
@@ -130,8 +138,11 @@ func (r *View) Draw(screen tcell.Screen) {
 
 		// Skip if outside scope
 		dist := math.Sqrt(nmX*nmX + nmY*nmY)
-		if dist > r.scopeRange {
-			r.SetScopeRange(r.scopeRange + 20)
+		if dist > r.myScope.GetCurrent() {
+			// Increase the scope range and try again with the next loop cycle
+			if r.autoScope {
+				r.myScope.Update(scope.WithCurrent(r.myScope.GetCurrent() + r.myScope.GetMin()))
+			}
 			continue
 		}
 
@@ -167,6 +178,13 @@ func (r *View) Draw(screen tcell.Screen) {
 		tview.Print(screen, altText, px+1, py+1, len(altText), tview.AlignLeft, altColor)
 		tview.Print(screen, vertSymbol, px+1+len(altText), py+1, 1, tview.AlignLeft, vertColor)
 	}
+
+	// Set title
+	r.Box = tview.NewBox().SetBorder(true).SetTitle(fmt.Sprintf(
+		"Radar Scope (%.0f-%.0fnm)",
+		r.myScope.GetCurrent()/r.myScope.GetSteps(),
+		r.myScope.GetCurrent(),
+	))
 }
 
 func drawHeadingLine(screen tcell.Screen, x, y int, heading float64, style tcell.Style) {

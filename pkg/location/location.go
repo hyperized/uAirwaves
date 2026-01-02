@@ -1,23 +1,21 @@
-package gps
+package location
 
 import (
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/stratoberry/go-gpsd"
 )
 
 type Location struct {
 	latitude, longitude, altitude float64
 	lastUpdated                   time.Time
-	mode                          gpsd.Mode
+	mode                          int
 	mu                            sync.RWMutex
 }
 
-type LocationOption func(*Location)
+type Option func(*Location)
 
-func NewLocation(opts ...LocationOption) *Location {
+func New(opts ...Option) *Location {
 	l := &Location{
 		latitude:    0.0,
 		longitude:   0.0,
@@ -33,7 +31,7 @@ func NewLocation(opts ...LocationOption) *Location {
 	return l
 }
 
-// GetCoordinates returns the current latitude, longitude, altitude, and mode values
+// GetCoordinates returns the current latitude and longitude
 func (l *Location) GetCoordinates() (latitude, longitude float64) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -41,7 +39,7 @@ func (l *Location) GetCoordinates() (latitude, longitude float64) {
 }
 
 // Update applies the provided options to an existing Location
-func (l *Location) Update(opts ...LocationOption) {
+func (l *Location) Update(opts ...Option) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, opt := range opts {
@@ -53,32 +51,32 @@ func (l *Location) Update(opts ...LocationOption) {
 func (l *Location) String() string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	return fmt.Sprintf("%.9flat, %.9flon %.4fm - mode %d %dms", l.latitude, l.longitude, l.altitude, l.mode, time.Since(l.lastUpdated.UTC()).Milliseconds())
+	return fmt.Sprintf("lat %.9f, lon %.9f %.4fm - mode %d", l.latitude, l.longitude, l.altitude, l.mode)
 }
 
 // WithLatitude sets the latitude of the location
-func WithLatitude(lat float64) LocationOption {
+func WithLatitude(lat float64) Option {
 	return func(l *Location) {
 		l.latitude = lat
 	}
 }
 
 // WithLongitude sets the longitude of the location
-func WithLongitude(lon float64) LocationOption {
+func WithLongitude(lon float64) Option {
 	return func(l *Location) {
 		l.longitude = lon
 	}
 }
 
 // WithAltitude sets the altitude of the location
-func WithAltitude(alt float64) LocationOption {
+func WithAltitude(alt float64) Option {
 	return func(l *Location) {
 		l.altitude = alt
 	}
 }
 
 // WithMode sets the mode of the location
-func WithMode(mode gpsd.Mode) LocationOption {
+func WithMode(mode int) Option {
 	return func(l *Location) {
 		l.mode = mode
 	}

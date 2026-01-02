@@ -3,26 +3,33 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"log/slog"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/data/adsb"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/data/battery"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/data/gps"
+	"lab.hyperized.net/hyperized/uAirwaves/pkg/adsb"
+	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
+	"lab.hyperized.net/hyperized/uAirwaves/pkg/battery"
+	"lab.hyperized.net/hyperized/uAirwaves/pkg/gps"
+	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/radar"
 )
 
 func main() {
 	var (
-		ctx      = context.Background()
-		app      = tview.NewApplication()
-		errChan  = make(chan error, 1)
-		location = gps.NewLocation()
+		ctx, cancel   = context.WithCancel(context.Background())
+		app           = tview.NewApplication()
+		errChan       = make(chan error, 10)
+		myLocation    = location.New()
+		wg            sync.WaitGroup
+		planeList     = airplanes.New()
+		batteryStatus = battery.NewStatus()
 	)
 
+	slog.Info("Setting up TUI")
 	clock := tview.NewTextView().
 		SetTextAlign(tview.AlignLeft).
 		SetText("..:..:..")
@@ -39,7 +46,7 @@ func main() {
 		AddItem(clock, 0, 1, false).
 		AddItem(statusBar, 0, 1, false)
 
-	radarPanel := radar.NewView()
+	radarPanel := radar.New(planeList, myLocation)
 
 	planeListPanel := tview.NewList().
 		ShowSecondaryText(true)
@@ -66,56 +73,67 @@ func main() {
 	// Top Row spans both columns
 	grid.AddItem(headerPanel, 0, 0, 1, 2, 0, 0, false)
 
-	// Middle Row
+	//// Middle Row
 	grid.AddItem(radarPanel, 1, 0, 1, 1, 0, 0, false)
 	grid.AddItem(planeListPanel, 1, 1, 1, 1, 0, 0, true) // ADSB on the right
 
 	// The bottom Row spans both columns
 	grid.AddItem(footer, 2, 0, 1, 2, 0, 0, false)
 
-	// Battery service
-	slog.Info("Monitoring battery")
-	b := battery.New()
-	go b.Watch(ctx, errChan)
-
-	// GPS service
-	slog.Info("GPS service")
-	g := gps.New()
-	defer g.Stop(ctx)
-	go g.Watch(ctx, location, errChan)
-
-	// ADSB service
-	slog.Info("ADSB service")
-	a := adsb.New()
-	conErr := a.Connect(ctx)
-	if conErr != nil {
-		log.Fatal(conErr) // Cannot proceed without this.
-		return
-	}
-	defer a.Stop(ctx)
-	go a.Stream(ctx, errChan)
-
-	slog.Info("Start renderer")
+	slog.Debug("Battery monitoring")
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+
+		if err := battery.Watch(ctx, batteryStatus); err != nil {
+			errChan <- err
+		}
+	}()
+
+	slog.Debug("GPS service")
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		if err := gps.New().Watch(ctx, myLocation); err != nil {
+			errChan <- err
+		}
+	}()
+
+	slog.Debug("ADSB service")
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		if err := adsb.New().Stream(ctx, planeList); err != nil {
+			errChan <- err
+		}
+
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 
 		for { // Added loop
 			select {
 			case appErr := <-errChan:
-				app.Stop()
 				slog.Error("Loop caught error: ", slog.Any("error", appErr))
+				return
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				app.QueueUpdateDraw(func() {
 					// Header
 					clock.SetText("Local: " + time.Now().Format(time.TimeOnly) + " UTC: " + time.Now().UTC().Format(time.TimeOnly))
-					statusBar.SetText("Battery: " + b.Display())
+					statusBar.SetText("Battery: " + batteryStatus.String())
 
 					planeListPanel.Clear()
-					latitude, longitude := location.GetCoordinates()
-					for _, p := range a.Planes().Sorted(latitude, longitude) {
+					latitude, longitude := myLocation.GetCoordinates()
+					for _, p := range planeList.Sorted(latitude, longitude) {
 						plane := p.GetSnapshot()
 
 						ident := fmt.Sprintf("%s", plane.ICAO)
@@ -137,9 +155,6 @@ func main() {
 						planeListPanel.AddItem(mainText, p.String(), 0, nil)
 					}
 
-					radarPanel.SetCenter(latitude, longitude)
-					radarPanel.SetPlanes(a.Planes().Sorted(latitude, longitude))
-
 					// Update footer commands
 					commands.SetText(fmt.Sprintf("[::b]Range (+/-): %0.0f nm - [::b]Trails (t): %t - [::b]Autoscope (a): %t",
 						radarPanel.GetScopeRange(),
@@ -147,7 +162,7 @@ func main() {
 						radarPanel.GetAutoScopeEnabled(),
 					))
 
-					gpsStatus.SetText(fmt.Sprintf("GPS: %s", location.String()))
+					gpsStatus.SetText(fmt.Sprintf("GPS: %s", myLocation.String()))
 				})
 			}
 		}
@@ -161,12 +176,12 @@ func main() {
 		switch event.Rune() {
 		case '+': // Increase scope range
 			currentRange := radarPanel.GetScopeRange()
-			if currentRange < 200 { // Max 200 nautical miles
+			if currentRange < 200 { // max 200 nautical miles
 				radarPanel.SetScopeRange(currentRange + 20)
 			}
 		case '-': // Decrease scope range
 			currentRange := radarPanel.GetScopeRange()
-			if currentRange > 20 { // Min 20 nautical miles
+			if currentRange > 20 { // min 20 nautical miles
 				radarPanel.SetScopeRange(currentRange - 20)
 			}
 		case 'a':
@@ -179,10 +194,21 @@ func main() {
 		return event
 	})
 
-	if err := app.SetRoot(grid, true).EnableMouse(true).Run(); err != nil {
-		app.Stop()
-		log.Fatal(err)
+	err := app.SetRoot(grid, true).EnableMouse(true).Run()
+	if err != nil {
+		slog.Error("tview error", slog.Any("error", err))
 	}
+
+	slog.Debug("Issuing context cancellation")
+	cancel()
+	slog.Debug("Waiting for goroutines to finish")
+	wg.Wait()
+
+	slog.Info("Well, that was some experience...")
+	slog.Info("Now just let me adjust the spacial controls...")
+	slog.Info("And we'll move to another observation point.")
+
+	os.Exit(0)
 }
 
 func isEmergencySquawk(squawk []byte) bool {

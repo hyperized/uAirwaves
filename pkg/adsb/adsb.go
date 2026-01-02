@@ -6,21 +6,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"time"
 
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/service"
 )
 
 const JSONServiceAddress = "127.0.0.1:30047"
-const ServiceName = "readsb.service"
-const connectionTimeout = 30 * time.Second
 const retryInterval = 1 * time.Second
-const maxRetries = 30
 const pruneThreshold = 1 * time.Minute
+const pruneFrequency = 10 * time.Second
 
 // JSONAircraft represents the ADSB structure from readsb
 type JSONAircraft struct {
@@ -67,67 +65,22 @@ type JSONAircraft struct {
 
 type ADSB struct {
 	connection net.Conn
-	airplanes  *airplanes.Airplanes
 }
 
 func New() *ADSB {
-	return &ADSB{
-		airplanes: airplanes.New(),
-	}
+	return &ADSB{}
 }
 
-func (a *ADSB) Stop(ctx context.Context) error {
-	if a != nil && a.connection != nil {
-		_ = a.connection.Close()
-	}
-
-	srv := service.New(ServiceName, service.WithStop())
-	err := srv.Execute(ctx)
+func (a *ADSB) Stream(ctx context.Context, airplanes *airplanes.Airplanes) error {
+	err := a.connect()
 	if err != nil {
 		return err
 	}
-	return nil
-}
+	defer a.disconnect()
 
-func (a *ADSB) Connect(ctx context.Context) error {
-	srv := service.New(ServiceName, service.WithEnable(), service.WithStart())
-	err := srv.Execute(ctx)
-	if err != nil {
-		return errors.Join(err, errors.New("could not start service ("+ServiceName+")"))
-	}
+	ticker := time.NewTicker(pruneFrequency)
+	defer ticker.Stop()
 
-	deadline := time.Now().Add(connectionTimeout)
-	retries := 0
-
-	for time.Now().Before(deadline) && retries < maxRetries {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		a.connection, err = net.DialTimeout("tcp", JSONServiceAddress, retryInterval)
-		if err == nil {
-			return nil
-		}
-
-		retries++
-		if retries < maxRetries && time.Now().Before(deadline) {
-			time.Sleep(retryInterval)
-		}
-	}
-
-	if err != nil {
-		return errors.Join(err, errors.New("could not dial to address ("+JSONServiceAddress+")"))
-	}
-	return nil
-}
-
-func (a *ADSB) Planes() *airplanes.Airplanes {
-	return a.airplanes
-}
-
-func (a *ADSB) Stream(ctx context.Context, errChan chan error) {
 	scanner := bufio.NewScanner(a.connection)
 
 	// Set a larger buffer size for potentially large JSON messages
@@ -136,15 +89,16 @@ func (a *ADSB) Stream(ctx context.Context, errChan chan error) {
 
 	for {
 		select {
+		case <-ticker.C:
+			airplanes.Prune(pruneThreshold)
 		case <-ctx.Done():
-			return
+			return nil
 		default:
 			if !scanner.Scan() {
 				if err := scanner.Err(); err != nil {
-					errChan <- errors.Join(err, errors.New("error reading from JSON stream"))
+					return errors.Join(err, errors.New("error reading from JSON stream"))
 				}
-				// Connection closed or error - exit
-				return
+				return nil
 			}
 
 			line := scanner.Text()
@@ -154,22 +108,31 @@ func (a *ADSB) Stream(ctx context.Context, errChan chan error) {
 
 			var ac JSONAircraft
 			if err := json.Unmarshal([]byte(line), &ac); err != nil {
-				errChan <- errors.Join(err, fmt.Errorf("could not parse JSON: %s", line[:min(50, len(line))]))
-				continue
+				return errors.Join(err, fmt.Errorf("could not parse JSON: %s", line[:min(50, len(line))]))
 			}
 
 			// Process the aircraft
-			if err := a.processAircraft(ac); err != nil {
-				errChan <- err
+			if err := processAircraft(ac, airplanes); err != nil {
+				return errors.Join(err, fmt.Errorf("could not process aircraft: %s", line[:min(50, len(line))]))
 			}
-
-			// Prune old planes periodically (not on every message for performance)
-			a.airplanes.Prune(pruneThreshold)
 		}
 	}
 }
 
-func (a *ADSB) processAircraft(ac JSONAircraft) error {
+func (a *ADSB) connect() error {
+	var err error
+	a.connection, err = net.DialTimeout("tcp", JSONServiceAddress, retryInterval)
+	if err != nil {
+		return errors.Join(err, errors.New("could not dial to address ("+JSONServiceAddress+")"))
+	}
+	return nil
+}
+
+func (a *ADSB) disconnect() {
+	slog.Info("Disconnecting from ADSB service", slog.Any("error", a.connection.Close()))
+}
+
+func processAircraft(ac JSONAircraft, airplanes *airplanes.Airplanes) error {
 	// Parse ICAO hex to uint64
 	var icaoInt uint64
 	if _, err := fmt.Sscanf(ac.Hex, "%x", &icaoInt); err != nil {
@@ -177,9 +140,9 @@ func (a *ADSB) processAircraft(ac JSONAircraft) error {
 	}
 
 	i := airplane.ICAO(icaoInt)
-	a.airplanes.Ensure(i)
+	airplanes.Ensure(i)
 
-	plane, ok := a.airplanes.Get(i)
+	plane, ok := airplanes.Get(i)
 	if !ok {
 		return fmt.Errorf("failed to get airplane after ensuring: %s", ac.Hex)
 	}
