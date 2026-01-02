@@ -10,11 +10,11 @@ import (
 )
 
 const YMultiplier = 1        // 2 before
-const HeadingLineLength = 10 // pixels for heading indicator
+const HeadingLineLength = 12 // pixels for heading indicator
 const CircleCount = 4
+const MinNauticalMiles = 20
+const MaxNauticalMiles = 200
 
-// TODO: Increase / descrease scope range
-// TODO: enable / disable heading trails
 // TODO: filter altitudes
 
 // View is a custom tview component
@@ -25,6 +25,7 @@ type View struct {
 	centerLon  float64
 	planes     airplanes.List
 	showTrails bool
+	autoScope  bool
 }
 
 type PlanePos struct {
@@ -35,9 +36,10 @@ type PlanePos struct {
 
 func NewView() *View {
 	return &View{
-		Box:        tview.NewBox().SetBorder(true).SetTitle("Radar Scope (25-100nm)"),
+		Box:        tview.NewBox().SetBorder(true).SetTitle("Radar Scope (5-20nm)"),
 		showTrails: true,
-		scopeRange: 100,
+		scopeRange: 20,
+		autoScope:  true,
 	}
 }
 
@@ -52,6 +54,7 @@ func (r *View) SetPlanes(planes airplanes.List) {
 
 // SetScopeRange sets the radar scope range in nautical miles
 func (r *View) SetScopeRange(rangeNm float64) {
+	rangeNm = min(max(rangeNm, MinNauticalMiles), MaxNauticalMiles)
 	r.scopeRange = rangeNm
 	r.Box = tview.NewBox().SetBorder(true).SetTitle(fmt.Sprintf("Radar Scope (%.0f-%.0fnm)", r.scopeRange/CircleCount, r.scopeRange))
 }
@@ -59,6 +62,10 @@ func (r *View) SetScopeRange(rangeNm float64) {
 // ToggleTrails toggles the display of heading trails
 func (r *View) ToggleTrails() {
 	r.showTrails = !r.showTrails
+}
+
+func (r *View) ToggleAutoScope() {
+	r.autoScope = !r.autoScope
 }
 
 // GetScopeRange returns the current scope range
@@ -69,6 +76,10 @@ func (r *View) GetScopeRange() float64 {
 // GetTrailsEnabled returns whether trails are enabled
 func (r *View) GetTrailsEnabled() bool {
 	return r.showTrails
+}
+
+func (r *View) GetAutoScopeEnabled() bool {
+	return r.autoScope
 }
 
 func (r *View) Draw(screen tcell.Screen) {
@@ -93,7 +104,7 @@ func (r *View) Draw(screen tcell.Screen) {
 	}
 
 	// 2. Draw Center Point (You)
-	screen.SetContent(centerX, centerY, '+', nil, tcell.StyleDefault.Foreground(tcell.ColorRed))
+	screen.SetContent(centerX, centerY, 'X', nil, tcell.StyleDefault.Foreground(tcell.ColorRed))
 
 	// 3. Draw Planes
 	planeStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
@@ -120,8 +131,11 @@ func (r *View) Draw(screen tcell.Screen) {
 		// Skip if outside scope
 		dist := math.Sqrt(nmX*nmX + nmY*nmY)
 		if dist > r.scopeRange {
+			r.SetScopeRange(r.scopeRange + 20)
 			continue
 		}
+
+		// TODO: if there's no plane in the outer ring, shrink
 
 		// Map to screen coordinates
 		// Note: Y is inverted in screen space (up is negative)
@@ -183,7 +197,8 @@ func drawHeadingLine(screen tcell.Screen, x, y int, heading float64, style tcell
 
 // Simple Bresenham-like circle helper for terminal
 func drawCircle(screen tcell.Screen, cx, cy, rx, ry int, style tcell.Style) {
-	for i := 0; i < 360; i += 2 {
+	step := 8
+	for i := 0; i < 360; i += step {
 		rad := float64(i) * math.Pi / 180.0
 		x := cx + int(float64(rx)*math.Cos(rad))
 		y := cy + int(float64(ry)*math.Sin(rad))

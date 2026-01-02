@@ -42,8 +42,8 @@ type JSONAircraft struct {
 	Squawk      string   `json:"squawk"`       // Squawk code
 	Emergency   string   `json:"emergency"`    // Emergency status
 	Category    string   `json:"category"`     // Aircraft category
-	Lat         *float64 `json:"lat"`          // Latitude
-	Lon         *float64 `json:"lon"`          // Longitude
+	Lat         *float64 `json:"lat"`          // latitude
+	Lon         *float64 `json:"lon"`          // longitude
 	NIC         *int     `json:"nic"`          // Navigation Integrity Category
 	RC          *int     `json:"rc"`           // Radius of Containment
 	SeenPos     *float64 `json:"seen_pos"`     // Seconds since last position
@@ -81,11 +81,11 @@ func (a *ADSB) Stop(ctx context.Context) error {
 		_ = a.connection.Close()
 	}
 
-	//srv := service.New(ServiceName, service.WithStop())
-	//err := srv.Execute(ctx)
-	//if err != nil {
-	//	return err
-	//}
+	srv := service.New(ServiceName, service.WithStop())
+	err := srv.Execute(ctx)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -152,7 +152,6 @@ func (a *ADSB) Stream(ctx context.Context, errChan chan error) {
 				continue
 			}
 
-			// Each line is a single aircraft update
 			var ac JSONAircraft
 			if err := json.Unmarshal([]byte(line), &ac); err != nil {
 				errChan <- errors.Join(err, fmt.Errorf("could not parse JSON: %s", line[:min(50, len(line))]))

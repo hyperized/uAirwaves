@@ -10,21 +10,18 @@ import (
 )
 
 type GPS struct {
-	GpsAddress  string
-	ServiceName string
-	mu          sync.RWMutex
-	Location    *Location
+	gpsAddress, serviceName string
+	mu                      sync.RWMutex
 }
 
-// GPSOption defines the function signature for configuring a GPS instance
-type GPSOption func(*GPS)
+// Option defines the function signature for configuring a GPS instance
+type Option func(*GPS)
 
 // New creates a new GPS instance with default values and applies provided options
-func New(opts ...GPSOption) *GPS {
+func New(opts ...Option) *GPS {
 	g := &GPS{
-		GpsAddress:  "127.0.0.1:2947",
-		ServiceName: "gpsd.service",
-		Location:    &Location{},
+		gpsAddress:  "127.0.0.1:2947",
+		serviceName: "gpsd.service",
 	}
 
 	for _, opt := range opts {
@@ -35,41 +32,44 @@ func New(opts ...GPSOption) *GPS {
 }
 
 // WithGpsAddress sets the address for the gpsd connection
-func WithGpsAddress(address string) GPSOption {
+func WithGpsAddress(address string) Option {
 	return func(g *GPS) {
-		g.GpsAddress = address
+		g.gpsAddress = address
 	}
 }
 
 // WithServiceName sets the systemd service name to manage
-func WithServiceName(name string) GPSOption {
+func WithServiceName(name string) Option {
 	return func(g *GPS) {
-		g.ServiceName = name
+		g.serviceName = name
 	}
 }
 
+func (g *GPS) Stop(ctx context.Context) error {
+	return service.New(g.serviceName, service.WithStop()).Execute(ctx)
+}
+
 // Watch starts the GPS monitoring process
-func (g *GPS) Watch(ctx context.Context, errChan chan<- error) {
-	n := service.New(g.ServiceName, service.WithEnable(), service.WithStart())
-	err := n.Execute(ctx)
+func (g *GPS) Watch(ctx context.Context, location *Location, errChan chan<- error) {
+	err := service.New(g.serviceName, service.WithEnable(), service.WithStart()).Execute(ctx)
 	if err != nil {
-		errChan <- errors.Join(err, errors.New("failed to start service ("+g.ServiceName+")"))
+		errChan <- errors.Join(err, errors.New("failed to start service ("+g.serviceName+")"))
 		return
 	}
 
-	gps, err := gpsd.Dial(g.GpsAddress)
+	gps, err := gpsd.Dial(g.gpsAddress)
 	if err != nil {
-		errChan <- errors.Join(err, errors.New("failed to connect to address ("+g.GpsAddress+")"))
+		errChan <- errors.Join(err, errors.New("failed to connect to address ("+g.gpsAddress+")"))
 		return
 	}
 	defer gps.Close()
 
-	// Only grab the Time-Position-Velocity report
+	// Read the Time-Position-Velocity report
 	gps.AddFilter("TPV", func(r interface{}) {
 		if tpvReport, ok := r.(*gpsd.TPVReport); ok {
 			g.mu.Lock()
-			// Using the New function for Location we created earlier
-			g.Location = NewLocation(
+			location.Update(
+				WithMode(tpvReport.Mode),
 				WithLatitude(tpvReport.Lat),
 				WithLongitude(tpvReport.Lon),
 				WithAltitude(tpvReport.Alt),
@@ -88,19 +88,5 @@ func (g *GPS) Watch(ctx context.Context, errChan chan<- error) {
 	case <-ctx.Done():
 		errChan <- ctx.Err()
 		return
-	}
-}
-
-// GetLocation returns a thread-safe copy of the current location
-func (g *GPS) GetLocation() *Location {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	if g.Location == nil {
-		return &Location{}
-	}
-	return &Location{
-		Latitude:  g.Location.Latitude,
-		Longitude: g.Location.Longitude,
-		Altitude:  g.Location.Altitude,
 	}
 }

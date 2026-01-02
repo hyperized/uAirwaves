@@ -16,38 +16,47 @@ import (
 )
 
 func main() {
-	ctx := context.Background()
-
-	app := tview.NewApplication()
+	var (
+		ctx      = context.Background()
+		app      = tview.NewApplication()
+		errChan  = make(chan error, 1)
+		location = gps.NewLocation()
+	)
 
 	clock := tview.NewTextView().
-		SetTextAlign(tview.AlignRight).
+		SetTextAlign(tview.AlignLeft).
 		SetText("..:..:..")
 	clock.SetDynamicColors(true)
 	clock.SetBackgroundColor(tcell.ColorDarkBlue)
 
 	statusBar := tview.NewTextView().
-		SetTextAlign(tview.AlignLeft).
+		SetTextAlign(tview.AlignRight).
 		SetText("loading...")
 	statusBar.SetDynamicColors(true)
 	statusBar.SetBackgroundColor(tcell.ColorDarkBlue)
 
 	headerPanel := tview.NewFlex().SetDirection(tview.FlexColumn).
-		AddItem(statusBar, 0, 3, false).
-		AddItem(clock, 0, 1, false)
+		AddItem(clock, 0, 1, false).
+		AddItem(statusBar, 0, 1, false)
 
 	radarPanel := radar.NewView()
 
 	planeListPanel := tview.NewList().
 		ShowSecondaryText(true)
 	planeListPanel.SetBorder(true).
-		SetTitle("List")
+		SetTitle("Airplanes").SetTitleColor(tcell.ColorGreen)
 
-	footer := tview.NewTextView().
-		SetTextAlign(tview.AlignLeft)
-	footer.SetDynamicColors(true)
-	footer.SetBackgroundColor(tcell.ColorDarkBlue)
-	footer.SetTextColor(tcell.ColorWhite)
+	commands := tview.NewTextView().SetTextAlign(tview.AlignLeft)
+	commands.SetDynamicColors(true)
+	commands.SetBackgroundColor(tcell.ColorDarkBlue)
+
+	gpsStatus := tview.NewTextView().SetTextAlign(tview.AlignRight)
+	gpsStatus.SetDynamicColors(true)
+	gpsStatus.SetBackgroundColor(tcell.ColorDarkBlue)
+
+	footer := tview.NewFlex().SetDirection(tview.FlexColumn).
+		AddItem(commands, 0, 1, false).
+		AddItem(gpsStatus, 0, 1, false)
 
 	grid := tview.NewGrid().
 		SetRows(1, 0, 1).
@@ -64,8 +73,6 @@ func main() {
 	// The bottom Row spans both columns
 	grid.AddItem(footer, 2, 0, 1, 2, 0, 0, false)
 
-	errChan := make(chan error, 1)
-
 	// Battery service
 	slog.Info("Monitoring battery")
 	b := battery.New()
@@ -74,7 +81,8 @@ func main() {
 	// GPS service
 	slog.Info("GPS service")
 	g := gps.New()
-	go g.Watch(ctx, errChan)
+	defer g.Stop(ctx)
+	go g.Watch(ctx, location, errChan)
 
 	// ADSB service
 	slog.Info("ADSB service")
@@ -95,28 +103,19 @@ func main() {
 		for { // Added loop
 			select {
 			case appErr := <-errChan:
-				app.QueueUpdateDraw(func() {
-					footer.SetText(appErr.Error())
-				})
+				app.Stop()
+				slog.Error("Loop caught error: ", slog.Any("error", appErr))
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				app.QueueUpdateDraw(func() {
 					// Header
-					clock.SetText("UTC: " + time.Now().UTC().Format(time.TimeOnly) + " Local: " + time.Now().Format(time.TimeOnly))
-					statusBar.SetText("Battery: " + b.Display() + " - GPS: " + g.GetLocation().String())
-
-					// Update footer commands
-					footerText := fmt.Sprintf("[::b]Range (+/-): %0.0f nm [::b]Trails (t): %v",
-						radarPanel.GetScopeRange(),
-						radarPanel.GetTrailsEnabled(),
-					)
-					footer.SetText(footerText)
+					clock.SetText("Local: " + time.Now().Format(time.TimeOnly) + " UTC: " + time.Now().UTC().Format(time.TimeOnly))
+					statusBar.SetText("Battery: " + b.Display())
 
 					planeListPanel.Clear()
-
-					loc := g.GetLocation()
-					for _, p := range a.Planes().Sorted(loc.Latitude, loc.Longitude) {
+					latitude, longitude := location.GetCoordinates()
+					for _, p := range a.Planes().Sorted(latitude, longitude) {
 						plane := p.GetSnapshot()
 
 						ident := fmt.Sprintf("%s", plane.ICAO)
@@ -138,8 +137,17 @@ func main() {
 						planeListPanel.AddItem(mainText, p.String(), 0, nil)
 					}
 
-					radarPanel.SetCenter(loc.Latitude, loc.Longitude)
-					radarPanel.SetPlanes(a.Planes().Sorted(loc.Latitude, loc.Longitude))
+					radarPanel.SetCenter(latitude, longitude)
+					radarPanel.SetPlanes(a.Planes().Sorted(latitude, longitude))
+
+					// Update footer commands
+					commands.SetText(fmt.Sprintf("[::b]Range (+/-): %0.0f nm - [::b]Trails (t): %t - [::b]Autoscope (a): %t",
+						radarPanel.GetScopeRange(),
+						radarPanel.GetTrailsEnabled(),
+						radarPanel.GetAutoScopeEnabled(),
+					))
+
+					gpsStatus.SetText(fmt.Sprintf("GPS: %s", location.String()))
 				})
 			}
 		}
@@ -161,6 +169,8 @@ func main() {
 			if currentRange > 20 { // Min 20 nautical miles
 				radarPanel.SetScopeRange(currentRange - 20)
 			}
+		case 'a':
+			radarPanel.ToggleAutoScope()
 		case 't': // Toggle trails
 			radarPanel.ToggleTrails()
 		case 'q': // Quit

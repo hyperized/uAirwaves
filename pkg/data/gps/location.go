@@ -1,21 +1,29 @@
 package gps
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/stratoberry/go-gpsd"
+)
 
 type Location struct {
-	Latitude, Longitude, Altitude float64
+	latitude, longitude, altitude float64
+	lastUpdated                   time.Time
+	mode                          gpsd.Mode
+	mu                            sync.RWMutex
 }
 
-// Option defines the function signature for configuring a Location
-type Option func(*Location)
+type LocationOption func(*Location)
 
-// NewLocation creates a new Location with the provided options.
-// It defaults to 0.0 for all fields.
-func NewLocation(opts ...Option) *Location {
+func NewLocation(opts ...LocationOption) *Location {
 	l := &Location{
-		Latitude:  0.0,
-		Longitude: 0.0,
-		Altitude:  0.0,
+		latitude:    0.0,
+		longitude:   0.0,
+		altitude:    0.0,
+		mode:        0,
+		lastUpdated: time.Now(),
 	}
 
 	for _, opt := range opts {
@@ -25,35 +33,53 @@ func NewLocation(opts ...Option) *Location {
 	return l
 }
 
+// GetCoordinates returns the current latitude, longitude, altitude, and mode values
+func (l *Location) GetCoordinates() (latitude, longitude float64) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.latitude, l.longitude
+}
+
+// Update applies the provided options to an existing Location
+func (l *Location) Update(opts ...LocationOption) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, opt := range opts {
+		opt(l)
+	}
+	l.lastUpdated = time.Now()
+}
+
 func (l *Location) String() string {
-	return fmt.Sprintf("%f,%f ^%f", l.Latitude, l.Longitude, l.Altitude)
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return fmt.Sprintf("%.9flat, %.9flon %.4fm - mode %d %dms", l.latitude, l.longitude, l.altitude, l.mode, time.Since(l.lastUpdated.UTC()).Milliseconds())
 }
 
-// WithLatitude sets the Latitude of the location
-func WithLatitude(lat float64) Option {
+// WithLatitude sets the latitude of the location
+func WithLatitude(lat float64) LocationOption {
 	return func(l *Location) {
-		l.Latitude = lat
+		l.latitude = lat
 	}
 }
 
-// WithLongitude sets the Longitude of the location
-func WithLongitude(lon float64) Option {
+// WithLongitude sets the longitude of the location
+func WithLongitude(lon float64) LocationOption {
 	return func(l *Location) {
-		l.Longitude = lon
+		l.longitude = lon
 	}
 }
 
-// WithAltitude sets the Altitude of the location
-func WithAltitude(alt float64) Option {
+// WithAltitude sets the altitude of the location
+func WithAltitude(alt float64) LocationOption {
 	return func(l *Location) {
-		l.Altitude = alt
+		l.altitude = alt
 	}
 }
 
-// WithCoordinates is a convenience option to set both Lat and Lon at once
-func WithCoordinates(lat, lon float64) Option {
+// WithMode sets the mode of the location
+func WithMode(mode gpsd.Mode) LocationOption {
 	return func(l *Location) {
-		l.Latitude = lat
-		l.Longitude = lon
+		l.mode = mode
 	}
 }

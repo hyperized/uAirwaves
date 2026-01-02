@@ -36,7 +36,7 @@ func New(icao ICAO) *Airplane {
 func (a *Airplane) String() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return fmt.Sprintf("%.0fft h%.0f(%s) %.0fkts %.0ffpm lu%s", a.altitude, a.heading, getHeadingArrow(a.heading), a.velocity, a.vertRate, a.lastUpdate.UTC().Format(time.TimeOnly))
+	return fmt.Sprintf("%.0fft %.0fo %.0fkts %.0ffpm %.0fs", a.altitude, a.heading, a.velocity, a.vertRate, time.Since(a.lastUpdate.UTC()).Seconds())
 }
 
 // Snapshot holds a point-in-time copy of airplane data for lock-free reads
@@ -237,36 +237,5 @@ func WithSignal(signal uint8) Option {
 		if signal > 0 {
 			a.signal = signal
 		}
-	}
-}
-
-// getHeadingArrow returns an ASCII arrow character based on heading
-// Uses 8 cardinal/intercardinal directions with simple ASCII characters
-func getHeadingArrow(heading float64) string {
-	if heading < 0 || heading > 360 {
-		return "?" // Invalid heading
-	}
-
-	// Normalize heading to 0-360 and determine direction
-	// Each segment is 45 degrees (360/8)
-	switch {
-	case heading >= 337.5 || heading < 22.5:
-		return "^" // North
-	case heading >= 22.5 && heading < 67.5:
-		return "/" // Northeast
-	case heading >= 67.5 && heading < 112.5:
-		return ">" // East
-	case heading >= 112.5 && heading < 157.5:
-		return "\\" // Southeast
-	case heading >= 157.5 && heading < 202.5:
-		return "v" // South
-	case heading >= 202.5 && heading < 247.5:
-		return "/" // Southwest
-	case heading >= 247.5 && heading < 292.5:
-		return "<" // West
-	case heading >= 292.5 && heading < 337.5:
-		return "\\" // Northwest
-	default:
-		return "?"
 	}
 }
