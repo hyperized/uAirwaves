@@ -66,8 +66,8 @@ func (g *GPS) Watch(ctx context.Context, myLocation *location.Location) error {
 	defer g.disconnect()
 
 	// Read the Time-Position-Velocity report
-	g.session.AddFilter("TPV", func(r any) {
-		if tpvReport, ok := r.(*gpsd.TPVReport); ok {
+	g.session.AddFilter("TPV", func(t any) {
+		if tpvReport, ok := t.(*gpsd.TPVReport); ok {
 			myLocation.Update(
 				location.WithMode(int(tpvReport.Mode)),
 				location.WithLatitude(tpvReport.Lat),

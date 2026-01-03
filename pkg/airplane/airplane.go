@@ -233,9 +233,9 @@ func WithLastUpdate(t time.Time) Option {
 }
 
 // WithAltitude returns an option to update the altitude.
-func WithAltitude(altitude int64) Option {
+func WithAltitude(altitude float64) Option {
 	return func(a *Airplane) {
-		a.altitude = float64(altitude)
+		a.altitude = altitude
 	}
 }
 

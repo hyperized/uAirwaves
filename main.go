@@ -139,6 +139,8 @@ func configureErrorLine() *tview.TextView {
 	errorLine := tview.NewTextView().SetTextAlign(tview.AlignLeft).SetText("no errors")
 	errorLine.SetDynamicColors(true)
 	errorLine.SetBackgroundColor(tcell.ColorRed)
+	errorLine.SetMaxLines(1)
+	errorLine.SetWrap(false)
 
 	return errorLine
 }

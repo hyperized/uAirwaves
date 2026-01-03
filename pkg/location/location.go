@@ -10,14 +10,13 @@ const (
 	defaultLatitude  = 0.0
 	defaultLongitude = 0.0
 	defaultAltitude  = 0.0
-	defaultMode      = 0
 )
 
 // Location represents GPS coordinates, mode and altitude.
 type Location struct {
 	latitude, longitude, altitude float64
 	lastUpdated                   time.Time
-	mode                          int
+	mode                          fix
 	mu                            sync.RWMutex
 }
 
@@ -30,7 +29,7 @@ func New(opts ...Option) *Location {
 		latitude:    defaultLatitude,
 		longitude:   defaultLongitude,
 		altitude:    defaultAltitude,
-		mode:        defaultMode,
+		mode:        unknown,
 		lastUpdated: time.Now(),
 	}
 
@@ -66,7 +65,10 @@ func (l *Location) String() string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	return fmt.Sprintf("lat %.9f, lon %.9f %.4fm - mode %d", l.latitude, l.longitude, l.altitude, l.mode)
+	return fmt.Sprintf(
+		"lat %.9f, lon %.9f %.4fm %s",
+		l.latitude, l.longitude, l.altitude, fixMode[l.mode],
+	)
 }
 
 // WithLatitude sets the latitude of the location.
@@ -91,8 +93,8 @@ func WithAltitude(alt float64) Option {
 }
 
 // WithMode sets the mode of the location.
-func WithMode(mode int) Option {
+func WithMode(m int) Option {
 	return func(l *Location) {
-		l.mode = mode
+		l.mode = fix(m)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,11 +27,12 @@ const (
 )
 
 var (
-	errJSONStream      = errors.New("error reading from JSON stream")
-	errJSONParse       = errors.New("error parsing JSON")
-	errProcessAircraft = errors.New("error processing aircraft")
-	errDial            = errors.New("error dialing JSON service")
-	errNoAirplane      = errors.New("no airplane found")
+	errJSONStream              = errors.New("error reading from JSON stream")
+	errJSONParse               = errors.New("error parsing JSON")
+	errParseBarometricAltitude = errors.New("error parsing barometric altitude")
+	errProcessAircraft         = errors.New("error processing aircraft")
+	errDial                    = errors.New("error dialing JSON service")
+	errNoAirplane              = errors.New("no airplane found")
 )
 
 // JSONAircraft represents the ADSB structure from readsb.
@@ -38,7 +40,7 @@ type JSONAircraft struct {
 	Hex                    string   `json:"hex"`          // icao hex code
 	Type                   string   `json:"type"`         // Message type
 	Flight                 string   `json:"flight"`       // Callsign
-	BarometricAltitude     *int     `json:"alt_baro"`     // Barometric altitude in feet
+	BarometricAltitude     AltBaro  `json:"alt_baro"`     // Barometric altitude in feet
 	GeometricAltitude      *int     `json:"alt_geom"`     // Geometric altitude in feet
 	GS                     *float64 `json:"gs"`           // Ground speed in knots
 	TAS                    *float64 `json:"tas"`          // True airspeed in knots
@@ -74,6 +76,39 @@ type JSONAircraft struct {
 	Dst                    *float64 `json:"dst"`          // Distance to receiver (km)
 	Dir                    *float64 `json:"dir"`          // Direction to receiver (degrees)
 	Now                    *float64 `json:"now"`          // Unix timestamp
+}
+
+// AltBaro represents the barometric altitude, which can be either a number or the string "ground".
+type AltBaro float64
+
+// UnmarshalJSON implements the json.Unmarshaler interface.
+func (a *AltBaro) UnmarshalJSON(input []byte) error {
+	var str string
+	if err := json.Unmarshal(input, &str); err == nil {
+		if str == "ground" {
+			*a = 0
+
+			return nil
+		}
+		// If str is a string but not "ground", try to parse it as a float
+		f, err := strconv.ParseFloat(str, 64)
+		if err != nil {
+			return errors.Join(err, errParseBarometricAltitude)
+		}
+
+		*a = AltBaro(f)
+
+		return nil
+	}
+
+	var f float64
+	if err := json.Unmarshal(input, &f); err == nil {
+		*a = AltBaro(f)
+
+		return nil
+	}
+
+	return errJSONParse
 }
 
 // ADSB represents a connection to the ADSB service.
@@ -171,11 +206,10 @@ func processAircraft(aircraft JSONAircraft, planes *airplanes.Airplanes) error {
 	}
 
 	// Update altitude (prefer barometric)
-	switch {
-	case aircraft.BarometricAltitude != nil:
-		plane.Update(airplane.WithAltitude(int64(*aircraft.BarometricAltitude)))
-	default:
-		plane.Update(airplane.WithAltitude(int64(*aircraft.GeometricAltitude)))
+	if aircraft.BarometricAltitude != 0 {
+		plane.Update(airplane.WithAltitude(float64(aircraft.BarometricAltitude)))
+	} else if aircraft.GeometricAltitude != nil {
+		plane.Update(airplane.WithAltitude(float64(*aircraft.GeometricAltitude)))
 	}
 
 	// Update velocity (ground speed in knots)
