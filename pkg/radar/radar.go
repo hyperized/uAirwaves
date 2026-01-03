@@ -103,7 +103,7 @@ func (r *View) GetAutoScopeEnabled() bool {
 }
 
 // Draw draws the radar scope view on the screen.
-func (r *View) Draw(screen tcell.Screen) { //nolint:revive,cyclop,funlen
+func (r *View) Draw(screen tcell.Screen) { //nolint:funlen
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 

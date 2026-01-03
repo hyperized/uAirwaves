@@ -8,7 +8,13 @@ linters:
     - exhaustruct # mutexes don't require exhaustive structs
     - tagliatelle # We don't need opinions on struct tags
     - noinlineerr # We don't need opinions on error handling'
+    - wsl # legacy
+    - cyclop # Already present in revive
   settings:
+    wsl_v5:
+      allow-first-in-block: true
+      allow-whole-block: false
+      branch-max-lines: 2
     revive:
       enable-all-rules: true
       rules:
@@ -20,8 +26,18 @@ linters:
           disabled: true # it conflicts with nonamedreturns
         - name: add-constant
           disabled: true
+        - name: function-length
+          arguments:
+            - 50
+            - 100
+        - name: cognitive-complexity
+          arguments: [ 20 ]
+        - name: cyclomatic
+          arguments: [ 15 ]
     mnd:
       ignored-numbers: [ 0,1,2,3 ] # These are often used as defaults, not magic numbers
+    funlen:
+      lines: 100
 
 formatters:
   enable:

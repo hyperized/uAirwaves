@@ -87,7 +87,7 @@ func New() *ADSB {
 }
 
 // Stream grabs the ADSB messages from the JSON service and updates the airplanes list.
-func (a *ADSB) Stream(ctx context.Context, airplanes *airplanes.Airplanes) error { //nolint:cyclop,revive
+func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
 	err := a.connect(ctx)
 	if err != nil {
 		return err
@@ -106,7 +106,7 @@ func (a *ADSB) Stream(ctx context.Context, airplanes *airplanes.Airplanes) error
 	for {
 		select {
 		case <-ticker.C:
-			airplanes.Prune(pruneThreshold)
+			planes.Prune(pruneThreshold)
 		case <-ctx.Done():
 			return nil
 		default:
@@ -129,7 +129,7 @@ func (a *ADSB) Stream(ctx context.Context, airplanes *airplanes.Airplanes) error
 			}
 
 			// Process the aircraft
-			if err := processAircraft(aircraft, airplanes); err != nil {
+			if err := processAircraft(aircraft, planes); err != nil {
 				return errors.Join(err, errProcessAircraft)
 			}
 		}
@@ -154,10 +154,10 @@ func (a *ADSB) disconnect() {
 	slog.Info("Disconnecting from ADSB service", slog.Any("error", a.connection.Close()))
 }
 
-func processAircraft(aircraft JSONAircraft, airplanes *airplanes.Airplanes) error { //nolint:cyclop,revive
-	airplanes.Ensure(aircraft.Hex)
+func processAircraft(aircraft JSONAircraft, planes *airplanes.Airplanes) error {
+	planes.Ensure(aircraft.Hex)
 
-	plane, ok := airplanes.Get(aircraft.Hex)
+	plane, ok := planes.Get(aircraft.Hex)
 	if !ok {
 		return errNoAirplane
 	}
