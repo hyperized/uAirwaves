@@ -21,7 +21,7 @@ linters:
         - name: add-constant
           disabled: true
     mnd:
-      ignored-numbers: [ 0,1,2 ] # These are often used as defaults, not magic numbers
+      ignored-numbers: [ 0,1,2,3 ] # These are often used as defaults, not magic numbers
 
 formatters:
   enable:

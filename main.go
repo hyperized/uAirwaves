@@ -18,13 +18,13 @@ import (
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/radar"
 )
 
-func main() {
+func main() { //nolint:gocognit,revive,cyclop,funlen
 	var (
 		ctx, cancel   = context.WithCancel(context.Background())
 		app           = tview.NewApplication()
-		errChan       = make(chan error, 10)
+		errChan       = make(chan error, 1)
 		myLocation    = location.New()
-		wg            sync.WaitGroup
+		waitGroup     sync.WaitGroup
 		planeList     = airplanes.New()
 		batteryStatus = battery.NewStatus()
 	)
@@ -58,74 +58,84 @@ func main() {
 		AddItem(commands, 0, 1, false).
 		AddItem(gpsStatus, 0, 1, false)
 
-	grid := tview.NewGrid().SetRows(1, 0, 1).SetColumns(0, 50).SetBorders(false)
+	errorLine := tview.NewTextView().SetTextAlign(tview.AlignLeft).SetText("no errors")
+	errorLine.SetDynamicColors(true)
+	errorLine.SetBackgroundColor(tcell.ColorRed)
+
+	grid := tview.NewGrid().SetRows(1, 0, 1, 1).SetColumns(0, 50).SetBorders(false) //nolint:mnd
 
 	grid.AddItem(headerPanel, 0, 0, 1, 2, 0, 0, false)
 	grid.AddItem(radarPanel, 1, 0, 1, 1, 0, 0, false)
 	grid.AddItem(planeListPanel, 1, 1, 1, 1, 0, 0, true)
 	grid.AddItem(footer, 2, 0, 1, 2, 0, 0, false)
+	grid.AddItem(errorLine, 3, 0, 1, 2, 0, 0, false)
 
-	wg.Add(1)
+	waitGroup.Add(1)
+
 	go func() {
-		defer wg.Done()
+		defer waitGroup.Done()
 
 		if err := battery.Watch(ctx, batteryStatus); err != nil {
 			errChan <- err
 		}
 	}()
 
-	wg.Add(1)
+	waitGroup.Add(1)
+
 	go func() {
-		defer wg.Done()
+		defer waitGroup.Done()
 
 		if err := gps.New().Watch(ctx, myLocation); err != nil {
 			errChan <- err
 		}
 	}()
 
-	wg.Add(1)
+	waitGroup.Add(1)
+
 	go func() {
-		defer wg.Done()
+		defer waitGroup.Done()
 
 		if err := adsb.New().Stream(ctx, planeList); err != nil {
 			errChan <- err
 		}
-
 	}()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	waitGroup.Add(1)
 
-		ticker := time.NewTicker(500 * time.Millisecond)
+	go func() {
+		defer waitGroup.Done()
+
+		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 
 		for { // Added loop
 			select {
 			case appErr := <-errChan:
-				slog.Error("Loop caught error: ", slog.Any("error", appErr))
-				return
+				errorLine.SetText(appErr.Error())
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				app.QueueUpdateDraw(func() {
 					// Header
-					clock.SetText("Local: " + time.Now().Format(time.TimeOnly) + " UTC: " + time.Now().UTC().Format(time.TimeOnly))
+					clock.SetText("Local: " + time.Now().Format(time.TimeOnly) + " UTC: " +
+						time.Now().UTC().Format(time.TimeOnly))
 					statusBar.SetText("Battery: " + batteryStatus.String())
 
 					planeListPanel.Clear()
-					latitude, longitude := myLocation.GetCoordinates()
-					for _, p := range planeList.Sorted(latitude, longitude) {
-						plane := p.GetSnapshot()
 
-						ident := fmt.Sprintf("%s", plane.ICAO)
+					latitude, longitude := myLocation.GetCoordinates()
+
+					for _, value := range planeList.Sorted(latitude, longitude) {
+						plane := value.GetSnapshot()
+
+						ident := plane.ICAO
 						if plane.Callsign != "" {
 							ident = fmt.Sprintf("%s/%s", plane.Callsign, plane.ICAO)
 						}
 
 						sqk := ""
 						if plane.Squawk != "" {
-							sqk = fmt.Sprintf(" squawk %s", plane.Squawk)
+							sqk = " squawk " + plane.Squawk
 						}
 
 						// Format the main text with heading arrow and emergency highlighting
@@ -134,7 +144,7 @@ func main() {
 							mainText = fmt.Sprintf("[red]%s%s (!)[white]", ident, sqk)
 						}
 
-						planeListPanel.AddItem(mainText, p.String(), 0, nil)
+						planeListPanel.AddItem(mainText, value.String(), 0, nil)
 					}
 
 					// Update footer commands
@@ -156,17 +166,13 @@ func main() {
 		if event.Key() == tcell.KeyEsc {
 			app.Stop()
 		}
-		switch event.Rune() {
+
+		// Catch action keys
+		switch event.Rune() { //nolint:revive
 		case '+': // Increase scope range
-			currentRange := radarPanel.GetScopeRange()
-			if currentRange < 200 { // max 200 nautical miles
-				radarPanel.SetScopeRange(currentRange + 20)
-			}
+			radarPanel.IncrementScope()
 		case '-': // Decrease scope range
-			currentRange := radarPanel.GetScopeRange()
-			if currentRange > 20 { // min 20 nautical miles
-				radarPanel.SetScopeRange(currentRange - 20)
-			}
+			radarPanel.DecrementScope()
 		case 'a':
 			radarPanel.ToggleAutoScope()
 		case 'h': // Toggle heading indicator
@@ -174,6 +180,7 @@ func main() {
 		case 'q': // Quit
 			app.Stop()
 		}
+
 		return event
 	})
 
@@ -183,7 +190,7 @@ func main() {
 	}
 
 	cancel()
-	wg.Wait()
+	waitGroup.Wait()
 
 	slog.Info("Well, that was some experience...")
 	slog.Info("Now just let me adjust the spacial controls...")

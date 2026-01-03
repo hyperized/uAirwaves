@@ -23,6 +23,7 @@ const (
 	altitudeMultiplier     = 1000
 	circleSteps            = 8
 	circleMaxWidth         = 5
+	callsignMaxWidth       = 7
 )
 
 // View is a custom tview component.
@@ -52,6 +53,16 @@ func New(planes *airplanes.Airplanes, myLocation *location.Location) *View {
 // SetScopeRange sets the radar scope range in nautical miles.
 func (r *View) SetScopeRange(rangeNm float64) {
 	r.myScope.Update(scope.WithCurrent(rangeNm))
+}
+
+// IncrementScope increases the radar scope range by the minimum step size.
+func (r *View) IncrementScope() {
+	r.myScope.Update(scope.WithCurrent(r.myScope.GetCurrent() + r.myScope.GetMin()))
+}
+
+// DecrementScope decreases the radar scope range by the minimum step size.
+func (r *View) DecrementScope() {
+	r.myScope.Update(scope.WithCurrent(r.myScope.GetCurrent() - r.myScope.GetMin()))
 }
 
 // ToggleHeadingIndicator toggles the display of heading trails.
@@ -92,7 +103,7 @@ func (r *View) GetAutoScopeEnabled() bool {
 }
 
 // Draw draws the radar scope view on the screen.
-func (r *View) Draw(screen tcell.Screen) {
+func (r *View) Draw(screen tcell.Screen) { //nolint:revive,cyclop,funlen
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -154,12 +165,10 @@ func (r *View) Draw(screen tcell.Screen) {
 			continue
 		}
 
-		// TODO: if there's no planeList in the outer ring, shrink
-
 		// airplaneMap to screen coordinates
 		// Note: Y is inverted in screen space (up is negative)
-		px := centerX + int(nmX*xScale)
-		py := centerY - int(nmY*yScale/yMultiplier)
+		planeX := centerX + int(nmX*xScale)
+		planeY := centerY - int(nmY*yScale/yMultiplier)
 
 		// Use color-coded altitude display
 		altColor := getFlightLevelColor(plane.Altitude)
@@ -167,15 +176,15 @@ func (r *View) Draw(screen tcell.Screen) {
 		// Draw heading indicator line if heading is valid
 		if plane.Heading != -1 && r.headingIndicator {
 			headingStyle := tcell.StyleDefault.Foreground(altColor).Background(tcell.ColorBlack)
-			drawHeadingLine(screen, px, py, plane.Heading, headingStyle)
+			drawHeadingLine(screen, planeX, planeY, plane.Heading, headingStyle)
 		}
 
-		screen.SetContent(px, py, '+', nil, planeStyle)
+		screen.SetContent(planeX, planeY, '+', nil, planeStyle)
 
 		if callsign == "" {
-			tview.Print(screen, fmt.Sprintf("%s", plane.ICAO), px+1, py, 20, tview.AlignLeft, tcell.ColorYellow)
+			tview.Print(screen, plane.ICAO, planeX+1, planeY, callsignMaxWidth, tview.AlignLeft, tcell.ColorYellow)
 		} else {
-			tview.Print(screen, fmt.Sprintf("%s", plane.Callsign), px+1, py, 20, tview.AlignLeft, tcell.ColorYellow)
+			tview.Print(screen, plane.Callsign, planeX+1, planeY, callsignMaxWidth, tview.AlignLeft, tcell.ColorYellow)
 		}
 
 		// Display altitude with a vertical rate symbol
@@ -184,8 +193,8 @@ func (r *View) Draw(screen tcell.Screen) {
 
 		// Print altitude in altitude color, then vertical rate symbol in vert rate color
 		altText := altitudeToFL(plane.Altitude) + " "
-		tview.Print(screen, altText, px+1, py+1, len(altText), tview.AlignLeft, altColor)
-		tview.Print(screen, vertSymbol, px+1+len(altText), py+1, 1, tview.AlignLeft, vertColor)
+		tview.Print(screen, altText, planeX+1, planeY+1, len(altText), tview.AlignLeft, altColor)
+		tview.Print(screen, vertSymbol, planeX+1+len(altText), planeY+1, 1, tview.AlignLeft, vertColor)
 	}
 
 	// Set title
@@ -199,6 +208,7 @@ func (r *View) Draw(screen tcell.Screen) {
 func (r *View) drawScopeRings(screen tcell.Screen, centerX, centerY int, xScale, yScale float64) {
 	ringStyle := tcell.StyleDefault.Foreground(tcell.ColorGreen).Background(tcell.ColorBlack)
 	increments := r.myScope.GetCurrent() / r.myScope.GetSteps()
+
 	for ring := increments; ring <= r.myScope.GetCurrent(); ring += increments {
 		drawCircle(screen, centerX, centerY, int(ring*xScale), int(ring*yScale/2), ringStyle)
 		tview.Print(screen,
@@ -212,7 +222,7 @@ func (r *View) drawScopeRings(screen tcell.Screen, centerX, centerY int, xScale,
 	}
 }
 
-func drawHeadingLine(screen tcell.Screen, x, y int, heading float64, style tcell.Style) {
+func drawHeadingLine(screen tcell.Screen, x, y int, heading float64, style tcell.Style) { //nolint:varnamelen
 	const lineRounding = 0.5
 
 	// Convert heading to radians
@@ -224,17 +234,17 @@ func drawHeadingLine(screen tcell.Screen, x, y int, heading float64, style tcell
 	// Calculate direction vector
 	// sin(heading) gives us X component (East/West)
 	// -cos(heading) gives us Y component (North is up, so negative)
-	dx := math.Sin(radians)
-	dy := -math.Cos(radians) * lineRounding // to compensate for the terminal character aspect ratio
+	directionX := math.Sin(radians)
+	directionY := -math.Cos(radians) * lineRounding // to compensate for the terminal character aspect ratio
 
 	// Draw a dotted line using a Bresenham-like approach
-	for i := 1; i <= headingLineLength; i++ {
-		// Calculate position along the line
-		px := x + int(float64(i)*dx+lineRounding) // +0.5 for rounding
-		py := y + int(float64(i)*dy+lineRounding)
+	for dot := 1; dot <= headingLineLength; dot++ {
+		// Calculate position along the dot
+		px := x + int(float64(dot)*directionX+lineRounding) // +0.5 for rounding
+		py := y + int(float64(dot)*directionY+lineRounding)
 
-		// Draw dot every other step for dotted appearance
-		if i%2 == 1 {
+		// Draw dot every other step for a dotted appearance
+		if dot%2 == 1 {
 			screen.SetContent(px, py, '·', nil, style)
 		}
 	}
