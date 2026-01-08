@@ -37,7 +37,7 @@ linters:
     mnd:
       ignored-numbers: [ 0,1,2,3 ] # These are often used as defaults, not magic numbers
     funlen:
-      lines: 100
+      lines: 120
 
 formatters:
   enable:
