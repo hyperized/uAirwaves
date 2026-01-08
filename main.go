@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -18,101 +19,37 @@ import (
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/radar"
 )
 
+var (
+	errBatteryRecover = errors.New("recovered in battery goroutine")
+	errGPSRecover     = errors.New("recovered in gps goroutine")
+	errASDBRecover    = errors.New("recovered in asdb goroutine")
+)
+
+const uiUpdateInterval = 1 * time.Second
+
 func main() {
-	var (
-		ctx, cancel    = context.WithCancel(context.Background())
-		app            = tview.NewApplication()
-		errChan        = make(chan error, 1)
-		myLocation     = location.New()
-		waitGroup      sync.WaitGroup
-		planeList      = airplanes.New()
-		batteryStatus  = battery.NewStatus()
-		clock          = configureClock()
-		statusBar      = configureStatusbar()
-		headerPanel    = configureHeader(clock, statusBar)
-		radarPanel     = radar.New(planeList, myLocation)
-		planeListPanel = configurePlaneList()
-		commands       = configureCommands()
-		gpsStatus      = configureGpsStatus()
-		footer         = configureFooter(commands, gpsStatus)
-		errorLine      = configureErrorLine()
-		grid           = configureGrid(headerPanel, radarPanel, planeListPanel, footer, errorLine)
-	)
+	uic := configureUI()
+	radarPanel := radar.New(uic.planeList, uic.myLocation)
+	uic.radarPanel = radarPanel
 
-	waitGroup.Add(1)
+	grid := configureGrid(uic)
 
-	go func() {
-		defer waitGroup.Done()
-
-		if err := battery.Watch(ctx, batteryStatus); err != nil {
-			errChan <- err
-		}
-	}()
-
-	waitGroup.Add(1)
-
-	go func() {
-		defer waitGroup.Done()
-
-		if err := gps.New().Watch(ctx, myLocation); err != nil {
-			errChan <- err
-		}
-	}()
-
-	waitGroup.Add(1)
-
-	go func() {
-		defer waitGroup.Done()
-
-		if err := adsb.New().Stream(ctx, planeList); err != nil {
-			errChan <- err
-		}
-	}()
-
-	waitGroup.Add(1)
-
-	go func() {
-		defer waitGroup.Done()
-
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-
-		for { // Added loop
-			select {
-			case appErr := <-errChan:
-				errorLine.SetText(appErr.Error())
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				app.QueueUpdateDraw(func() {
-					// Header
-					clock.SetText("Local: " + time.Now().Format(time.TimeOnly) + " UTC: " +
-						time.Now().UTC().Format(time.TimeOnly))
-					statusBar.SetText("Battery: " + batteryStatus.String())
-
-					updatePlaneList(planeListPanel, myLocation, planeList)
-
-					// Update footer commands
-					updateFooter(commands, radarPanel)
-
-					gpsStatus.SetText("GPS: " + myLocation.String())
-				})
-			}
-		}
-	}()
+	startBatteryWatcher(uic)
+	startGPSWatcher(uic)
+	startADSBStreamer(uic)
+	startUIUpdater(uic)
 
 	// Input capture for global shortcuts
-	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		return handleKeyInput(event, app, radarPanel)
+	uic.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		return handleKeyInput(event, uic.app, uic.radarPanel)
 	})
 
-	err := app.SetRoot(grid, true).EnableMouse(true).Run()
-	if err != nil {
+	if err := uic.app.SetRoot(grid, true).EnableMouse(true).Run(); err != nil {
 		slog.Error("tview error", slog.Any("error", err))
 	}
 
-	cancel()
-	waitGroup.Wait()
+	uic.cancel()
+	uic.waitGroup.Wait()
 
 	slog.Info("Well, that was some experience...")
 	slog.Info("Now just let me adjust the spacial controls...")
@@ -121,17 +58,161 @@ func main() {
 	os.Exit(0)
 }
 
-// configureGrid configures the main grid layout.
-func configureGrid(headerPanel *tview.Flex, radarPanel *radar.View, planeListPanel *tview.List, footer *tview.Flex,
-	errorLine *tview.TextView) *tview.Grid {
+type uiComponents struct {
+	ctx            context.Context //nolint:containedctx
+	cancel         context.CancelFunc
+	app            *tview.Application
+	errChan        chan error
+	myLocation     *location.Location
+	waitGroup      *sync.WaitGroup
+	planeList      *airplanes.Airplanes
+	batteryStatus  *battery.Status
+	clock          *tview.TextView
+	statusBar      *tview.TextView
+	headerPanel    *tview.Flex
+	radarPanel     *radar.View
+	planeListPanel *tview.List
+	commands       *tview.TextView
+	gpsStatus      *tview.TextView
+	footer         *tview.Flex
+	errorLine      *tview.TextView
+}
+
+func configureUI() *uiComponents {
+	ctx, cancel := context.WithCancel(context.Background())
+	planeList := airplanes.New()
+	myLocation := location.New()
+	clock := configureClock()
+	statusBar := configureStatusbar()
+	commands := configureCommands()
+	gpsStatus := configureGpsStatus()
+
+	return &uiComponents{
+		ctx:            ctx,
+		cancel:         cancel,
+		app:            tview.NewApplication(),
+		errChan:        make(chan error, 1),
+		myLocation:     myLocation,
+		waitGroup:      &sync.WaitGroup{},
+		planeList:      planeList,
+		batteryStatus:  battery.NewStatus(),
+		clock:          clock,
+		statusBar:      statusBar,
+		headerPanel:    configureHeader(clock, statusBar),
+		planeListPanel: configurePlaneList(),
+		commands:       commands,
+		gpsStatus:      gpsStatus,
+		footer:         configureFooter(commands, gpsStatus),
+		errorLine:      configureErrorLine(),
+	}
+}
+
+func configureGrid(components *uiComponents) *tview.Grid {
 	grid := tview.NewGrid().SetRows(1, 0, 1, 1).SetColumns(0, 50).SetBorders(false) //nolint:mnd
-	grid.AddItem(headerPanel, 0, 0, 1, 2, 0, 0, false)
-	grid.AddItem(radarPanel, 1, 0, 1, 1, 0, 0, false)
-	grid.AddItem(planeListPanel, 1, 1, 1, 1, 0, 0, true)
-	grid.AddItem(footer, 2, 0, 1, 2, 0, 0, false)
-	grid.AddItem(errorLine, 3, 0, 1, 2, 0, 0, false)
+	grid.AddItem(components.headerPanel, 0, 0, 1, 2, 0, 0, false)
+	grid.AddItem(components.radarPanel, 1, 0, 1, 1, 0, 0, false)
+	grid.AddItem(components.planeListPanel, 1, 1, 1, 1, 0, 0, true)
+	grid.AddItem(components.footer, 2, 0, 1, 2, 0, 0, false)
+	grid.AddItem(components.errorLine, 3, 0, 1, 2, 0, 0, false)
 
 	return grid
+}
+
+func startBatteryWatcher(components *uiComponents) {
+	components.waitGroup.Add(1)
+
+	go func() {
+		defer components.waitGroup.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				if err, ok := r.(error); ok {
+					components.errChan <- errors.Join(err, errBatteryRecover)
+				}
+			}
+		}()
+
+		if err := battery.Watch(components.ctx, components.batteryStatus); err != nil {
+			components.errChan <- err
+		}
+	}()
+}
+
+func startGPSWatcher(components *uiComponents) {
+	components.waitGroup.Add(1)
+
+	go func() {
+		defer components.waitGroup.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				if err, ok := r.(error); ok {
+					components.errChan <- errors.Join(err, errGPSRecover)
+				}
+			}
+		}()
+
+		if err := gps.New().Watch(components.ctx, components.myLocation); err != nil {
+			components.errChan <- err
+		}
+	}()
+}
+
+func startADSBStreamer(components *uiComponents) {
+	components.waitGroup.Add(1)
+
+	go func() {
+		defer components.waitGroup.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				if err, ok := r.(error); ok {
+					components.errChan <- errors.Join(err, errASDBRecover)
+				}
+			}
+		}()
+
+		if err := adsb.New().Stream(components.ctx, components.planeList); err != nil {
+			components.errChan <- err
+		}
+	}()
+}
+
+func startUIUpdater(components *uiComponents) {
+	components.waitGroup.Add(1)
+
+	go func() {
+		defer components.waitGroup.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				components.cancel()
+				components.app.Stop()
+				slog.Error("Recovered in main goroutine:", slog.Any("error", r))
+			}
+		}()
+
+		ticker := time.NewTicker(uiUpdateInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case appErr := <-components.errChan:
+				components.cancel()
+				components.app.Stop()
+				slog.Error("Caught error in errChan:", slog.Any("error", appErr))
+
+				return
+			case <-components.ctx.Done():
+				return
+			case <-ticker.C:
+				components.app.QueueUpdateDraw(func() {
+					components.clock.SetText("Local: " + time.Now().Format(time.TimeOnly) + " UTC: " +
+						time.Now().UTC().Format(time.TimeOnly))
+					components.statusBar.SetText("Battery: " + components.batteryStatus.String())
+					updatePlaneList(components.planeListPanel, components.myLocation, components.planeList)
+					updateFooter(components.commands, components.radarPanel)
+					components.gpsStatus.SetText("GPS: " + components.myLocation.String())
+				})
+			}
+		}
+	}()
 }
 
 // configureErrorLine configures the error line text view.

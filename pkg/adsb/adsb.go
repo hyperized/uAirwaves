@@ -19,11 +19,12 @@ const (
 	empty              = ""
 	jsonServiceNetwork = "tcp"
 	jsonServiceAddress = "127.0.0.1:30047"
-	pruneThreshold     = 1 * time.Minute
-	pruneFrequency     = 10 * time.Second
 	buffer             = 64 * 1024
 	minBufferSize      = 0
 	maxBufferSize      = 1024 * 1024 // the maximum size of the buffer that may be allocated during scanning.
+
+	defaultPruneThreshold = 1 * time.Minute
+	defaultPruneFrequency = 5 * time.Second
 )
 
 var (
@@ -113,12 +114,49 @@ func (a *AltBaro) UnmarshalJSON(input []byte) error {
 
 // ADSB represents a connection to the ADSB service.
 type ADSB struct {
-	connection net.Conn
+	connection     net.Conn
+	address        string
+	pruneFrequency time.Duration
+	pruneThreshold time.Duration
 }
 
+// Option is a function that modifies an ADSB instance.
+type Option func(*ADSB)
+
 // New initializes a new ADSB connection.
-func New() *ADSB {
-	return &ADSB{}
+func New(opts ...Option) *ADSB {
+	adsb := &ADSB{
+		address:        jsonServiceAddress,
+		pruneFrequency: defaultPruneFrequency,
+		pruneThreshold: defaultPruneThreshold,
+	}
+
+	for _, opt := range opts {
+		opt(adsb)
+	}
+
+	return adsb
+}
+
+// WithAddress sets the address for the ADSB connection.
+func WithAddress(address string) Option {
+	return func(a *ADSB) {
+		a.address = address
+	}
+}
+
+// WithPruneFrequency sets the frequency at which the airplanes list is pruned.
+func WithPruneFrequency(frequency time.Duration) Option {
+	return func(a *ADSB) {
+		a.pruneFrequency = frequency
+	}
+}
+
+// WithPruneThreshold sets the threshold for pruning old airplanes.
+func WithPruneThreshold(threshold time.Duration) Option {
+	return func(a *ADSB) {
+		a.pruneThreshold = threshold
+	}
 }
 
 // Stream grabs the ADSB messages from the JSON service and updates the airplanes list.
@@ -129,7 +167,7 @@ func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
 	}
 	defer a.disconnect()
 
-	ticker := time.NewTicker(pruneFrequency)
+	ticker := time.NewTicker(a.pruneFrequency)
 	defer ticker.Stop()
 
 	scanner := bufio.NewScanner(a.connection)
@@ -139,34 +177,35 @@ func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
 	scanner.Buffer(buf, maxBufferSize)
 
 	for {
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				return errors.Join(err, errJSONStream)
+			}
+
+			return nil
+		}
+
 		select {
 		case <-ticker.C:
-			planes.Prune(pruneThreshold)
+			planes.Prune(a.pruneThreshold)
 		case <-ctx.Done():
 			return nil
 		default:
-			if !scanner.Scan() {
-				if err := scanner.Err(); err != nil {
-					return errors.Join(err, errJSONStream)
-				}
+		}
 
-				return nil
-			}
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
 
-			line := scanner.Text()
-			if line == "" {
-				continue
-			}
+		var aircraft JSONAircraft
+		if err := json.Unmarshal([]byte(line), &aircraft); err != nil {
+			return errors.Join(err, errJSONParse)
+		}
 
-			var aircraft JSONAircraft
-			if err := json.Unmarshal([]byte(line), &aircraft); err != nil {
-				return errors.Join(err, errJSONParse)
-			}
-
-			// Process the aircraft
-			if err := processAircraft(aircraft, planes); err != nil {
-				return errors.Join(err, errProcessAircraft)
-			}
+		// Process the aircraft
+		if err := updatePlaneData(aircraft, planes); err != nil {
+			return errors.Join(err, errProcessAircraft)
 		}
 	}
 }
@@ -177,7 +216,7 @@ func (a *ADSB) connect(ctx context.Context) error {
 
 	dialer := &net.Dialer{}
 
-	a.connection, err = dialer.DialContext(ctx, jsonServiceNetwork, jsonServiceAddress)
+	a.connection, err = dialer.DialContext(ctx, jsonServiceNetwork, a.address)
 	if err != nil {
 		return errors.Join(err, errDial)
 	}
@@ -189,13 +228,38 @@ func (a *ADSB) disconnect() {
 	slog.Info("Disconnecting from ADSB service", slog.Any("error", a.connection.Close()))
 }
 
-func processAircraft(aircraft JSONAircraft, planes *airplanes.Airplanes) error {
-	planes.Ensure(aircraft.Hex)
+// MaxBufferSize returns the maximum buffer size allowed for scanning.
+func MaxBufferSize() int {
+	return maxBufferSize
+}
 
-	plane, ok := planes.Get(aircraft.Hex)
-	if !ok {
+// ErrJSONStream returns the error for JSON stream reading.
+func ErrJSONStream() error {
+	return errJSONStream
+}
+
+// ErrJSONParse returns the error for JSON parsing.
+func ErrJSONParse() error {
+	return errJSONParse
+}
+
+// ErrProcessAircraft returns the error for aircraft processing.
+func ErrProcessAircraft() error {
+	return errProcessAircraft
+}
+
+// ProcessAircraft updates the airplane list with the given JSON data.
+func ProcessAircraft(aircraft JSONAircraft, planes *airplanes.Airplanes) error {
+	return updatePlaneData(aircraft, planes)
+}
+
+func updatePlaneData(aircraft JSONAircraft, planes *airplanes.Airplanes) error {
+	if planes == nil {
 		return errNoAirplane
 	}
+
+	planes.Ensure(aircraft.Hex)
+	plane, _ := planes.Get(aircraft.Hex)
 
 	// Update timestamp
 	plane.Update(airplane.WithLastUpdate(time.Now().UTC()))
@@ -218,12 +282,12 @@ func processAircraft(aircraft JSONAircraft, planes *airplanes.Airplanes) error {
 	}
 
 	// Update heading (prefer true heading, fall back to track)
-	switch {
+	switch { //nolint:revive
 	case aircraft.TrueHeading != nil:
 		plane.Update(airplane.WithHeading(*aircraft.TrueHeading))
 	case aircraft.MagHeading != nil:
 		plane.Update(airplane.WithHeading(*aircraft.MagHeading))
-	default:
+	case aircraft.Track != nil:
 		plane.Update(airplane.WithHeading(*aircraft.Track))
 	}
 

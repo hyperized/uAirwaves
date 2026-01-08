@@ -1,0 +1,184 @@
+package airplanes_test
+
+import (
+	"sync"
+	"testing"
+	"time"
+
+	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
+	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
+)
+
+func TestNew(t *testing.T) {
+	t.Parallel()
+
+	list := airplanes.New()
+	if list == nil {
+		t.Fatal("expected New() to return a non-nil instance")
+	}
+
+	if list.Count() != 0 {
+		t.Errorf("expected empty airplanes list, got %d", list.Count())
+	}
+}
+
+func TestEnsureAndGet(t *testing.T) {
+	t.Parallel()
+
+	list := airplanes.New()
+	icao := "ABCDEF"
+
+	list.Ensure(icao)
+
+	if list.Count() != 1 {
+		t.Errorf("expected 1 plane, got %d", list.Count())
+	}
+
+	plane, found := list.Get(icao)
+	if !found {
+		t.Error("expected to find plane")
+	}
+
+	if plane.GetSnapshot().ICAO != icao {
+		t.Errorf("expected ICAO %s, got %s", icao, plane.GetSnapshot().ICAO)
+	}
+
+	// Ensure again shouldn't add a new one
+	list.Ensure(icao)
+
+	if list.Count() != 1 {
+		t.Errorf("expected still 1 plane after re-ensuring, got %d", list.Count())
+	}
+
+	_, found = list.Get("NONEXISTENT")
+	if found {
+		t.Error("expected not to find nonexistent plane")
+	}
+}
+
+func TestPrune(t *testing.T) {
+	t.Parallel()
+
+	list := airplanes.New()
+	icaoOld := "OLD"
+	icaoNew := "NEW"
+
+	list.Ensure(icaoOld)
+	list.Ensure(icaoNew)
+
+	planeOld, _ := list.Get(icaoOld)
+	planeOld.Update(airplane.WithLastUpdate(time.Now().Add(-2 * time.Hour)))
+
+	list.Prune(1 * time.Hour)
+
+	if list.Count() != 1 {
+		t.Errorf("expected 1 plane after pruning, got %d", list.Count())
+	}
+
+	if _, found := list.Get(icaoNew); !found {
+		t.Error("expected NEW plane to remain")
+	}
+
+	if _, found := list.Get(icaoOld); found {
+		t.Error("expected OLD plane to be pruned")
+	}
+}
+
+func TestSorted(t *testing.T) {
+	t.Parallel()
+
+	list := airplanes.New()
+	receiverLat, receiverLon := 52.0, 13.0
+
+	// p1: Closer
+	list.Ensure("P1")
+	plane1, _ := list.Get("P1")
+	plane1.Update(airplane.WithLatitude(52.1), airplane.WithLongitude(13.1))
+
+	// p2: Farther
+	list.Ensure("P2")
+	plane2, _ := list.Get("P2")
+	plane2.Update(airplane.WithLatitude(53.0), airplane.WithLongitude(14.0))
+
+	// p3: Same distance as plane1, but older update
+	list.Ensure("P3")
+	plane3, _ := list.Get("P3")
+	plane3.Update(airplane.WithLatitude(52.1), airplane.WithLongitude(13.1))
+	plane3.Update(airplane.WithLastUpdate(time.Now().Add(-10 * time.Minute)))
+
+	// p4: Unknown position (0,0) - should be last
+	list.Ensure("P4")
+	plane4, _ := list.Get("P4")
+	plane4.Update(airplane.WithLatitude(0), airplane.WithLongitude(0))
+
+	// p5: Same distance and same update time as plane1, but higher ICAO
+	list.Ensure("P5")
+	plane5, _ := list.Get("P5")
+	plane5.Update(airplane.WithLatitude(52.1), airplane.WithLongitude(13.1))
+
+	now := time.Now()
+	plane1.Update(airplane.WithLastUpdate(now))
+	plane5.Update(airplane.WithLastUpdate(now))
+
+	sorted := list.Sorted(receiverLat, receiverLon)
+
+	if len(sorted) != 5 {
+		t.Fatalf("expected 5 planes, got %d", len(sorted))
+	}
+
+	if sorted[0].GetSnapshot().ICAO != "P1" {
+		t.Errorf("expected 1st plane to be P1, got %s", sorted[0].GetSnapshot().ICAO)
+	}
+
+	if sorted[1].GetSnapshot().ICAO != "P5" {
+		t.Errorf("expected 2nd plane to be P5, got %s", sorted[1].GetSnapshot().ICAO)
+	}
+
+	if sorted[2].GetSnapshot().ICAO != "P3" {
+		t.Errorf("expected 3rd plane to be P3, got %s", sorted[2].GetSnapshot().ICAO)
+	}
+
+	if sorted[3].GetSnapshot().ICAO != "P2" {
+		t.Errorf("expected 4th plane to be P2, got %s", sorted[3].GetSnapshot().ICAO)
+	}
+
+	if sorted[4].GetSnapshot().ICAO != "P4" {
+		t.Errorf("expected 5th plane to be P4, got %s", sorted[4].GetSnapshot().ICAO)
+	}
+}
+
+func TestHaversineDistance_EdgeCases(t *testing.T) {
+	t.Parallel()
+
+	list := airplanes.New()
+	list.Ensure("ORIGIN")
+	plane, _ := list.Get("ORIGIN")
+	plane.Update(airplane.WithLatitude(0), airplane.WithLongitude(0))
+
+	_ = list.Sorted(0, 0)
+}
+
+func TestConcurrency(t *testing.T) {
+	t.Parallel()
+
+	list := airplanes.New()
+
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(2)
+
+	worker := func() {
+		defer waitGroup.Done()
+
+		for range 1000 {
+			list.Ensure("BUSY")
+			list.Get("BUSY")
+			list.Count()
+			list.Sorted(52, 13)
+			list.Prune(1 * time.Hour)
+		}
+	}
+	go worker()
+	go worker()
+
+	waitGroup.Wait()
+}

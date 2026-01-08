@@ -1,0 +1,40 @@
+image: golang:1.24
+
+stages:
+  - format
+  - lint
+  - test
+
+variables:
+  GOPATH: $CI_PROJECT_DIR/.go
+  GOLANGCI_LINT_VERSION: v1.64.5
+
+cache:
+  paths:
+    - .go/pkg/mod
+
+format:
+  stage: format
+  tags:
+    - docker
+    - k8s
+  script:
+    - go fmt ./...
+    - git diff --exit-code
+
+lint:
+  stage: lint
+  tags:
+    - docker
+    - k8s
+  image: golangci/golangci-lint:$GOLANGCI_LINT_VERSION
+  script:
+    - golangci-lint run ./...
+
+test:
+  stage: test
+  tags:
+    - docker
+    - k8s
+  script:
+    - go test -v -race -cover ./...

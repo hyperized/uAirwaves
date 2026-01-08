@@ -15,6 +15,14 @@ type Status struct {
 // StatusOption is a function that modifies a Status.
 type StatusOption func(*Status)
 
+// WithPercentage sets the percentage of the battery.
+func WithPercentage(percentage int8) StatusOption {
+	return func(s *Status) { s.percentage = percentage }
+}
+
+// WithCharging sets whether the battery is charging.
+func WithCharging(charging bool) StatusOption { return func(s *Status) { s.charging = charging } }
+
 // NewStatus initializes a new Status.
 func NewStatus(opts ...StatusOption) *Status {
 	status := &Status{
@@ -52,16 +60,18 @@ func (s *Status) Update(opts ...StatusOption) {
 	}
 }
 
-// WithPercentage sets the percentage of the battery.
-func WithPercentage(percentage int8) StatusOption {
-	return func(s *Status) {
-		s.percentage = percentage
-	}
+// GetPercentage returns the current battery percentage.
+func (s *Status) GetPercentage() int8 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.percentage
 }
 
-// WithCharging sets whether the battery is charging.
-func WithCharging(charging bool) StatusOption {
-	return func(s *Status) {
-		s.charging = charging
-	}
+// IsCharging returns whether the battery is currently charging.
+func (s *Status) IsCharging() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.charging
 }

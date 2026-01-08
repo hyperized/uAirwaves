@@ -6,19 +6,27 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
 
-const filePath = "/sys/class/power_supply/axp20x-battery/uevent"
-const interval = 1 * time.Second
+const (
+	defaultFilePath = "/sys/class/power_supply/axp20x-battery/uevent"
+	defaultInterval = 30 * time.Second
+)
 
 var errFileOpen = errors.New("failed to open battery uevent file")
 var errScanner = errors.New("failed to scan battery uevent file")
 
-// Watch updates the battery status every second.
+// Watch updates the battery status periodically.
 func Watch(ctx context.Context, status *Status) error {
+	return WatchWithInterval(ctx, status, defaultInterval, defaultFilePath)
+}
+
+// WatchWithInterval updates the battery status with a custom interval and file path.
+func WatchWithInterval(ctx context.Context, status *Status, interval time.Duration, filePath string) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -27,7 +35,7 @@ func Watch(ctx context.Context, status *Status) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := update(status); err != nil {
+			if err := update(status, filePath); err != nil {
 				return fmt.Errorf("battery update failed: %w", err)
 			}
 		}
@@ -35,13 +43,13 @@ func Watch(ctx context.Context, status *Status) error {
 }
 
 // update reads the battery uevent file and updates the battery status.
-func update(status *Status) error {
+func update(status *Status, filePath string) error {
 	var (
 		err         error
 		fileHandler *os.File
 	)
 
-	fileHandler, err = os.Open(filePath)
+	fileHandler, err = os.Open(filepath.Clean(filePath))
 	if err != nil {
 		return errors.Join(err, errFileOpen)
 	}
