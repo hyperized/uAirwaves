@@ -90,7 +90,6 @@ func TestAltBaro_UnmarshalJSON(t *testing.T) {
 func TestProcessAircraft(t *testing.T) {
 	t.Parallel()
 
-	planes := airplanes.New()
 	hex := "ABCDEF"
 
 	// Helper to float64 pointer
@@ -101,6 +100,8 @@ func TestProcessAircraft(t *testing.T) {
 	for _, testCase := range getProcessAircraftTestCases(hex, f64Ptr, intPtr) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
+
+			planes := airplanes.New()
 
 			err := adsb.ProcessAircraft(testCase.aircraft, planes)
 			if err != nil {
@@ -403,9 +404,14 @@ func testStreamPruneCoverage(t *testing.T) {
 			_ = listener.Close()
 		}()
 
+		// Channel to signal when scanning should start
+		startScan := make(chan struct{})
+
 		go func() {
 			conn, _ := listener.Accept()
 			if conn != nil {
+				<-startScan
+
 				for range 50 {
 					_, _ = conn.Write([]byte("{}\n"))
 
@@ -426,9 +432,46 @@ func testStreamPruneCoverage(t *testing.T) {
 		go func() {
 			time.Sleep(80 * time.Millisecond)
 			cancel()
+			close(startScan) // Unblock scan goroutine if it was blocked on lines <- ...
 		}()
 
 		_ = adsbInstance.Stream(ctx, airplanes.New())
+	})
+
+	t.Run("scan context cancellation", func(t *testing.T) {
+		t.Parallel()
+
+		var listenConfig net.ListenConfig
+
+		listener, _ := listenConfig.Listen(t.Context(), "tcp", "127.0.0.1:0")
+
+		defer func() {
+			_ = listener.Close()
+		}()
+
+		go func() {
+			conn, _ := listener.Accept()
+			if conn != nil {
+				// Send a line so scanner.Scan() returns true
+				_, _ = conn.Write([]byte("{}\n"))
+
+				// Keep connection open but don't send more yet
+				time.Sleep(100 * time.Millisecond)
+
+				_ = conn.Close()
+			}
+		}()
+
+		adsbInstance := adsb.New(adsb.WithAddress(listener.Addr().String()))
+		ctx, cancel := context.WithCancel(t.Context())
+
+		go func() {
+			_ = adsbInstance.Stream(ctx, airplanes.New())
+		}()
+
+		// Wait for one line to be received (or not)
+		time.Sleep(20 * time.Millisecond)
+		cancel()
 	})
 }
 

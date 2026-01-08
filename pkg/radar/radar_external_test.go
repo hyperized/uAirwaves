@@ -123,23 +123,31 @@ func TestView_Draw(t *testing.T) {
 func TestView_Draw_EdgeCases(t *testing.T) {
 	t.Parallel()
 
-	planes := airplanes.New()
 	loc := location.New(location.WithLatitude(52.0), location.WithLongitude(13.0))
-	view := radar.New(planes, loc)
 
 	screen := tcell.NewSimulationScreen("")
 	if err := screen.Init(); err != nil {
 		t.Fatal(err)
 	}
 
-	view.SetRect(0, 0, 80, 24)
+	testPlaneOutsideScopeIncreasesRange(t, loc, screen)
+	testAutoScopeDisabled(t, loc, screen)
+	testNoPlanesResetsScope(t, loc, screen)
+	testPlaneWithoutLocationSkipped(t, loc, screen)
+	testPlaneWithCallsign(t, loc, screen)
+}
 
+func testPlaneOutsideScopeIncreasesRange(t *testing.T, loc *location.Location, screen tcell.Screen) {
+	t.Helper()
 	t.Run("plane outside scope increases range", func(t *testing.T) {
 		t.Parallel()
 
+		planes := airplanes.New()
+		view := radar.New(planes, loc)
+		view.SetRect(0, 0, 80, 24)
+
 		planes.Ensure("OUTSIDE")
 		plane, _ := planes.Get("OUTSIDE")
-		// Roughly 50nm away, while default scope is 20
 		plane.Update(
 			airplane.WithLatitude(53.0),
 			airplane.WithLongitude(13.0),
@@ -152,9 +160,16 @@ func TestView_Draw_EdgeCases(t *testing.T) {
 			t.Errorf("expected autoScope to increase range, stayed at %f", view.GetScopeRange())
 		}
 	})
+}
 
+func testAutoScopeDisabled(t *testing.T, loc *location.Location, screen tcell.Screen) {
+	t.Helper()
 	t.Run("autoScope disabled does not increase range", func(t *testing.T) {
 		t.Parallel()
+
+		planes := airplanes.New()
+		view := radar.New(planes, loc)
+		view.SetRect(0, 0, 80, 24)
 
 		view.ToggleAutoScope() // Disable autoScope
 		planes.Ensure("FAR")
@@ -170,10 +185,11 @@ func TestView_Draw_EdgeCases(t *testing.T) {
 		if view.GetScopeRange() != initialRange {
 			t.Errorf("expected range to stay %f, got %f", initialRange, view.GetScopeRange())
 		}
-
-		view.ToggleAutoScope() // Re-enable for other tests
 	})
+}
 
+func testNoPlanesResetsScope(t *testing.T, loc *location.Location, screen tcell.Screen) {
+	t.Helper()
 	t.Run("no planes resets scope", func(t *testing.T) {
 		t.Parallel()
 
@@ -197,9 +213,16 @@ func TestView_Draw_EdgeCases(t *testing.T) {
 			t.Errorf("expected range to stay at 100 with autoScope disabled, got %f", newView.GetScopeRange())
 		}
 	})
+}
 
+func testPlaneWithoutLocationSkipped(t *testing.T, loc *location.Location, screen tcell.Screen) {
+	t.Helper()
 	t.Run("plane without location skipped", func(t *testing.T) {
 		t.Parallel()
+
+		planes := airplanes.New()
+		view := radar.New(planes, loc)
+		view.SetRect(0, 0, 80, 24)
 
 		planes.Ensure("NOLOC")
 		plane, _ := planes.Get("NOLOC")
@@ -208,7 +231,10 @@ func TestView_Draw_EdgeCases(t *testing.T) {
 		// Should not panic or error
 		view.Draw(screen)
 	})
+}
 
+func testPlaneWithCallsign(t *testing.T, loc *location.Location, screen tcell.Screen) {
+	t.Helper()
 	t.Run("plane with callsign", func(t *testing.T) {
 		t.Parallel()
 

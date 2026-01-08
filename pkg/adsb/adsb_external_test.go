@@ -89,7 +89,9 @@ func TestADSB_Stream_Errors(t *testing.T) {
 	t.Run("New", func(t *testing.T) {
 		t.Parallel()
 
-		adsbInstance := adsb.New()
+		adsbInstance := adsb.New(
+			adsb.WithPruneThreshold(time.Minute),
+		)
 		if adsbInstance == nil {
 			t.Fatal("expected ADSB instance")
 		}

@@ -170,44 +170,73 @@ func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
 	ticker := time.NewTicker(a.pruneFrequency)
 	defer ticker.Stop()
 
-	scanner := bufio.NewScanner(a.connection)
+	lines := make(chan string)
+	errs := make(chan error, 1)
 
-	// Set a larger buffer size for potentially large JSON messages
-	buf := make([]byte, minBufferSize, buffer)
-	scanner.Buffer(buf, maxBufferSize)
+	go a.scan(ctx, lines, errs)
 
 	for {
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
-				return errors.Join(err, errJSONStream)
+		select {
+		case line, ok := <-lines:
+			if !ok {
+				return a.handleScanEnd(errs)
 			}
 
-			return nil
-		}
-
-		select {
+			if err := a.handleLine(line, planes); err != nil {
+				return err
+			}
 		case <-ticker.C:
 			planes.Prune(a.pruneThreshold)
 		case <-ctx.Done():
 			return nil
-		default:
-		}
-
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		var aircraft JSONAircraft
-		if err := json.Unmarshal([]byte(line), &aircraft); err != nil {
-			return errors.Join(err, errJSONParse)
-		}
-
-		// Process the aircraft
-		if err := updatePlaneData(aircraft, planes); err != nil {
-			return errors.Join(err, errProcessAircraft)
 		}
 	}
+}
+
+func (a *ADSB) scan(ctx context.Context, lines chan<- string, errs chan<- error) {
+	scanner := bufio.NewScanner(a.connection)
+	buf := make([]byte, minBufferSize, buffer)
+	scanner.Buffer(buf, maxBufferSize)
+
+	for scanner.Scan() {
+		select {
+		case lines <- scanner.Text():
+		case <-ctx.Done():
+			return
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		errs <- errors.Join(err, errJSONStream)
+	}
+
+	close(lines)
+}
+
+func (a *ADSB) handleScanEnd(errs <-chan error) error {
+	select {
+	case err := <-errs:
+		return err
+	default:
+		return nil
+	}
+}
+
+func (a *ADSB) handleLine(line string, planes *airplanes.Airplanes) error {
+	if line == "" {
+		return nil
+	}
+
+	var aircraft JSONAircraft
+	if err := json.Unmarshal([]byte(line), &aircraft); err != nil {
+		return errors.Join(err, errJSONParse)
+	}
+
+	if err := updatePlaneData(aircraft, planes); err != nil {
+		return errors.Join(err, errProcessAircraft)
+	}
+
+	return nil
 }
 
 // connect establishes a connection to the JSON service.
