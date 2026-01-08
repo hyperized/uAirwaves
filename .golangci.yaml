@@ -10,6 +10,7 @@ linters:
     - noinlineerr # We don't need opinions on error handling'
     - wsl # legacy
     - cyclop # Already present in revive
+    - nolintlint
   settings:
     wsl_v5:
       allow-first-in-block: true
