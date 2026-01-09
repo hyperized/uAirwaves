@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"sync"
 	"time"
@@ -334,7 +335,14 @@ func updatePlaneList(planeListPanel *tview.List, myLocation *location.Location, 
 			mainText = fmt.Sprintf("[red]%s%s (!)[white]", ident, sqk)
 		}
 
-		planeListPanel.AddItem(mainText, value.String(), 0, nil)
+		distance := airplanes.HaversineDistance(latitude, longitude, plane.Latitude, plane.Longitude)
+
+		secondaryText := fmt.Sprintf("%.1fnm %s", distance, value.String())
+		if distance == math.MaxFloat64 {
+			secondaryText = value.String()
+		}
+
+		planeListPanel.AddItem(mainText, secondaryText, 0, nil)
 	}
 }
 

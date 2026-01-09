@@ -79,8 +79,8 @@ func (l *Airplanes) Sorted(receiverLat, receiverLon float64) List {
 		snapJ := result[j].GetSnapshot()
 
 		// 2. Distance to receiver (ascending - closer first)
-		distI := haversineDistance(receiverLat, receiverLon, snapI.Latitude, snapI.Longitude)
-		distJ := haversineDistance(receiverLat, receiverLon, snapJ.Latitude, snapJ.Longitude)
+		distI := HaversineDistance(receiverLat, receiverLon, snapI.Latitude, snapI.Longitude)
+		distJ := HaversineDistance(receiverLat, receiverLon, snapJ.Latitude, snapJ.Longitude)
 
 		if distI != distJ {
 			return distI < distJ
@@ -98,8 +98,8 @@ func (l *Airplanes) Sorted(receiverLat, receiverLon float64) List {
 	return result
 }
 
-// haversineDistance calculates the distance in nautical miles between two coordinates.
-func haversineDistance(lat1, lon1, lat2, lon2 float64) float64 {
+// HaversineDistance calculates the distance in nautical miles between two coordinates.
+func HaversineDistance(lat1, lon1, lat2, lon2 float64) float64 {
 	// If either position is unknown (0,0), treat as infinitely far
 	if (lat1 == 0 && lon1 == 0) || (lat2 == 0 && lon2 == 0) {
 		return math.MaxFloat64

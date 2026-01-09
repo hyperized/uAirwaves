@@ -213,7 +213,7 @@ func (a *ADSB) scan(ctx context.Context, lines chan<- string, errs chan<- error)
 	close(lines)
 }
 
-func (a *ADSB) handleScanEnd(errs <-chan error) error {
+func (*ADSB) handleScanEnd(errs <-chan error) error {
 	select {
 	case err := <-errs:
 		return err
@@ -222,7 +222,7 @@ func (a *ADSB) handleScanEnd(errs <-chan error) error {
 	}
 }
 
-func (a *ADSB) handleLine(line string, planes *airplanes.Airplanes) error {
+func (*ADSB) handleLine(line string, planes *airplanes.Airplanes) error {
 	if line == "" {
 		return nil
 	}
