@@ -107,7 +107,7 @@ func configureUI() *uiComponents {
 }
 
 func configureGrid(components *uiComponents) *tview.Grid {
-	grid := tview.NewGrid().SetRows(1, 0, 1, 1).SetColumns(0, 50).SetBorders(false) //nolint:mnd
+	grid := tview.NewGrid().SetRows(1, 0, 1).SetColumns(0, 50).SetBorders(false) //nolint:mnd
 	grid.AddItem(components.headerPanel, 0, 0, 1, 2, 0, 0, false)
 	grid.AddItem(components.radarPanel, 1, 0, 1, 1, 0, 0, false)
 	grid.AddItem(components.planeListPanel, 1, 1, 1, 1, 0, 0, true)
