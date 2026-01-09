@@ -76,7 +76,6 @@ type uiComponents struct {
 	commands       *tview.TextView
 	gpsStatus      *tview.TextView
 	footer         *tview.Flex
-	errorLine      *tview.TextView
 }
 
 func configureUI() *uiComponents {
@@ -104,7 +103,6 @@ func configureUI() *uiComponents {
 		commands:       commands,
 		gpsStatus:      gpsStatus,
 		footer:         configureFooter(commands, gpsStatus),
-		errorLine:      configureErrorLine(),
 	}
 }
 
@@ -114,7 +112,6 @@ func configureGrid(components *uiComponents) *tview.Grid {
 	grid.AddItem(components.radarPanel, 1, 0, 1, 1, 0, 0, false)
 	grid.AddItem(components.planeListPanel, 1, 1, 1, 1, 0, 0, true)
 	grid.AddItem(components.footer, 2, 0, 1, 2, 0, 0, false)
-	grid.AddItem(components.errorLine, 3, 0, 1, 2, 0, 0, false)
 
 	return grid
 }
@@ -214,17 +211,6 @@ func startUIUpdater(components *uiComponents) {
 			}
 		}
 	}()
-}
-
-// configureErrorLine configures the error line text view.
-func configureErrorLine() *tview.TextView {
-	errorLine := tview.NewTextView().SetTextAlign(tview.AlignLeft).SetText("no errors")
-	errorLine.SetDynamicColors(true)
-	errorLine.SetBackgroundColor(tcell.ColorRed)
-	errorLine.SetMaxLines(1)
-	errorLine.SetWrap(false)
-
-	return errorLine
 }
 
 // configureFooter configures the footer panel.
