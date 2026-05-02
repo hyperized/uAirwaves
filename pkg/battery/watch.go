@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,6 +28,10 @@ func Watch(ctx context.Context, status *Status) error {
 
 // WatchWithInterval updates the battery status with a custom interval and file path.
 func WatchWithInterval(ctx context.Context, status *Status, interval time.Duration, filePath string) error {
+	if err := update(status, filePath); err != nil {
+		return fmt.Errorf("initial battery update failed: %w", err)
+	}
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -36,7 +41,7 @@ func WatchWithInterval(ctx context.Context, status *Status, interval time.Durati
 			return nil
 		case <-ticker.C:
 			if err := update(status, filePath); err != nil {
-				return fmt.Errorf("battery update failed: %w", err)
+				slog.Warn("battery update failed, will retry", slog.Any("error", err))
 			}
 		}
 	}

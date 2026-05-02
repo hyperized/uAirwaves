@@ -15,8 +15,8 @@ func TestNew(t *testing.T) {
 	icao := "ABCDEF"
 	plane := airplane.New(icao)
 
-	if plane.GetICAO() != "414243444546" { // "ABCDEF" in hex
-		t.Errorf("expected hex of ABCDEF, got %s", plane.GetICAO())
+	if plane.GetICAO() != "ABCDEF" {
+		t.Errorf("expected ABCDEF, got %s", plane.GetICAO())
 	}
 }
 

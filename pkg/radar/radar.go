@@ -7,6 +7,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/scope"
@@ -31,22 +32,28 @@ type View struct {
 	*tview.Box
 
 	headingIndicator bool
+	trailIndicator   bool
+	heatIndicator    bool
 	autoScope        bool
 	planes           *airplanes.Airplanes
 	myLocation       *location.Location
 	myScope          *scope.Scope
+	heat             *heatMap
 	mu               sync.RWMutex
 }
 
 // New initializes a new radar scope view.
 func New(planes *airplanes.Airplanes, myLocation *location.Location) *View {
 	return &View{
-		Box:              tview.NewBox().SetBorder(true).SetTitle("Radar Scope (5-20nm)"),
-		headingIndicator: true,
+		Box:              tview.NewBox().SetBorder(false).SetBorderPadding(1, 1, 1, 1),
+		headingIndicator: false,
+		trailIndicator:   true,
+		heatIndicator:    true,
 		myScope:          scope.New(),
 		autoScope:        true,
 		planes:           planes,
 		myLocation:       myLocation,
+		heat:             newHeatMap(),
 	}
 }
 
@@ -55,14 +62,14 @@ func (r *View) SetScopeRange(rangeNm float64) {
 	r.myScope.Update(scope.WithCurrent(rangeNm))
 }
 
-// IncrementScope increases the radar scope range by the minimum step size.
+// IncrementScope increases the radar scope range by one increment step.
 func (r *View) IncrementScope() {
-	r.myScope.Update(scope.WithCurrent(r.myScope.GetCurrent() + r.myScope.GetMin()))
+	r.myScope.Update(scope.WithCurrent(r.myScope.GetCurrent() + r.myScope.GetIncrement()))
 }
 
-// DecrementScope decreases the radar scope range by the minimum step size.
+// DecrementScope decreases the radar scope range by one increment step.
 func (r *View) DecrementScope() {
-	r.myScope.Update(scope.WithCurrent(r.myScope.GetCurrent() - r.myScope.GetMin()))
+	r.myScope.Update(scope.WithCurrent(r.myScope.GetCurrent() - r.myScope.GetIncrement()))
 }
 
 // ToggleHeadingIndicator toggles the display of heading trails.
@@ -71,6 +78,38 @@ func (r *View) ToggleHeadingIndicator() {
 	defer r.mu.Unlock()
 
 	r.headingIndicator = !r.headingIndicator
+}
+
+// ToggleTrailIndicator toggles the display of position history trails.
+func (r *View) ToggleTrailIndicator() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.trailIndicator = !r.trailIndicator
+}
+
+// GetTrailIndicatorEnabled returns whether trail display is enabled.
+func (r *View) GetTrailIndicatorEnabled() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.trailIndicator
+}
+
+// ToggleHeatIndicator toggles the heat map overlay.
+func (r *View) ToggleHeatIndicator() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.heatIndicator = !r.heatIndicator
+}
+
+// GetHeatIndicatorEnabled returns whether the heat map is enabled.
+func (r *View) GetHeatIndicatorEnabled() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.heatIndicator
 }
 
 // ToggleAutoScope toggles the automatic scope range adjustment.
@@ -109,46 +148,78 @@ func (r *View) Draw(screen tcell.Screen) { //nolint:funlen
 
 	r.DrawForSubclass(screen, r)
 	x, y, width, height := r.GetInnerRect()
-
 	centerX, centerY := x+width/2, y+height/2
 
+	xScale, yScale := r.calculateScales(width, height)
+
+	// 1. Draw Scope Rings
+	r.drawScopeRings(screen, centerX, centerY, xScale, yScale)
+
+	// 2. Draw Center Point (You) and compass indicators
+	r.drawCenterPoint(screen, centerX, centerY)
+	r.drawCompassIndicators(screen, x, y, centerX, centerY, width, height)
+
+	// 3. Draw Planes (also accumulates heat as a side effect)
+	centerLatitude, centerLongitude := r.myLocation.GetCoordinates()
+	planeList := r.planes.Sorted(centerLatitude, centerLongitude)
+
+	if len(planeList) == 0 && r.autoScope {
+		r.myScope.Update(scope.WithCurrent(r.myScope.GetMin()))
+	}
+
+	r.drawPlanes(screen, planeList, centerX, centerY, xScale, yScale, centerLatitude, centerLongitude)
+
+	// 4. Decay and draw heat map last so nothing overwrites it
+	r.heat.decay()
+	if r.heatIndicator {
+		r.heat.draw(screen, centerX, centerY, xScale, yScale)
+	}
+
+}
+
+func (r *View) calculateScales(width, height int) (float64, float64) {
 	// Scales: Terminal characters are usually ~2x taller than wide.
 	// We adjust yScale to keep the rings circular.
 	xScale := float64(width) / (r.myScope.GetCurrent() * 2)
 	yScale := float64(height) / (r.myScope.GetCurrent() * 2) * terminalCharacterRatio
 
-	// 1. Draw Scope Rings
-	r.drawScopeRings(screen, centerX, centerY, xScale, yScale)
+	return xScale, yScale
+}
 
-	// 2. Draw Center Point (You)
-	screen.SetContent(centerX, centerY, 'X', nil, tcell.StyleDefault.Foreground(tcell.ColorRed))
+func (*View) drawCenterPoint(screen tcell.Screen, centerX, centerY int) {
+	screen.SetContent(centerX, centerY, 'X', nil, tcell.StyleDefault.Foreground(tcell.ColorDarkMagenta))
+}
 
-	// 3. Draw Planes
+func (*View) drawCompassIndicators(screen tcell.Screen, x, y, centerX, centerY, width, height int) {
+	compassStyle := tcell.StyleDefault.Foreground(tcell.ColorGreen)
+
+	// North: top-center
+	tview.Print(screen, "N", centerX, y, 1, tview.AlignLeft, tcell.ColorGreen)
+	// South: bottom-center
+	tview.Print(screen, "S", centerX, y+height-1, 1, tview.AlignLeft, tcell.ColorGreen)
+	// East: right-center
+	screen.SetContent(x+width-1, centerY, 'E', nil, compassStyle)
+	// West: left edge
+	screen.SetContent(x, centerY, 'W', nil, compassStyle)
+}
+
+func (r *View) drawPlanes(
+	screen tcell.Screen,
+	planeList []*airplane.Airplane,
+	centerX, centerY int,
+	xScale, yScale, centerLatitude, centerLongitude float64,
+) {
 	planeStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
-	centerLatitude, centerLongitude := r.myLocation.GetCoordinates()
 
-	planeList := r.planes.Sorted(centerLatitude, centerLongitude)
-	if len(planeList) == 0 && r.autoScope {
-		// If there are no planes, reset the scope view
-		r.myScope.Update(scope.WithCurrent(r.myScope.GetMin()))
-	}
-
-	// If there are planes, display them
 	for _, p := range planeList {
 		plane := p.GetSnapshot()
-
-		lat := plane.Latitude
-		lon := plane.Longitude
-		callsign := plane.Callsign
-
-		if lat == 0 || lon == 0 {
-			// Skip planes without a location, as they can't be plotted
+		if plane.Latitude == 0 || plane.Longitude == 0 {
 			continue
 		}
 
 		// Calculate delta in degrees
-		dLat := lat - centerLatitude
-		dLon := (lon - centerLongitude) * math.Cos(centerLatitude*degreesToRadiansRatio)
+		dLat := plane.Latitude - centerLatitude
+		dLon := (plane.Longitude - centerLongitude) * math.Cos(centerLatitude*degreesToRadiansRatio)
 
 		// Convert degrees to Nautical Miles (~60nm per degree)
 		nmY := dLat * nauticalMilePerDegree
@@ -157,7 +228,6 @@ func (r *View) Draw(screen tcell.Screen) { //nolint:funlen
 		// Skip if outside scope
 		dist := math.Sqrt(nmX*nmX + nmY*nmY)
 		if dist > r.myScope.GetCurrent() {
-			// Increase the scope range and try again with the next loop cycle
 			if r.autoScope {
 				r.myScope.Update(scope.WithCurrent(r.myScope.GetCurrent() + r.myScope.GetMin()))
 			}
@@ -170,55 +240,102 @@ func (r *View) Draw(screen tcell.Screen) { //nolint:funlen
 		planeX := centerX + int(nmX*xScale)
 		planeY := centerY - int(nmY*yScale/yMultiplier)
 
-		// Use color-coded altitude display
-		altColor := getFlightLevelColor(plane.Altitude)
+		r.heat.add(nmX, nmY)
 
-		// Draw heading indicator line if heading is valid
-		if plane.Heading != -1 && r.headingIndicator {
-			headingStyle := tcell.StyleDefault.Foreground(altColor).Background(tcell.ColorBlack)
-			drawHeadingLine(screen, planeX, planeY, plane.Heading, headingStyle)
+		if r.trailIndicator {
+			r.drawTrail(screen, plane.PositionHistory, centerX, centerY, xScale, yScale, centerLatitude, centerLongitude)
 		}
+		r.drawPlane(screen, plane, planeX, planeY, planeStyle)
+	}
+}
 
-		screen.SetContent(planeX, planeY, '+', nil, planeStyle)
+func (r *View) drawPlane(screen tcell.Screen, plane airplane.Snapshot, planeX, planeY int, style tcell.Style) {
+	altColor := getFlightLevelColor(plane.Altitude)
 
-		if callsign == "" {
-			tview.Print(screen, plane.ICAO, planeX+1, planeY, callsignMaxWidth, tview.AlignLeft, tcell.ColorYellow)
-		} else {
-			tview.Print(screen, plane.Callsign, planeX+1, planeY, callsignMaxWidth, tview.AlignLeft, tcell.ColorYellow)
-		}
-
-		// Display altitude with a vertical rate symbol
-		vertSymbol := getVertRateSymbol(plane.VertRate)
-		vertColor := getVerticalRateColor(plane.VertRate)
-
-		// Print altitude in altitude color, then vertical rate symbol in vert rate color
-		altText := altitudeToFL(plane.Altitude) + " "
-		tview.Print(screen, altText, planeX+1, planeY+1, len(altText), tview.AlignLeft, altColor)
-		tview.Print(screen, vertSymbol, planeX+1+len(altText), planeY+1, 1, tview.AlignLeft, vertColor)
+	// Draw heading indicator line if heading is valid
+	if plane.Heading != -1 && r.headingIndicator {
+		headingStyle := tcell.StyleDefault.Foreground(altColor).Background(tcell.ColorBlack)
+		drawHeadingLine(screen, planeX, planeY, plane.Heading, headingStyle)
 	}
 
-	// Set title
-	r.SetTitle(fmt.Sprintf(
-		"Radar Scope (%.0f-%.0fnm)",
-		r.myScope.GetCurrent()/r.myScope.GetSteps(),
-		r.myScope.GetCurrent(),
-	))
+	screen.SetContent(planeX, planeY, '+', nil, style)
+
+	label := plane.Callsign
+	if label == "" {
+		label = plane.ICAO
+	}
+
+	tview.Print(screen, label, planeX+1, planeY, callsignMaxWidth, tview.AlignLeft, altColor)
+
+	// Display altitude with a vertical rate symbol
+	vertSymbol := getVertRateSymbol(plane.VertRate)
+	vertColor := getVerticalRateColor(plane.VertRate)
+
+	altText := altitudeToFL(plane.Altitude) + " "
+	tview.Print(screen, altText, planeX+1, planeY+1, len(altText), tview.AlignLeft, altColor)
+	tview.Print(screen, vertSymbol, planeX+1+len(altText), planeY+1, 1, tview.AlignLeft, vertColor)
+}
+
+// drawTrail renders historical position dots behind a plane.
+// Older entries are drawn in darker grey; the most recent in lighter grey.
+func (*View) drawTrail(
+	screen tcell.Screen,
+	history []airplane.PositionEntry,
+	centerX, centerY int,
+	xScale, yScale, centerLatitude, centerLongitude float64,
+) {
+	trailColors := []tcell.Color{
+		tcell.ColorGray,
+		tcell.NewHexColor(0x606060),
+		tcell.NewHexColor(0x808080),
+		tcell.NewHexColor(0xa0a0a0),
+	}
+
+	n := len(history)
+	for i, entry := range history {
+		if entry.Latitude == 0 || entry.Longitude == 0 {
+			continue
+		}
+
+		dLat := entry.Latitude - centerLatitude
+		dLon := (entry.Longitude - centerLongitude) * math.Cos(centerLatitude*degreesToRadiansRatio)
+		nmY := dLat * nauticalMilePerDegree
+		nmX := dLon * nauticalMilePerDegree
+
+		px := centerX + int(nmX*xScale)
+		py := centerY - int(nmY*yScale/yMultiplier)
+
+		// Map entry index to a color bucket: older entries use darker colors.
+		colorIdx := (i * len(trailColors)) / n
+		if colorIdx >= len(trailColors) {
+			colorIdx = len(trailColors) - 1
+		}
+
+		screen.SetContent(px, py, '·', nil, tcell.StyleDefault.Foreground(trailColors[colorIdx]).Background(tcell.ColorBlack))
+	}
+}
+
+// GetAircraftCount returns the number of tracked aircraft.
+func (r *View) GetAircraftCount() int {
+	return r.planes.Count()
 }
 
 func (r *View) drawScopeRings(screen tcell.Screen, centerX, centerY int, xScale, yScale float64) {
-	ringStyle := tcell.StyleDefault.Foreground(tcell.ColorGreen).Background(tcell.ColorBlack)
+	ringStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
 	increments := r.myScope.GetCurrent() / r.myScope.GetSteps()
 
 	for ring := increments; ring <= r.myScope.GetCurrent(); ring += increments {
 		drawCircle(screen, centerX, centerY, int(ring*xScale), int(ring*yScale/2), ringStyle)
-		tview.Print(screen,
-			fmt.Sprintf("%0.0fnm", ring),
-			centerX+int(ring*xScale),
-			centerY,
-			circleMaxWidth,
-			tview.AlignLeft,
-			tcell.ColorGreen,
-		)
+		if ring < r.myScope.GetCurrent() {
+			tview.Print(screen,
+				fmt.Sprintf("%0.0fnm", ring),
+				centerX+int(ring*xScale),
+				centerY,
+				circleMaxWidth,
+				tview.AlignLeft,
+				tcell.ColorGreen,
+			)
+		}
 	}
 }
 

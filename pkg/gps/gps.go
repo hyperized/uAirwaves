@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/stratoberry/go-gpsd"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
@@ -24,6 +25,7 @@ type GPS struct {
 	gpsAddress, serviceName, protocol string
 	session                           Session
 	dial                              func(string) (Session, error)
+	reconnect                         bool
 }
 
 // Option defines the function signature for configuring a GPS instance.
@@ -73,16 +75,51 @@ func WithProtocol(protocol string) Option {
 	}
 }
 
+// WithReconnect enables automatic reconnection with exponential backoff on errors.
+func WithReconnect(reconnect bool) Option {
+	return func(g *GPS) {
+		g.reconnect = reconnect
+	}
+}
+
+const (
+	reconnectBaseDelay = 1 * time.Second
+	reconnectMaxDelay  = 30 * time.Second
+)
+
 // Watch starts the GPS monitoring process.
+// When reconnect is enabled, it retries with exponential backoff on errors.
 func (g *GPS) Watch(ctx context.Context, myLocation *location.Location) error {
-	err := g.connect()
-	if err != nil {
+	backoff := reconnectBaseDelay
+
+	for {
+		err := g.watchOnce(ctx, myLocation)
+		if err == nil {
+			return nil
+		}
+
+		if !g.reconnect {
+			return err
+		}
+
+		slog.Warn("GPS watch error, reconnecting", slog.Any("error", err), slog.Duration("delay", backoff))
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+			backoff = min(backoff*2, reconnectMaxDelay)
+		}
+	}
+}
+
+func (g *GPS) watchOnce(ctx context.Context, myLocation *location.Location) error {
+	if err := g.connect(); err != nil {
 		return err
 	}
 
 	defer g.disconnect()
 
-	// Read the Time-Position-Velocity report
 	g.session.AddFilter("TPV", func(t any) {
 		if tpvReport, ok := t.(*gpsd.TPVReport); ok {
 			myLocation.Update(

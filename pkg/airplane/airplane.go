@@ -15,15 +15,22 @@ const (
 	maxHeading   = 360
 	minVelocity  = 0
 
-	defaultMessageCount = 1
-	defaultHeading      = -1
-	defaultVelocity     = -1
-	defaultVertRate     = 0
+	defaultMessageCount    = 1
+	defaultHeading         = -1
+	defaultVelocity        = -1
+	defaultVertRate        = 0
+	maxPositionHistory     = 10
+	positionHistoryInterval = 10 * time.Second
 
-	squawkGeneralEmergency = "7500"
+	squawkHijacking        = "7500"
 	squawkRadioFailure     = "7600"
-	squawkHijacking        = "7700"
+	squawkGeneralEmergency = "7700"
 )
+
+// PositionEntry holds a single historical lat/lon fix.
+type PositionEntry struct {
+	Latitude, Longitude float64
+}
 
 // Option is a function that modifies an Airplane.
 type Option func(*Airplane)
@@ -33,8 +40,10 @@ type Airplane struct {
 	icao, callsign, squawk                                     string
 	altitude, heading, velocity, latitude, longitude, vertRate float64
 	lastUpdate                                                 time.Time
+	lastPositionTime                                           time.Time
 	emergency                                                  bool
 	messageCount                                               int64
+	positionHistory                                            []PositionEntry
 	mu                                                         sync.RWMutex
 }
 
@@ -66,18 +75,19 @@ func (a *Airplane) String() string {
 
 // Snapshot holds a point-in-time copy of airplane data for lock-free reads.
 type Snapshot struct {
-	ICAO         string
-	Callsign     string
-	Altitude     float64
-	Heading      float64
-	Velocity     float64
-	VertRate     float64
-	Latitude     float64
-	Longitude    float64
-	LastUpdate   time.Time
-	Squawk       string
-	Emergency    bool
-	MessageCount int64
+	ICAO            string
+	Callsign        string
+	Altitude        float64
+	Heading         float64
+	Velocity        float64
+	VertRate        float64
+	Latitude        float64
+	Longitude       float64
+	LastUpdate      time.Time
+	Squawk          string
+	Emergency       bool
+	MessageCount    int64
+	PositionHistory []PositionEntry
 }
 
 // GetSnapshot returns all fields in a single lock acquisition.
@@ -85,19 +95,23 @@ func (a *Airplane) GetSnapshot() Snapshot {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
+	history := make([]PositionEntry, len(a.positionHistory))
+	copy(history, a.positionHistory)
+
 	return Snapshot{
-		ICAO:         a.icao,
-		Callsign:     a.callsign,
-		Altitude:     a.altitude,
-		Heading:      a.heading,
-		Velocity:     a.velocity,
-		VertRate:     a.vertRate,
-		Latitude:     a.latitude,
-		Longitude:    a.longitude,
-		LastUpdate:   a.lastUpdate,
-		Squawk:       a.squawk,
-		Emergency:    a.emergency,
-		MessageCount: a.messageCount,
+		ICAO:            a.icao,
+		Callsign:        a.callsign,
+		Altitude:        a.altitude,
+		Heading:         a.heading,
+		Velocity:        a.velocity,
+		VertRate:        a.vertRate,
+		Latitude:        a.latitude,
+		Longitude:       a.longitude,
+		LastUpdate:      a.lastUpdate,
+		Squawk:          a.squawk,
+		Emergency:       a.emergency,
+		MessageCount:    a.messageCount,
+		PositionHistory: history,
 	}
 }
 
@@ -114,7 +128,7 @@ func (a *Airplane) GetICAO() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
-	return fmt.Sprintf("%06X", a.icao)
+	return a.icao
 }
 
 // GetCallsign returns the callsign of the plane.
@@ -214,11 +228,8 @@ func WithCallsign(c string) Option {
 func WithSquawk(squawk string) Option {
 	return func(airplane *Airplane) {
 		if squawk != "" {
-			if squawk == squawkGeneralEmergency || squawk == squawkRadioFailure || squawk == squawkHijacking {
-				airplane.emergency = true
-			}
-
 			airplane.squawk = squawk
+			airplane.emergency = squawk == squawkHijacking || squawk == squawkRadioFailure || squawk == squawkGeneralEmergency
 		}
 	}
 }
@@ -273,5 +284,27 @@ func WithHeading(heading float64) Option {
 func WithVertRate(vertRate float64) Option {
 	return func(a *Airplane) {
 		a.vertRate = vertRate
+	}
+}
+
+// WithPosition updates both latitude and longitude and appends the fix to position history
+// at most once per positionHistoryInterval to avoid filling history with near-identical entries.
+func WithPosition(latitude, longitude float64) Option {
+	return func(a *Airplane) {
+		a.latitude = max(min(latitude, maxLatitude), minLatitude)
+		a.longitude = max(min(longitude, maxLongitude), minLongitude)
+
+		if time.Since(a.lastPositionTime) < positionHistoryInterval {
+			return
+		}
+
+		a.lastPositionTime = time.Now()
+
+		entry := PositionEntry{Latitude: a.latitude, Longitude: a.longitude}
+		a.positionHistory = append(a.positionHistory, entry)
+
+		if len(a.positionHistory) > maxPositionHistory {
+			a.positionHistory = a.positionHistory[len(a.positionHistory)-maxPositionHistory:]
+		}
 	}
 }

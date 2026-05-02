@@ -25,6 +25,7 @@ const (
 
 	defaultPruneThreshold = 1 * time.Minute
 	defaultPruneFrequency = 5 * time.Second
+	defaultDialTimeout    = 10 * time.Second
 )
 
 var (
@@ -118,6 +119,7 @@ type ADSB struct {
 	address        string
 	pruneFrequency time.Duration
 	pruneThreshold time.Duration
+	reconnect      bool
 }
 
 // Option is a function that modifies an ADSB instance.
@@ -159,10 +161,51 @@ func WithPruneThreshold(threshold time.Duration) Option {
 	}
 }
 
+// WithReconnect enables automatic reconnection with exponential backoff on connection errors.
+func WithReconnect(reconnect bool) Option {
+	return func(a *ADSB) {
+		a.reconnect = reconnect
+	}
+}
+
+const (
+	reconnectBaseDelay = 1 * time.Second
+	reconnectMaxDelay  = 30 * time.Second
+)
+
 // Stream grabs the ADSB messages from the JSON service and updates the airplanes list.
+// When reconnect is enabled, it retries connection-level errors with exponential backoff.
 func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
-	err := a.connect(ctx)
-	if err != nil {
+	backoff := reconnectBaseDelay
+
+	for {
+		err := a.streamOnce(ctx, planes)
+		if err == nil {
+			return nil
+		}
+
+		if !a.reconnect || !isConnectionError(err) {
+			return err
+		}
+
+		slog.Warn("ADSB stream error, reconnecting", slog.Any("error", err), slog.Duration("delay", backoff))
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+			backoff = min(backoff*2, reconnectMaxDelay)
+		}
+	}
+}
+
+// isConnectionError returns true for transient connection errors that warrant a reconnect.
+func isConnectionError(err error) bool {
+	return errors.Is(err, errDial) || errors.Is(err, errJSONStream)
+}
+
+func (a *ADSB) streamOnce(ctx context.Context, planes *airplanes.Airplanes) error {
+	if err := a.connect(ctx); err != nil {
 		return err
 	}
 	defer a.disconnect()
@@ -243,7 +286,7 @@ func (*ADSB) handleLine(line string, planes *airplanes.Airplanes) error {
 func (a *ADSB) connect(ctx context.Context) error {
 	var err error
 
-	dialer := &net.Dialer{}
+	dialer := &net.Dialer{Timeout: defaultDialTimeout}
 
 	a.connection, err = dialer.DialContext(ctx, jsonServiceNetwork, a.address)
 	if err != nil {
@@ -290,56 +333,55 @@ func updatePlaneData(aircraft JSONAircraft, planes *airplanes.Airplanes) error {
 	planes.Ensure(aircraft.Hex)
 	plane, _ := planes.Get(aircraft.Hex)
 
-	// Update timestamp
-	plane.Update(airplane.WithLastUpdate(time.Now().UTC()))
+	opts := []airplane.Option{
+		airplane.WithLastUpdate(time.Now().UTC()),
+	}
 
-	// Update callsign (trim whitespace from flight field)
 	if aircraft.Flight != empty {
-		plane.Update(airplane.WithCallsign(strings.TrimSpace(aircraft.Flight)))
+		opts = append(opts, airplane.WithCallsign(strings.TrimSpace(aircraft.Flight)))
 	}
 
-	// Update altitude (prefer barometric)
+	// Altitude: prefer barometric
 	if aircraft.BarometricAltitude != 0 {
-		plane.Update(airplane.WithAltitude(float64(aircraft.BarometricAltitude)))
+		opts = append(opts, airplane.WithAltitude(float64(aircraft.BarometricAltitude)))
 	} else if aircraft.GeometricAltitude != nil {
-		plane.Update(airplane.WithAltitude(float64(*aircraft.GeometricAltitude)))
+		opts = append(opts, airplane.WithAltitude(float64(*aircraft.GeometricAltitude)))
 	}
 
-	// Update velocity (ground speed in knots)
 	if aircraft.GS != nil {
-		plane.Update(airplane.WithVelocity(*aircraft.GS))
+		opts = append(opts, airplane.WithVelocity(*aircraft.GS))
 	}
 
-	// Update heading (prefer true heading, fall back to track)
+	// Heading: prefer true heading, fall back to magnetic, then track
 	switch { //nolint:revive
 	case aircraft.TrueHeading != nil:
-		plane.Update(airplane.WithHeading(*aircraft.TrueHeading))
+		opts = append(opts, airplane.WithHeading(*aircraft.TrueHeading))
 	case aircraft.MagHeading != nil:
-		plane.Update(airplane.WithHeading(*aircraft.MagHeading))
+		opts = append(opts, airplane.WithHeading(*aircraft.MagHeading))
 	case aircraft.Track != nil:
-		plane.Update(airplane.WithHeading(*aircraft.Track))
+		opts = append(opts, airplane.WithHeading(*aircraft.Track))
 	}
 
-	// Update vertical rate (prefer barometric)
+	// Vertical rate: prefer barometric
 	if aircraft.BarometricVerticalRate != nil {
-		plane.Update(airplane.WithVertRate(float64(*aircraft.BarometricVerticalRate)))
+		opts = append(opts, airplane.WithVertRate(float64(*aircraft.BarometricVerticalRate)))
 	} else if aircraft.GeometricVerticalRate != nil {
-		plane.Update(airplane.WithVertRate(float64(*aircraft.GeometricVerticalRate)))
+		opts = append(opts, airplane.WithVertRate(float64(*aircraft.GeometricVerticalRate)))
 	}
 
-	// Update position
-	if aircraft.Lat != nil {
-		plane.Update(airplane.WithLatitude(*aircraft.Lat))
+	if aircraft.Lat != nil && aircraft.Lon != nil {
+		opts = append(opts, airplane.WithPosition(*aircraft.Lat, *aircraft.Lon))
+	} else if aircraft.Lat != nil {
+		opts = append(opts, airplane.WithLatitude(*aircraft.Lat))
+	} else if aircraft.Lon != nil {
+		opts = append(opts, airplane.WithLongitude(*aircraft.Lon))
 	}
 
-	if aircraft.Lon != nil {
-		plane.Update(airplane.WithLongitude(*aircraft.Lon))
-	}
-
-	// Update squawk
 	if aircraft.Squawk != empty {
-		plane.Update(airplane.WithSquawk(aircraft.Squawk))
+		opts = append(opts, airplane.WithSquawk(aircraft.Squawk))
 	}
+
+	plane.Update(opts...)
 
 	return nil
 }

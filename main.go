@@ -26,7 +26,11 @@ var (
 	errASDBRecover    = errors.New("recovered in asdb goroutine")
 )
 
-const uiUpdateInterval = 1 * time.Second
+const (
+	uiUpdateInterval     = 1 * time.Second
+	batteryWarningOrange = 40
+	batteryWarningRed    = 20
+)
 
 func main() {
 	uic := configureUI()
@@ -35,9 +39,9 @@ func main() {
 
 	grid := configureGrid(uic)
 
-	startBatteryWatcher(uic)
-	startGPSWatcher(uic)
-	startADSBStreamer(uic)
+	startBatteryWatcher(uic, envOr("BATTERY_PATH", ""))
+	startGPSWatcher(uic, envOr("GPSD_ADDRESS", ""))
+	startADSBStreamer(uic, envOr("ADSB_ADDRESS", ""))
 	startUIUpdater(uic)
 
 	// Input capture for global shortcuts
@@ -91,18 +95,18 @@ func configureUI() *uiComponents {
 		ctx:            ctx,
 		cancel:         cancel,
 		app:            tview.NewApplication(),
-		errChan:        make(chan error, 1),
+		errChan:        make(chan error, 3),
 		myLocation:     myLocation,
 		waitGroup:      &sync.WaitGroup{},
 		planeList:      planeList,
 		batteryStatus:  battery.NewStatus(),
 		clock:          clock,
 		statusBar:      statusBar,
-		headerPanel:    configureHeader(clock, statusBar),
+		headerPanel:    configureHeader(clock, gpsStatus, statusBar),
 		planeListPanel: configurePlaneList(),
 		commands:       commands,
 		gpsStatus:      gpsStatus,
-		footer:         configureFooter(commands, gpsStatus),
+		footer:         configureFooter(commands),
 	}
 }
 
@@ -116,61 +120,65 @@ func configureGrid(components *uiComponents) *tview.Grid {
 	return grid
 }
 
-func startBatteryWatcher(components *uiComponents) {
-	components.waitGroup.Add(1)
+// launchWorker runs fn in a goroutine, recovering panics and forwarding errors to errChan.
+func launchWorker(wg *sync.WaitGroup, errChan chan<- error, panicSentinel error, fn func() error) {
+	wg.Add(1)
 
 	go func() {
-		defer components.waitGroup.Done()
+		defer wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
 				if err, ok := r.(error); ok {
-					components.errChan <- errors.Join(err, errBatteryRecover)
+					errChan <- errors.Join(err, panicSentinel)
 				}
 			}
 		}()
 
-		if err := battery.Watch(components.ctx, components.batteryStatus); err != nil {
-			components.errChan <- err
+		if err := fn(); err != nil {
+			errChan <- err
 		}
 	}()
 }
 
-func startGPSWatcher(components *uiComponents) {
-	components.waitGroup.Add(1)
+// envOr returns the value of an environment variable, or fallback if unset/empty.
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
 
-	go func() {
-		defer components.waitGroup.Done()
-		defer func() {
-			if r := recover(); r != nil {
-				if err, ok := r.(error); ok {
-					components.errChan <- errors.Join(err, errGPSRecover)
-				}
-			}
-		}()
-
-		if err := gps.New().Watch(components.ctx, components.myLocation); err != nil {
-			components.errChan <- err
-		}
-	}()
+	return fallback
 }
 
-func startADSBStreamer(components *uiComponents) {
-	components.waitGroup.Add(1)
-
-	go func() {
-		defer components.waitGroup.Done()
-		defer func() {
-			if r := recover(); r != nil {
-				if err, ok := r.(error); ok {
-					components.errChan <- errors.Join(err, errASDBRecover)
-				}
-			}
-		}()
-
-		if err := adsb.New().Stream(components.ctx, components.planeList); err != nil {
-			components.errChan <- err
+func startBatteryWatcher(components *uiComponents, filePath string) {
+	launchWorker(components.waitGroup, components.errChan, errBatteryRecover, func() error {
+		if filePath != "" {
+			return battery.WatchWithInterval(components.ctx, components.batteryStatus, 30*time.Second, filePath)
 		}
-	}()
+
+		return battery.Watch(components.ctx, components.batteryStatus)
+	})
+}
+
+func startGPSWatcher(components *uiComponents, address string) {
+	launchWorker(components.waitGroup, components.errChan, errGPSRecover, func() error {
+		opts := []gps.Option{gps.WithReconnect(true)}
+		if address != "" {
+			opts = append(opts, gps.WithGpsAddress(address))
+		}
+
+		return gps.New(opts...).Watch(components.ctx, components.myLocation)
+	})
+}
+
+func startADSBStreamer(components *uiComponents, address string) {
+	launchWorker(components.waitGroup, components.errChan, errASDBRecover, func() error {
+		opts := []adsb.Option{adsb.WithReconnect(true)}
+		if address != "" {
+			opts = append(opts, adsb.WithAddress(address))
+		}
+
+		return adsb.New(opts...).Stream(components.ctx, components.planeList)
+	})
 }
 
 func startUIUpdater(components *uiComponents) {
@@ -204,6 +212,9 @@ func startUIUpdater(components *uiComponents) {
 					components.clock.SetText("Local: " + time.Now().Format(time.TimeOnly) + " UTC: " +
 						time.Now().UTC().Format(time.TimeOnly))
 					components.statusBar.SetText("Battery: " + components.batteryStatus.String())
+
+					updateHeaderColor(components.batteryStatus.GetPercentage(), components.clock, components.statusBar)
+
 					updatePlaneList(components.planeListPanel, components.myLocation, components.planeList)
 					updateFooter(components.commands, components.radarPanel)
 					components.gpsStatus.SetText("GPS: " + components.myLocation.String())
@@ -213,25 +224,44 @@ func startUIUpdater(components *uiComponents) {
 	}()
 }
 
+// updateHeaderColor updates the header color based on the battery percentage.
+func updateHeaderColor(percentage int8, clock *tview.TextView, statusBar *tview.TextView) {
+	headerColor := tcell.ColorDarkGreen
+	textColor := tcell.ColorBlack
+
+	if percentage <= batteryWarningRed {
+		headerColor = tcell.ColorRed
+		textColor = tcell.ColorWhite
+	} else if percentage <= batteryWarningOrange {
+		headerColor = tcell.ColorOrange
+		textColor = tcell.ColorBlack
+	}
+
+	clock.SetBackgroundColor(headerColor)
+	clock.SetTextColor(textColor)
+	statusBar.SetBackgroundColor(headerColor)
+	statusBar.SetTextColor(textColor)
+}
+
 // configureFooter configures the footer panel.
-func configureFooter(commands *tview.TextView, gpsStatus *tview.TextView) *tview.Flex {
+func configureFooter(commands *tview.TextView) *tview.Flex {
 	return tview.NewFlex().SetDirection(tview.FlexColumn).
-		AddItem(commands, 0, 1, false).
-		AddItem(gpsStatus, 0, 1, false)
+		AddItem(commands, 0, 1, false)
 }
 
 // configureGpsStatus configures the GPS status text view.
 func configureGpsStatus() *tview.TextView {
-	gpsStatus := tview.NewTextView().SetTextAlign(tview.AlignRight)
+	gpsStatus := tview.NewTextView().SetTextAlign(tview.AlignCenter)
 	gpsStatus.SetDynamicColors(true)
-	gpsStatus.SetBackgroundColor(tcell.ColorDarkBlue)
+	gpsStatus.SetBackgroundColor(tcell.ColorDarkGreen)
+	gpsStatus.SetTextColor(tcell.ColorBlack)
 
 	return gpsStatus
 }
 
 // configureCommands configures the commands text view.
 func configureCommands() *tview.TextView {
-	commands := tview.NewTextView().SetTextAlign(tview.AlignLeft)
+	commands := tview.NewTextView().SetTextAlign(tview.AlignLeft).SetWrap(false)
 	commands.SetDynamicColors(true)
 	commands.SetBackgroundColor(tcell.ColorDarkBlue)
 
@@ -241,15 +271,18 @@ func configureCommands() *tview.TextView {
 // configurePlaneList configures the plane list panel.
 func configurePlaneList() *tview.List {
 	planeListPanel := tview.NewList().ShowSecondaryText(true)
-	planeListPanel.SetBorder(true).SetTitle("Airplanes").SetTitleColor(tcell.ColorGreen)
+	planeListPanel.SetBorder(false).SetTitle("Airplanes").
+		SetTitleColor(tcell.ColorGreen).
+		SetBorderPadding(1, 1, 1, 1)
 
 	return planeListPanel
 }
 
 // configureHeader configures the header panel.
-func configureHeader(clock *tview.TextView, statusBar *tview.TextView) *tview.Flex {
+func configureHeader(clock *tview.TextView, gpsStatus *tview.TextView, statusBar *tview.TextView) *tview.Flex {
 	return tview.NewFlex().SetDirection(tview.FlexColumn).
 		AddItem(clock, 0, 1, false).
+		AddItem(gpsStatus, 0, 1, false).
 		AddItem(statusBar, 0, 1, false)
 }
 
@@ -257,7 +290,8 @@ func configureHeader(clock *tview.TextView, statusBar *tview.TextView) *tview.Fl
 func configureStatusbar() *tview.TextView {
 	statusBar := tview.NewTextView().SetTextAlign(tview.AlignRight).SetText("loading...")
 	statusBar.SetDynamicColors(true)
-	statusBar.SetBackgroundColor(tcell.ColorDarkBlue)
+	statusBar.SetBackgroundColor(tcell.ColorDarkGreen)
+	statusBar.SetTextColor(tcell.ColorBlack)
 
 	return statusBar
 }
@@ -266,7 +300,8 @@ func configureStatusbar() *tview.TextView {
 func configureClock() *tview.TextView {
 	clock := tview.NewTextView().SetTextAlign(tview.AlignLeft).SetText("..:..:..")
 	clock.SetDynamicColors(true)
-	clock.SetBackgroundColor(tcell.ColorDarkBlue)
+	clock.SetBackgroundColor(tcell.ColorDarkGreen)
+	clock.SetTextColor(tcell.ColorBlack)
 
 	return clock
 }
@@ -287,6 +322,10 @@ func handleKeyInput(event *tcell.EventKey, app *tview.Application, radarPanel *r
 		radarPanel.ToggleAutoScope()
 	case 'h': // Toggle heading indicator
 		radarPanel.ToggleHeadingIndicator()
+	case 't': // Toggle trail indicator
+		radarPanel.ToggleTrailIndicator()
+	case 'm': // Toggle heat map
+		radarPanel.ToggleHeatIndicator()
 	case 'q': // Quit
 		app.Stop()
 	default:
@@ -335,9 +374,12 @@ func updatePlaneList(planeListPanel *tview.List, myLocation *location.Location, 
 // updateFooter updates the footer text with the current scope range and heading indicator settings.
 func updateFooter(commands *tview.TextView, radarPanel *radar.View) *tview.TextView {
 	return commands.SetText(fmt.Sprintf(
-		"[::b]Range (+/-): %0.0f nm - [::b]Heading indicator (h): %t - [::b]Autoscope (a): %t",
+		"[::b]Tracking: %d - [::b]Range (+/-): %0.0f nm - [::b]Heading (h): %t - [::b]Trail (t): %t - [::b]Heat (m): %t - [::b]Autoscope (a): %t",
+		radarPanel.GetAircraftCount(),
 		radarPanel.GetScopeRange(),
 		radarPanel.GetHeadingIndicatorEnabled(),
+		radarPanel.GetTrailIndicatorEnabled(),
+		radarPanel.GetHeatIndicatorEnabled(),
 		radarPanel.GetAutoScopeEnabled(),
 	))
 }
