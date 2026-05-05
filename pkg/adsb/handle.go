@@ -51,33 +51,35 @@ func (a *ADSB) handleFrame(frame demod.Frame, planes *airplanes.Airplanes) {
 }
 
 // learnICAO extracts the broadcasting/addressed ICAO. For
-// ICAO-overlay DFs (0/4/5/16/20/21) the producer's CRC residual
-// is the addressed aircraft's ICAO; for DF 11 unsolicited and
-// DF 17/18 it sits in the message body.
+// DF 17/18 (extended squitter) and DF 11 unsolicited, plain CRC
+// applies — clean frames have residual = 0 and the AA sits in
+// bytes 1..3. For ICAO-overlay DFs (0/4/5/16/20/21) the producer's
+// CRC residual *is* the addressed aircraft's ICAO.
+//
+// The residual == 0 gate on broadcasts is what filters preamble
+// false-positives from random IQ; without it, ~50% of "frames"
+// the demod emits are noise that happens to have valid DF bits in
+// position. That noise was creating phantom planes and overwriting
+// real callsigns with garbage.
 //
 //nolint:exhaustive // DFMilitaryES (19) is opaque to civilian receivers; falls through to the unrecognised branch.
 func learnICAO(frame modes.Frame, crcResidual uint32) (modes.ICAO, bool) {
+	const (
+		highShift = 16
+		midShift  = 8
+	)
+
 	switch frame.DF() {
 	case modes.DFExtendedSquitter, modes.DFNonTransponderES:
-		if len(frame) != modes.LongFrameBytes {
+		if len(frame) != modes.LongFrameBytes || crcResidual != 0 {
 			return 0, false
 		}
-
-		const (
-			highShift = 16
-			midShift  = 8
-		)
 
 		return modes.ICAO(frame[1])<<highShift | modes.ICAO(frame[2])<<midShift | modes.ICAO(frame[3]), true
 	case modes.DFAllCallReply:
-		if len(frame) != modes.ShortFrameBytes {
+		if len(frame) != modes.ShortFrameBytes || crcResidual != 0 {
 			return 0, false
 		}
-
-		const (
-			highShift = 16
-			midShift  = 8
-		)
 
 		return modes.ICAO(frame[1])<<highShift | modes.ICAO(frame[2])<<midShift | modes.ICAO(frame[3]), true
 	case modes.DFShortAirAir, modes.DFSurveillanceAlt, modes.DFSurveillanceID,
