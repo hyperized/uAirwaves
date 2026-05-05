@@ -71,24 +71,34 @@ type ADSB struct {
 
 	// totalFrames is every frame that came out of the demod
 	// (clean + corrected). recoveredFrames counts the subset
-	// the single-bit corrector rescued. Both are read by the UI
-	// to surface ingest health.
-	totalFrames     atomic.Uint64
-	recoveredFrames atomic.Uint64
+	// the single-bit corrector rescued.
+	// callsignsDecoded counts every IdentificationMessage that
+	// the modes decoder produced (regardless of validity);
+	// callsignsApplied counts the subset the validCallsign
+	// filter let through. Their ratio surfaces noise pressure on
+	// TC 1..4 frames in the stats panel.
+	totalFrames      atomic.Uint64
+	recoveredFrames  atomic.Uint64
+	callsignsDecoded atomic.Uint64
+	callsignsApplied atomic.Uint64
 }
 
 // Stats reports the ingest counters since process start.
 type Stats struct {
-	TotalFrames     uint64
-	RecoveredFrames uint64
+	TotalFrames      uint64
+	RecoveredFrames  uint64
+	CallsignsDecoded uint64
+	CallsignsApplied uint64
 }
 
 // Stats returns a snapshot of the ingest counters. Safe to call
 // from any goroutine.
 func (a *ADSB) Stats() Stats {
 	return Stats{
-		TotalFrames:     a.totalFrames.Load(),
-		RecoveredFrames: a.recoveredFrames.Load(),
+		TotalFrames:      a.totalFrames.Load(),
+		RecoveredFrames:  a.recoveredFrames.Load(),
+		CallsignsDecoded: a.callsignsDecoded.Load(),
+		CallsignsApplied: a.callsignsApplied.Load(),
 	}
 }
 

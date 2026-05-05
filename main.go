@@ -509,6 +509,8 @@ func updateStatsPanel(
 		recoveredPerSec:  recoveredPerSec,
 		totalFrames:      frameStats.TotalFrames,
 		recoveredFrames:  frameStats.RecoveredFrames,
+		callsignsDecoded: frameStats.CallsignsDecoded,
+		callsignsApplied: frameStats.CallsignsApplied,
 	}))
 }
 
@@ -516,13 +518,14 @@ func updateStatsPanel(
 // renders. Hoisted to a struct so the formatter signature stays
 // readable as fields accumulate.
 type statsRender struct {
-	tracked, positioned               int
-	nearestDist, farthestDist         float64
-	nearestCallsign, farthestCallsign string
-	highestAlt                        float64
-	highestCallsign                   string
-	framesPerSec, recoveredPerSec     float64
-	totalFrames, recoveredFrames      uint64
+	tracked, positioned                int
+	nearestDist, farthestDist          float64
+	nearestCallsign, farthestCallsign  string
+	highestAlt                         float64
+	highestCallsign                    string
+	framesPerSec, recoveredPerSec      float64
+	totalFrames, recoveredFrames       uint64
+	callsignsDecoded, callsignsApplied uint64
 }
 
 func formatStatsText(render statsRender) string {
@@ -547,13 +550,13 @@ func formatStatsText(render statsRender) string {
 			"[::b]Farthest[::-]   %s\n"+
 			"[::b]Highest[::-]    %s\n"+
 			"[::b]Frames/s[::-]   %.1f  ([gray]rec %.2f[white])\n"+
-			"[::b]Total[::-]      %d  ([gray]rec %d[white])",
+			"[::b]Total[::-]      %d  ([gray]IDs %d/%d[white])",
 		render.tracked, render.positioned,
 		nearest,
 		farthest,
 		highest,
 		render.framesPerSec, render.recoveredPerSec,
-		render.totalFrames, render.recoveredFrames,
+		render.totalFrames, render.callsignsApplied, render.callsignsDecoded,
 	)
 }
 

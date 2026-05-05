@@ -12,13 +12,14 @@ import (
 
 // validCallsign reports whether s looks like a real Mode S
 // identification. The modes decoder maps unassigned 6-bit values
-// to '#', so any '#' is a strong signal the source frame was
-// noise that happened to slip past the preamble + CRC checks
-// with TC 1..4 in the type-code position. We also reject empty
-// strings so the airplane.WithCallsign no-op guard isn't the
-// only line of defence.
+// to '#'. Pure noise frames typically yield ~3 '#' chars in 8;
+// real frames with a single-bit error in the callsign field
+// yield 0 or 1. We accept up to one '#' so partially-corrupted
+// real callsigns still register, while pure noise gets dropped.
 func validCallsign(s string) bool {
-	return s != "" && !strings.ContainsRune(s, '#')
+	const maxPlaceholders = 1
+
+	return s != "" && strings.Count(s, "#") <= maxPlaceholders
 }
 
 // handleFrame routes a freshly-demodulated frame through the
@@ -183,7 +184,10 @@ func (a *ADSB) applyExtendedSquitter(plane *airplane.Airplane, frame modes.Frame
 func (a *ADSB) applyESMessage(plane *airplane.Airplane, icao modes.ICAO, msg modes.Message) {
 	switch typed := msg.(type) {
 	case modes.IdentificationMessage:
+		a.callsignsDecoded.Add(1)
+
 		if validCallsign(typed.Callsign) {
+			a.callsignsApplied.Add(1)
 			plane.Update(airplane.WithCallsign(typed.Callsign))
 		}
 	case modes.AirbornePositionMessage:
