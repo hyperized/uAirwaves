@@ -298,12 +298,12 @@ func configureStatsPanel() *tview.TextView {
 	return statsPanel
 }
 
-// configureRightColumn stacks the plane list (top 2/3) and the
-// stats panel (bottom 1/3) into a single column so the existing
+// configureRightColumn stacks the plane list (top ~5/6) and the
+// stats panel (bottom ~1/6) into a single column so the existing
 // grid slot can host both.
 func configureRightColumn(planeListPanel *tview.List, statsPanel *tview.TextView) *tview.Flex {
 	const (
-		planeListWeight = 2
+		planeListWeight = 5
 		statsWeight     = 1
 	)
 
@@ -528,31 +528,27 @@ type statsRender struct {
 func formatStatsText(render statsRender) string {
 	nearest := "—"
 	if render.positioned > 0 {
-		nearest = fmt.Sprintf("%.1f nm  [gray]%s[white]", render.nearestDist, render.nearestCallsign)
+		nearest = fmt.Sprintf("%.0fnm %s", render.nearestDist, render.nearestCallsign)
 	}
 
 	farthest := "—"
 	if render.positioned > 0 {
-		farthest = fmt.Sprintf("%.1f nm  [gray]%s[white]", render.farthestDist, render.farthestCallsign)
+		farthest = fmt.Sprintf("%.0fnm %s", render.farthestDist, render.farthestCallsign)
 	}
 
 	highest := "—"
 	if render.highestAlt > 0 {
-		highest = fmt.Sprintf("%.0f ft  [gray]%s[white]", render.highestAlt, render.highestCallsign)
+		highest = fmt.Sprintf("%.0fft %s", render.highestAlt, render.highestCallsign)
 	}
 
 	return fmt.Sprintf(
-		"[::b]Tracked[::-]    %d  ([gray]%d positioned[white])\n"+
-			"[::b]Nearest[::-]    %s\n"+
-			"[::b]Farthest[::-]   %s\n"+
-			"[::b]Highest[::-]    %s\n"+
-			"[::b]Frames/s[::-]   %.1f  ([gray]rec %.2f[white])\n"+
-			"[::b]Total[::-]      %d  ([gray]rec %d[white])",
+		"[::b]Planes[::-] %d/%d   [::b]Frames/s[::-] %.1f ([gray]rec %.2f[white])\n"+
+			"[::b]Near[::-] %s   [::b]Far[::-] %s\n"+
+			"[::b]Top[::-] %s   [::b]Total[::-] %d ([gray]rec %d[white])",
 		render.tracked, render.positioned,
-		nearest,
-		farthest,
-		highest,
 		render.framesPerSec, render.recoveredPerSec,
+		nearest, farthest,
+		highest,
 		render.totalFrames, render.recoveredFrames,
 	)
 }
