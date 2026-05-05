@@ -51,16 +51,17 @@ func (a *ADSB) handleFrame(frame demod.Frame, planes *airplanes.Airplanes) {
 }
 
 // learnICAO extracts the broadcasting/addressed ICAO. For
-// DF 17/18 (extended squitter) and DF 11 unsolicited, plain CRC
-// applies — clean frames have residual = 0 and the AA sits in
-// bytes 1..3. For ICAO-overlay DFs (0/4/5/16/20/21) the producer's
-// CRC residual *is* the addressed aircraft's ICAO.
+// DF 17/18 and DF 11 unsolicited the AA sits in bytes 1..3
+// directly; for ICAO-overlay DFs (0/4/5/16/20/21) the producer's
+// CRC residual is the addressed aircraft's ICAO.
 //
-// The residual == 0 gate on broadcasts is what filters preamble
-// false-positives from random IQ; without it, ~50% of "frames"
-// the demod emits are noise that happens to have valid DF bits in
-// position. That noise was creating phantom planes and overwriting
-// real callsigns with garbage.
+// We deliberately do not gate DF 17/18 on residual == 0 here —
+// the demod emits a mix of clean broadcasts and preamble false-
+// positives, and the rate of clean frames in the field is too
+// low to make the gate worth losing the real ones. Downstream
+// handlers cope: position decode produces nonsense lat/lon for
+// noise (filtered by sanity checks), callsign decode yields
+// '#'-heavy strings for noise (filtered by validCallsign).
 //
 //nolint:exhaustive // DFMilitaryES (19) is opaque to civilian receivers; falls through to the unrecognised branch.
 func learnICAO(frame modes.Frame, crcResidual uint32) (modes.ICAO, bool) {
@@ -71,13 +72,13 @@ func learnICAO(frame modes.Frame, crcResidual uint32) (modes.ICAO, bool) {
 
 	switch frame.DF() {
 	case modes.DFExtendedSquitter, modes.DFNonTransponderES:
-		if len(frame) != modes.LongFrameBytes || crcResidual != 0 {
+		if len(frame) != modes.LongFrameBytes {
 			return 0, false
 		}
 
 		return modes.ICAO(frame[1])<<highShift | modes.ICAO(frame[2])<<midShift | modes.ICAO(frame[3]), true
 	case modes.DFAllCallReply:
-		if len(frame) != modes.ShortFrameBytes || crcResidual != 0 {
+		if len(frame) != modes.ShortFrameBytes {
 			return 0, false
 		}
 
@@ -86,9 +87,9 @@ func learnICAO(frame modes.Frame, crcResidual uint32) (modes.ICAO, bool) {
 		modes.DFLongAirAir, modes.DFCommBAltitude, modes.DFCommBIdentity,
 		modes.DFCommDExtendedLength:
 		// CRC residual = addressed ICAO (parity-overlay scheme).
-		// We accept it without a roster check; the airplanes
-		// collection naturally tolerates short-lived bogus
-		// entries because the prune sweep evicts stale ICAOs.
+		// Reject zero — it's the "no overlay" case for DF 11 / 17 / 18,
+		// not a valid ICAO, and arriving here means the DF dispatch
+		// upstream is wrong.
 		return modes.ICAO(crcResidual), crcResidual != 0
 	}
 
