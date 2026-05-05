@@ -11,6 +11,8 @@ linters:
     - wsl # legacy
     - cyclop # Already present in revive
     - nolintlint
+    - gomodguard # replaced by gomodguard_v2 in golangci-lint v2.12; default:all already enables the v2 successor.
+    - gomoddirectives # local replace for github.com/hyperized/demod1090 until that module is published.
   settings:
     wsl_v5:
       allow-first-in-block: true
@@ -36,7 +38,7 @@ linters:
         - name: cyclomatic
           arguments: [ 15 ]
     mnd:
-      ignored-numbers: [ 0,1,2,3 ] # These are often used as defaults, not magic numbers
+      ignored-numbers: [ "0", "1", "2", "3" ] # quoted per v2.12 schema; these are often used as defaults, not magic numbers
     funlen:
       lines: 120
 

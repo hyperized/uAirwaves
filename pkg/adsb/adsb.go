@@ -1,387 +1,302 @@
+// Package adsb owns the ADS-B ingest path. The historical
+// implementation consumed readsb's JSON-over-TCP stream; this
+// version drives the radio in-process via the
+// github.com/hyperized/{rtl2832u,demod1090,modes} stack —
+// USB → IQ samples → bit-level demodulation → typed Mode S
+// messages — and aggregates the per-frame state into
+// pkg/airplanes.
 package adsb
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
-	"net"
-	"strconv"
-	"strings"
+	"sync"
 	"time"
 
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
+	"github.com/hyperized/demod1090/demod"
+	"github.com/hyperized/modes"
+	"github.com/hyperized/rtl2832u"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
+	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
 )
 
 const (
-	empty              = ""
-	jsonServiceNetwork = "tcp"
-	jsonServiceAddress = "127.0.0.1:30047"
-	buffer             = 64 * 1024
-	minBufferSize      = 0
-	maxBufferSize      = 1024 * 1024 // the maximum size of the buffer that may be allocated during scanning.
+	// readChunkSize is the IQ buffer the demodulator consumes
+	// per Process call. 32 KiB matches one URB-ring iteration on
+	// the rtl2832u Linux backend, so each chunk is the freshest
+	// bytes the kernel just delivered.
+	readChunkSize = 32 * 1024
+
+	// cprPairWindow is the maximum age a cached CPR frame can
+	// have when paired with a fresh opposite-format frame for a
+	// globally-unambiguous decode. Per DO-260B §A.1.7.10 the
+	// window is 10 seconds; we honour that strictly.
+	cprPairWindow = 10 * time.Second
+
+	// cprCacheCleanupInterval is how often the CPR cache
+	// removes entries older than cprPairWindow. Cheap; runs on
+	// the same goroutine as the demod loop.
+	cprCacheCleanupInterval = 30 * time.Second
 
 	defaultPruneThreshold = 1 * time.Minute
 	defaultPruneFrequency = 5 * time.Second
-	defaultDialTimeout    = 10 * time.Second
 )
 
-var (
-	errJSONStream              = errors.New("error reading from JSON stream")
-	errJSONParse               = errors.New("error parsing JSON")
-	errParseBarometricAltitude = errors.New("error parsing barometric altitude")
-	errProcessAircraft         = errors.New("error processing aircraft")
-	errDial                    = errors.New("error dialing JSON service")
-	errNoAirplane              = errors.New("no airplane found")
-)
+// errOpenReceiver is the static sentinel for the "couldn't open
+// the dongle" failure mode. err113 forbids ad-hoc errors.New
+// from fmt.Errorf; static + %w keeps callers branchable.
+var errOpenReceiver = errors.New("adsb: open RTL-SDR receiver")
 
-// JSONAircraft represents the ADSB structure from readsb.
-type JSONAircraft struct {
-	Hex                    string   `json:"hex"`          // icao hex code
-	Type                   string   `json:"type"`         // Message type
-	Flight                 string   `json:"flight"`       // Callsign
-	BarometricAltitude     AltBaro  `json:"alt_baro"`     // Barometric altitude in feet
-	GeometricAltitude      *int     `json:"alt_geom"`     // Geometric altitude in feet
-	GS                     *float64 `json:"gs"`           // Ground speed in knots
-	TAS                    *float64 `json:"tas"`          // True airspeed in knots
-	IAS                    *int     `json:"ias"`          // Indicated airspeed
-	Track                  *float64 `json:"track"`        // Track/heading in degrees
-	TrackRate              *float64 `json:"track_rate"`   // Rate of change of track
-	Roll                   *float64 `json:"roll"`         // Roll angle
-	MagHeading             *float64 `json:"mag_heading"`  // Magnetic heading
-	TrueHeading            *float64 `json:"true_heading"` // True heading
-	BarometricVerticalRate *int     `json:"baro_rate"`    // Vertical rate in ft/min
-	GeometricVerticalRate  *int     `json:"geom_rate"`    // Geometric vertical rate
-	Squawk                 string   `json:"squawk"`       // Squawk code
-	Emergency              string   `json:"emergency"`    // Emergency status
-	Category               string   `json:"category"`     // Aircraft category
-	Lat                    *float64 `json:"lat"`          // latitude
-	Lon                    *float64 `json:"lon"`          // longitude
-	NIC                    *int     `json:"nic"`          // Navigation Integrity Category
-	RC                     *int     `json:"rc"`           // Radius of Containment
-	SeenPos                *float64 `json:"seen_pos"`     // Seconds since last position
-	Version                *int     `json:"version"`      // ADS-B version
-	NicSupplement          *int     `json:"nic_baro"`     // NIC supplement for barometric altitude
-	NACp                   *int     `json:"nac_p"`        // Navigation Accuracy Category - Position
-	NACv                   *int     `json:"nac_v"`        // Navigation Accuracy Category - Velocity
-	SIL                    *int     `json:"sil"`          // Source Integrity Level
-	SILType                string   `json:"sil_type"`     // Type of SIL
-	GVA                    *int     `json:"gva"`          // Geometric Vertical Accuracy
-	SDA                    *int     `json:"sda"`          // System Design Assurance
-	Alert                  *int     `json:"alert"`        // Flight status alert bit
-	SPI                    *int     `json:"spi"`          // Flight status SPI bit
-	Messages               int      `json:"messages"`     // Total message count
-	Seen                   float64  `json:"seen"`         // Seconds since last message
-	RSSI                   *float64 `json:"rssi"`         // Signal strength in dBFS
-	Dst                    *float64 `json:"dst"`          // Distance to receiver (km)
-	Dir                    *float64 `json:"dir"`          // Direction to receiver (degrees)
-	Now                    *float64 `json:"now"`          // Unix timestamp
-}
-
-// AltBaro represents the barometric altitude, which can be either a number or the string "ground".
-type AltBaro float64
-
-// UnmarshalJSON implements the json.Unmarshaler interface.
-func (a *AltBaro) UnmarshalJSON(input []byte) error {
-	var str string
-	if err := json.Unmarshal(input, &str); err == nil {
-		if str == "ground" {
-			*a = 0
-
-			return nil
-		}
-		// If str is a string but not "ground", try to parse it as a float
-		f, err := strconv.ParseFloat(str, 64)
-		if err != nil {
-			return errors.Join(err, errParseBarometricAltitude)
-		}
-
-		*a = AltBaro(f)
-
-		return nil
-	}
-
-	var f float64
-	if err := json.Unmarshal(input, &f); err == nil {
-		*a = AltBaro(f)
-
-		return nil
-	}
-
-	return errJSONParse
-}
-
-// ADSB represents a connection to the ADSB service.
+// ADSB is the SDR-driven ADS-B ingest. The shape mirrors the
+// original (TCP) implementation so main.go does not change:
+// `adsb.New(opts...).Stream(ctx, planes)`.
 type ADSB struct {
-	connection     net.Conn
-	address        string
-	pruneFrequency time.Duration
 	pruneThreshold time.Duration
-	reconnect      bool
+	pruneFrequency time.Duration
+
+	// myLocation, when set, supplies the reference position for
+	// locally-unambiguous CPR decoding — fast first-fix on every
+	// position frame, no even/odd pairing wait. nil falls back
+	// to globally-unambiguous decoding (waits ~10 s for the
+	// matching CPR half).
+	myLocation *location.Location
+
+	// cpr caches the most recent even / odd half-position
+	// per aircraft so a paired frame can resolve to lat/lon
+	// when no reference position is available.
+	cpr cprCache
 }
 
-// Option is a function that modifies an ADSB instance.
+// Option configures the ADSB stream.
 type Option func(*ADSB)
 
-// New initializes a new ADSB connection.
+// New returns an ADSB stream with the supplied options. Defaults
+// to a 1-minute prune threshold and 5-second prune frequency.
 func New(opts ...Option) *ADSB {
-	adsb := &ADSB{
-		address:        jsonServiceAddress,
-		pruneFrequency: defaultPruneFrequency,
+	stream := &ADSB{
 		pruneThreshold: defaultPruneThreshold,
+		pruneFrequency: defaultPruneFrequency,
+		cpr:            newCPRCache(),
 	}
 
 	for _, opt := range opts {
-		opt(adsb)
+		opt(stream)
 	}
 
-	return adsb
+	return stream
 }
 
-// WithAddress sets the address for the ADSB connection.
-func WithAddress(address string) Option {
-	return func(a *ADSB) {
-		a.address = address
-	}
-}
-
-// WithPruneFrequency sets the frequency at which the airplanes list is pruned.
+// WithPruneFrequency sets how often stale aircraft are evicted
+// from the live list.
 func WithPruneFrequency(frequency time.Duration) Option {
 	return func(a *ADSB) {
-		a.pruneFrequency = frequency
+		if frequency > 0 {
+			a.pruneFrequency = frequency
+		}
 	}
 }
 
-// WithPruneThreshold sets the threshold for pruning old airplanes.
+// WithPruneThreshold sets the staleness deadline an aircraft has
+// to beat before it is evicted from the live list.
 func WithPruneThreshold(threshold time.Duration) Option {
 	return func(a *ADSB) {
-		a.pruneThreshold = threshold
+		if threshold > 0 {
+			a.pruneThreshold = threshold
+		}
 	}
 }
 
-// WithReconnect enables automatic reconnection with exponential backoff on connection errors.
-func WithReconnect(reconnect bool) Option {
-	return func(a *ADSB) {
-		a.reconnect = reconnect
-	}
+// WithLocation supplies the receiver's position for
+// locally-unambiguous CPR decoding. The location is read on
+// every position frame, so a GPS-driven location that updates
+// over time is fine — the decoder uses whatever the location
+// reports at frame time. nil disables local decode and falls
+// back to globally-unambiguous CPR pairing.
+func WithLocation(loc *location.Location) Option {
+	return func(a *ADSB) { a.myLocation = loc }
 }
 
-const (
-	reconnectBaseDelay = 1 * time.Second
-	reconnectMaxDelay  = 30 * time.Second
-)
-
-// Stream grabs the ADSB messages from the JSON service and updates the airplanes list.
-// When reconnect is enabled, it retries connection-level errors with exponential backoff.
+// Stream drives the SDR pipeline and updates planes as decoded
+// frames arrive. Returns nil on context cancellation, an error
+// wrapping errOpenReceiver if the dongle won't open.
 func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
-	backoff := reconnectBaseDelay
+	receiver, err := rtl2832u.Open(rtl2832u.WithAutoGain())
+	if err != nil {
+		return fmt.Errorf("%w: %w", errOpenReceiver, err)
+	}
+
+	defer func() {
+		if cerr := receiver.Close(); cerr != nil {
+			slog.Warn("adsb: receiver close", "error", cerr)
+		}
+	}()
+
+	demodulator := demod.New(demod.WithSampleRate(rtl2832u.DefaultSampleRateHz))
+
+	go a.prune(ctx, planes)
+	go a.cpr.runCleanup(ctx, cprCacheCleanupInterval)
+
+	iqBuf := make([]byte, readChunkSize)
 
 	for {
-		err := a.streamOnce(ctx, planes)
-		if err == nil {
-			return nil
+		count, err := receiver.Read(ctx, iqBuf)
+
+		if count > 0 {
+			for _, frame := range demodulator.Process(iqBuf[:count]) {
+				a.handleFrame(frame, planes)
+			}
 		}
 
-		if !a.reconnect || !isConnectionError(err) {
-			return err
-		}
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil
+			}
 
-		slog.Warn("ADSB stream error, reconnecting", slog.Any("error", err), slog.Duration("delay", backoff))
-
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(backoff):
-			backoff = min(backoff*2, reconnectMaxDelay)
+			return fmt.Errorf("adsb: read: %w", err)
 		}
 	}
 }
 
-// isConnectionError returns true for transient connection errors that warrant a reconnect.
-func isConnectionError(err error) bool {
-	return errors.Is(err, errDial) || errors.Is(err, errJSONStream)
-}
-
-func (a *ADSB) streamOnce(ctx context.Context, planes *airplanes.Airplanes) error {
-	if err := a.connect(ctx); err != nil {
-		return err
-	}
-	defer a.disconnect()
-
+// prune evicts stale aircraft on a fixed cadence until the
+// context cancels.
+func (a *ADSB) prune(ctx context.Context, planes *airplanes.Airplanes) {
 	ticker := time.NewTicker(a.pruneFrequency)
 	defer ticker.Stop()
 
-	lines := make(chan string)
-	errs := make(chan error, 1)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			planes.Prune(a.pruneThreshold)
+		}
+	}
+}
 
-	go a.scan(ctx, lines, errs)
+// cprCache holds the latest even / odd CPR half-position per
+// ICAO so global decoding can pair them when the receiver has
+// no fixed reference.
+type cprCache struct {
+	mu      sync.Mutex
+	entries map[modes.ICAO]*cprEntry
+}
+
+type cprEntry struct {
+	even       modes.CPRPosition
+	odd        modes.CPRPosition
+	evenSeenAt time.Time
+	oddSeenAt  time.Time
+	hasEven    bool
+	hasOdd     bool
+}
+
+func newCPRCache() cprCache {
+	return cprCache{entries: make(map[modes.ICAO]*cprEntry)}
+}
+
+// store records the latest CPR position for the aircraft and
+// returns the resolved (lat, lon, ok) if the cache now holds a
+// fresh pair of opposite formats.
+//
+//nolint:nonamedreturns // (lat, lon, ok) reads clearer named at this signature.
+func (c *cprCache) store(icao modes.ICAO, pos modes.CPRPosition, now time.Time) (latitude, longitude float64, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, found := c.entries[icao]
+	if !found {
+		entry = &cprEntry{}
+		c.entries[icao] = entry
+	}
+
+	switch pos.Format {
+	case modes.CPRFormatEven:
+		entry.even = pos
+		entry.evenSeenAt = now
+		entry.hasEven = true
+	case modes.CPRFormatOdd:
+		entry.odd = pos
+		entry.oddSeenAt = now
+		entry.hasOdd = true
+	default:
+		return 0, 0, false
+	}
+
+	if !entry.hasEven || !entry.hasOdd {
+		return 0, 0, false
+	}
+
+	mostRecent := modes.CPRFormatEven
+	if entry.oddSeenAt.After(entry.evenSeenAt) {
+		mostRecent = modes.CPRFormatOdd
+	}
+
+	older := entry.evenSeenAt
+	if older.After(entry.oddSeenAt) {
+		older = entry.oddSeenAt
+	}
+
+	if now.Sub(older) > cprPairWindow {
+		return 0, 0, false
+	}
+
+	lat, lon, err := modes.DecodeCPRGlobal(entry.even, entry.odd, mostRecent)
+	if err != nil {
+		return 0, 0, false
+	}
+
+	return lat, lon, true
+}
+
+// runCleanup periodically evicts cache entries that have aged
+// past 2× the pair window. Cheap O(N) walk.
+func (c *cprCache) runCleanup(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 
 	for {
 		select {
-		case line, ok := <-lines:
-			if !ok {
-				return a.handleScanEnd(errs)
-			}
-
-			if err := a.handleLine(line, planes); err != nil {
-				return err
-			}
-		case <-ticker.C:
-			planes.Prune(a.pruneThreshold)
-		case <-ctx.Done():
-			return nil
-		}
-	}
-}
-
-func (a *ADSB) scan(ctx context.Context, lines chan<- string, errs chan<- error) {
-	scanner := bufio.NewScanner(a.connection)
-	buf := make([]byte, minBufferSize, buffer)
-	scanner.Buffer(buf, maxBufferSize)
-
-	for scanner.Scan() {
-		select {
-		case lines <- scanner.Text():
 		case <-ctx.Done():
 			return
+		case now := <-ticker.C:
+			c.mu.Lock()
+
+			for icao, entry := range c.entries {
+				youngest := entry.evenSeenAt
+				if entry.oddSeenAt.After(youngest) {
+					youngest = entry.oddSeenAt
+				}
+
+				//nolint:mnd // 2× the pair window is the obvious cleanup horizon.
+				if now.Sub(youngest) > 2*cprPairWindow {
+					delete(c.entries, icao)
+				}
+			}
+
+			c.mu.Unlock()
+		}
+	}
+}
+
+// resolveCPR returns the lat/lon for a position frame, using
+// either the receiver's local reference (fast, single-frame) or
+// the global pair-cache (slower, two-frame). Returns ok=false
+// when neither path can resolve yet.
+//
+//nolint:nonamedreturns,revive // (lat, lon, ok) reads clearer named; one-character-over the line limit.
+func (a *ADSB) resolveCPR(
+	icao modes.ICAO, pos modes.CPRPosition, now time.Time,
+) (latitude, longitude float64, ok bool) {
+	if a.myLocation != nil {
+		refLat, refLon := a.myLocation.GetCoordinates()
+		if refLat != 0 || refLon != 0 {
+			lat, lon := modes.DecodeCPRLocal(pos, refLat, refLon)
+
+			return lat, lon, true
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		errs <- errors.Join(err, errJSONStream)
-	}
-
-	close(lines)
-}
-
-func (*ADSB) handleScanEnd(errs <-chan error) error {
-	select {
-	case err := <-errs:
-		return err
-	default:
-		return nil
-	}
-}
-
-func (*ADSB) handleLine(line string, planes *airplanes.Airplanes) error {
-	if line == "" {
-		return nil
-	}
-
-	var aircraft JSONAircraft
-	if err := json.Unmarshal([]byte(line), &aircraft); err != nil {
-		return errors.Join(err, errJSONParse)
-	}
-
-	if err := updatePlaneData(aircraft, planes); err != nil {
-		return errors.Join(err, errProcessAircraft)
-	}
-
-	return nil
-}
-
-// connect establishes a connection to the JSON service.
-func (a *ADSB) connect(ctx context.Context) error {
-	var err error
-
-	dialer := &net.Dialer{Timeout: defaultDialTimeout}
-
-	a.connection, err = dialer.DialContext(ctx, jsonServiceNetwork, a.address)
-	if err != nil {
-		return errors.Join(err, errDial)
-	}
-
-	return nil
-}
-
-func (a *ADSB) disconnect() {
-	slog.Info("Disconnecting from ADSB service", slog.Any("error", a.connection.Close()))
-}
-
-// MaxBufferSize returns the maximum buffer size allowed for scanning.
-func MaxBufferSize() int {
-	return maxBufferSize
-}
-
-// ErrJSONStream returns the error for JSON stream reading.
-func ErrJSONStream() error {
-	return errJSONStream
-}
-
-// ErrJSONParse returns the error for JSON parsing.
-func ErrJSONParse() error {
-	return errJSONParse
-}
-
-// ErrProcessAircraft returns the error for aircraft processing.
-func ErrProcessAircraft() error {
-	return errProcessAircraft
-}
-
-// ProcessAircraft updates the airplane list with the given JSON data.
-func ProcessAircraft(aircraft JSONAircraft, planes *airplanes.Airplanes) error {
-	return updatePlaneData(aircraft, planes)
-}
-
-func updatePlaneData(aircraft JSONAircraft, planes *airplanes.Airplanes) error {
-	if planes == nil {
-		return errNoAirplane
-	}
-
-	planes.Ensure(aircraft.Hex)
-	plane, _ := planes.Get(aircraft.Hex)
-
-	opts := []airplane.Option{
-		airplane.WithLastUpdate(time.Now().UTC()),
-	}
-
-	if aircraft.Flight != empty {
-		opts = append(opts, airplane.WithCallsign(strings.TrimSpace(aircraft.Flight)))
-	}
-
-	// Altitude: prefer barometric
-	if aircraft.BarometricAltitude != 0 {
-		opts = append(opts, airplane.WithAltitude(float64(aircraft.BarometricAltitude)))
-	} else if aircraft.GeometricAltitude != nil {
-		opts = append(opts, airplane.WithAltitude(float64(*aircraft.GeometricAltitude)))
-	}
-
-	if aircraft.GS != nil {
-		opts = append(opts, airplane.WithVelocity(*aircraft.GS))
-	}
-
-	// Heading: prefer true heading, fall back to magnetic, then track
-	switch { //nolint:revive
-	case aircraft.TrueHeading != nil:
-		opts = append(opts, airplane.WithHeading(*aircraft.TrueHeading))
-	case aircraft.MagHeading != nil:
-		opts = append(opts, airplane.WithHeading(*aircraft.MagHeading))
-	case aircraft.Track != nil:
-		opts = append(opts, airplane.WithHeading(*aircraft.Track))
-	}
-
-	// Vertical rate: prefer barometric
-	if aircraft.BarometricVerticalRate != nil {
-		opts = append(opts, airplane.WithVertRate(float64(*aircraft.BarometricVerticalRate)))
-	} else if aircraft.GeometricVerticalRate != nil {
-		opts = append(opts, airplane.WithVertRate(float64(*aircraft.GeometricVerticalRate)))
-	}
-
-	if aircraft.Lat != nil && aircraft.Lon != nil {
-		opts = append(opts, airplane.WithPosition(*aircraft.Lat, *aircraft.Lon))
-	} else if aircraft.Lat != nil {
-		opts = append(opts, airplane.WithLatitude(*aircraft.Lat))
-	} else if aircraft.Lon != nil {
-		opts = append(opts, airplane.WithLongitude(*aircraft.Lon))
-	}
-
-	if aircraft.Squawk != empty {
-		opts = append(opts, airplane.WithSquawk(aircraft.Squawk))
-	}
-
-	plane.Update(opts...)
-
-	return nil
+	return a.cpr.store(icao, pos, now)
 }

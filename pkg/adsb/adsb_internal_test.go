@@ -1,55 +1,94 @@
 package adsb
 
 import (
-	"context"
-	"net"
 	"testing"
 	"time"
+
+	"github.com/hyperized/modes"
 )
 
-func TestScan_ContextCancelledWhileBlocked(t *testing.T) {
+func TestNewDefaults(t *testing.T) {
 	t.Parallel()
 
-	// Create a pipe to simulate connection
-	server, client := net.Pipe()
+	stream := New()
 
-	defer func() {
-		_ = server.Close()
-		_ = client.Close()
-	}()
-
-	adsbInstance := &ADSB{
-		connection: client,
+	if stream.pruneFrequency != defaultPruneFrequency {
+		t.Errorf("pruneFrequency = %v, want %v", stream.pruneFrequency, defaultPruneFrequency)
 	}
 
-	ctx, cancel := context.WithCancel(t.Context())
-	lines := make(chan string) // unbuffered, will block scan
-	errs := make(chan error, 1)
+	if stream.pruneThreshold != defaultPruneThreshold {
+		t.Errorf("pruneThreshold = %v, want %v", stream.pruneThreshold, defaultPruneThreshold)
+	}
 
-	// Send one line from server
-	go func() {
-		_, _ = server.Write([]byte("test line\n"))
-	}()
+	if stream.myLocation != nil {
+		t.Errorf("myLocation = %v, want nil", stream.myLocation)
+	}
+}
 
-	// Start scan in goroutine
-	scanFinished := make(chan struct{})
+func TestWithPruneFrequency(t *testing.T) {
+	t.Parallel()
 
-	go func() {
-		adsbInstance.scan(ctx, lines, errs)
-		close(scanFinished)
-	}()
+	stream := New(WithPruneFrequency(2 * time.Second))
+	if stream.pruneFrequency != 2*time.Second {
+		t.Errorf("pruneFrequency = %v, want 2s", stream.pruneFrequency)
+	}
 
-	// Wait a bit to ensure scan is blocked on lines <- ...
-	time.Sleep(50 * time.Millisecond)
+	// Zero / negative inputs are ignored.
+	stream = New(WithPruneFrequency(0))
+	if stream.pruneFrequency != defaultPruneFrequency {
+		t.Errorf("zero ignored: pruneFrequency = %v, want default", stream.pruneFrequency)
+	}
+}
 
-	// Cancel context
-	cancel()
+func TestWithPruneThreshold(t *testing.T) {
+	t.Parallel()
 
-	// Wait for scan to finish
-	select {
-	case <-scanFinished:
-		// Success
-	case <-time.After(1 * time.Second):
-		t.Fatal("scan did not finish after context cancellation")
+	stream := New(WithPruneThreshold(30 * time.Second))
+	if stream.pruneThreshold != 30*time.Second {
+		t.Errorf("pruneThreshold = %v, want 30s", stream.pruneThreshold)
+	}
+}
+
+func TestCPRCachePairsEvenAndOdd(t *testing.T) {
+	t.Parallel()
+
+	cache := newCPRCache()
+	now := time.Now()
+
+	// Hand-derived raw values that decode to a sane (lat, lon)
+	// pair under the global algorithm. Reuse the same pair the
+	// modes package round-trip-tests against — no decode value
+	// pinned here, only the "ok=true" outcome we need.
+	even := modes.CPRPosition{Latitude: 92095, Longitude: 39846, Format: modes.CPRFormatEven}
+	odd := modes.CPRPosition{Latitude: 88385, Longitude: 125818, Format: modes.CPRFormatOdd}
+
+	const icao modes.ICAO = 0x484755
+
+	if _, _, ok := cache.store(icao, even, now); ok {
+		t.Error("first store (even only) should not resolve")
+	}
+
+	if _, _, ok := cache.store(icao, odd, now.Add(time.Second)); !ok {
+		t.Error("paired even+odd should resolve")
+	}
+}
+
+func TestCPRCacheRejectsStalePair(t *testing.T) {
+	t.Parallel()
+
+	cache := newCPRCache()
+	now := time.Now()
+
+	even := modes.CPRPosition{Latitude: 92095, Longitude: 39846, Format: modes.CPRFormatEven}
+	odd := modes.CPRPosition{Latitude: 88385, Longitude: 125818, Format: modes.CPRFormatOdd}
+
+	const icao modes.ICAO = 0x484755
+
+	cache.store(icao, even, now)
+	// Even is far in the past; pairing must reject.
+	tooLate := now.Add(cprPairWindow + time.Second)
+
+	if _, _, ok := cache.store(icao, odd, tooLate); ok {
+		t.Error("stale pair should not resolve")
 	}
 }

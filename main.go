@@ -41,7 +41,7 @@ func main() {
 
 	startBatteryWatcher(uic, envOr("BATTERY_PATH", ""))
 	startGPSWatcher(uic, envOr("GPSD_ADDRESS", ""))
-	startADSBStreamer(uic, envOr("ADSB_ADDRESS", ""))
+	startADSBStreamer(uic)
 	startUIUpdater(uic)
 
 	// Input capture for global shortcuts
@@ -170,14 +170,10 @@ func startGPSWatcher(components *uiComponents, address string) {
 	})
 }
 
-func startADSBStreamer(components *uiComponents, address string) {
+func startADSBStreamer(components *uiComponents) {
 	launchWorker(components.waitGroup, components.errChan, errASDBRecover, func() error {
-		opts := []adsb.Option{adsb.WithReconnect(true)}
-		if address != "" {
-			opts = append(opts, adsb.WithAddress(address))
-		}
-
-		return adsb.New(opts...).Stream(components.ctx, components.planeList)
+		return adsb.New(adsb.WithLocation(components.myLocation)).
+			Stream(components.ctx, components.planeList)
 	})
 }
 
