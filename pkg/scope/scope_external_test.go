@@ -22,7 +22,7 @@ func TestNew(t *testing.T) {
 			name:     "default values",
 			opts:     nil,
 			wantMin:  20,
-			wantMax:  200,
+			wantMax:  500,
 			wantStep: 4,
 			wantCurr: 20,
 		},
@@ -32,7 +32,7 @@ func TestNew(t *testing.T) {
 				scope.WithCurrent(50),
 			},
 			wantMin:  20,
-			wantMax:  200,
+			wantMax:  500,
 			wantStep: 4,
 			wantCurr: 50,
 		},
@@ -42,19 +42,19 @@ func TestNew(t *testing.T) {
 				scope.WithCurrent(10),
 			},
 			wantMin:  20,
-			wantMax:  200,
+			wantMax:  500,
 			wantStep: 4,
 			wantCurr: 20,
 		},
 		{
 			name: "custom current clamped to max",
 			opts: []scope.Option{
-				scope.WithCurrent(300),
+				scope.WithCurrent(700),
 			},
 			wantMin:  20,
-			wantMax:  200,
+			wantMax:  500,
 			wantStep: 4,
-			wantCurr: 200,
+			wantCurr: 500,
 		},
 	}
 
@@ -93,10 +93,10 @@ func TestScope_Update(t *testing.T) {
 		t.Errorf("after Update(WithCurrent(100)), GetCurrent() = %v, want 100", scopeInstance.GetCurrent())
 	}
 
-	scopeInstance.Update(scope.WithCurrent(500)) // should clamp to max
+	scopeInstance.Update(scope.WithCurrent(900)) // should clamp to max
 
-	if scopeInstance.GetCurrent() != 200 {
-		t.Errorf("after Update(WithCurrent(500)), GetCurrent() = %v, want 200", scopeInstance.GetCurrent())
+	if scopeInstance.GetCurrent() != 500 {
+		t.Errorf("after Update(WithCurrent(900)), GetCurrent() = %v, want 500", scopeInstance.GetCurrent())
 	}
 }
 

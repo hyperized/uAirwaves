@@ -3,11 +3,14 @@ package scope
 import "sync"
 
 const (
-	defaultMin       = 20
-	defaultMax       = 200
-	defaultSteps     = 4
-	defaultCurrent   = 20
-	defaultIncrement = 20 // step size for manual range adjustments in nautical miles
+	defaultMin     = 20
+	defaultMax     = 500
+	defaultSteps   = 4
+	defaultCurrent = 20
+	// defaultIncrement is the step size for the +/- keys. Kept at
+	// 20 nm so the operator still has fine-grained control across
+	// the wider scope; double-tapping is cheap.
+	defaultIncrement = 20
 )
 
 // Scope represents the current scope of the map.
