@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hyperized/demod1090/demod"
@@ -67,6 +68,28 @@ type ADSB struct {
 	// per aircraft so a paired frame can resolve to lat/lon
 	// when no reference position is available.
 	cpr cprCache
+
+	// totalFrames is every frame that came out of the demod
+	// (clean + corrected). recoveredFrames counts the subset
+	// the single-bit corrector rescued. Both are read by the UI
+	// to surface ingest health.
+	totalFrames     atomic.Uint64
+	recoveredFrames atomic.Uint64
+}
+
+// Stats reports the ingest counters since process start.
+type Stats struct {
+	TotalFrames     uint64
+	RecoveredFrames uint64
+}
+
+// Stats returns a snapshot of the ingest counters. Safe to call
+// from any goroutine.
+func (a *ADSB) Stats() Stats {
+	return Stats{
+		TotalFrames:     a.totalFrames.Load(),
+		RecoveredFrames: a.recoveredFrames.Load(),
+	}
 }
 
 // Option configures the ADSB stream.

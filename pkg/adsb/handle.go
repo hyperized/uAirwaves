@@ -13,6 +13,12 @@ import (
 // modes decoder and folds the result into the live airplanes
 // list.
 func (a *ADSB) handleFrame(frame demod.Frame, planes *airplanes.Airplanes) {
+	a.totalFrames.Add(1)
+
+	if frame.Errors > 0 {
+		a.recoveredFrames.Add(1)
+	}
+
 	mFrame := modes.Frame(frame.Bytes)
 
 	icao, learned := learnICAO(mFrame, frame.CRC)

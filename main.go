@@ -13,6 +13,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/adsb"
+	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/battery"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/gps"
@@ -71,12 +72,16 @@ type uiComponents struct {
 	myLocation     *location.Location
 	waitGroup      *sync.WaitGroup
 	planeList      *airplanes.Airplanes
+	adsbStream     *adsb.ADSB
+	statsTracker   *statsTracker
 	batteryStatus  *battery.Status
 	clock          *tview.TextView
 	statusBar      *tview.TextView
 	headerPanel    *tview.Flex
 	radarPanel     *radar.View
 	planeListPanel *tview.List
+	statsPanel     *tview.TextView
+	rightColumn    *tview.Flex
 	commands       *tview.TextView
 	gpsStatus      *tview.TextView
 	footer         *tview.Flex
@@ -90,6 +95,8 @@ func configureUI() *uiComponents {
 	statusBar := configureStatusbar()
 	commands := configureCommands()
 	gpsStatus := configureGpsStatus()
+	planeListPanel := configurePlaneList()
+	statsPanel := configureStatsPanel()
 
 	return &uiComponents{
 		ctx:            ctx,
@@ -99,11 +106,15 @@ func configureUI() *uiComponents {
 		myLocation:     myLocation,
 		waitGroup:      &sync.WaitGroup{},
 		planeList:      planeList,
+		adsbStream:     adsb.New(adsb.WithLocation(myLocation)),
+		statsTracker:   newStatsTracker(),
 		batteryStatus:  battery.NewStatus(),
 		clock:          clock,
 		statusBar:      statusBar,
 		headerPanel:    configureHeader(clock, gpsStatus, statusBar),
-		planeListPanel: configurePlaneList(),
+		planeListPanel: planeListPanel,
+		statsPanel:     statsPanel,
+		rightColumn:    configureRightColumn(planeListPanel, statsPanel),
 		commands:       commands,
 		gpsStatus:      gpsStatus,
 		footer:         configureFooter(commands),
@@ -114,7 +125,7 @@ func configureGrid(components *uiComponents) *tview.Grid {
 	grid := tview.NewGrid().SetRows(1, 0, 1).SetColumns(0, 50).SetBorders(false) //nolint:mnd
 	grid.AddItem(components.headerPanel, 0, 0, 1, 2, 0, 0, false)
 	grid.AddItem(components.radarPanel, 1, 0, 1, 1, 0, 0, false)
-	grid.AddItem(components.planeListPanel, 1, 1, 1, 1, 0, 0, true)
+	grid.AddItem(components.rightColumn, 1, 1, 1, 1, 0, 0, true)
 	grid.AddItem(components.footer, 2, 0, 1, 2, 0, 0, false)
 
 	return grid
@@ -172,8 +183,7 @@ func startGPSWatcher(components *uiComponents, address string) {
 
 func startADSBStreamer(components *uiComponents) {
 	launchWorker(components.waitGroup, components.errChan, errASDBRecover, func() error {
-		return adsb.New(adsb.WithLocation(components.myLocation)).
-			Stream(components.ctx, components.planeList)
+		return components.adsbStream.Stream(components.ctx, components.planeList)
 	})
 }
 
@@ -212,6 +222,8 @@ func startUIUpdater(components *uiComponents) {
 					updateHeaderColor(components.batteryStatus.GetPercentage(), components.clock, components.statusBar)
 
 					updatePlaneList(components.planeListPanel, components.myLocation, components.planeList)
+					updateStatsPanel(components.statsPanel, components.adsbStream, components.statsTracker,
+						components.myLocation, components.planeList)
 					updateFooter(components.commands, components.radarPanel)
 					components.gpsStatus.SetText("GPS: " + components.myLocation.String())
 				})
@@ -272,6 +284,32 @@ func configurePlaneList() *tview.List {
 		SetBorderPadding(1, 1, 1, 1)
 
 	return planeListPanel
+}
+
+// configureStatsPanel configures the stats panel that lives
+// below the plane list in the right column. tview-rendered text
+// with dynamic colours so the renderer can dim secondary fields.
+func configureStatsPanel() *tview.TextView {
+	statsPanel := tview.NewTextView().SetDynamicColors(true).SetWrap(false)
+	statsPanel.SetBorder(true).SetTitle("Stats").
+		SetTitleColor(tcell.ColorGreen).
+		SetBorderPadding(0, 0, 1, 1)
+
+	return statsPanel
+}
+
+// configureRightColumn stacks the plane list (top 2/3) and the
+// stats panel (bottom 1/3) into a single column so the existing
+// grid slot can host both.
+func configureRightColumn(planeListPanel *tview.List, statsPanel *tview.TextView) *tview.Flex {
+	const (
+		planeListWeight = 2
+		statsWeight     = 1
+	)
+
+	return tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(planeListPanel, 0, planeListWeight, true).
+		AddItem(statsPanel, 0, statsWeight, false)
 }
 
 // configureHeader configures the header panel.
@@ -365,6 +403,168 @@ func updatePlaneList(planeListPanel *tview.List, myLocation *location.Location, 
 
 		planeListPanel.AddItem(mainText, secondaryText, 0, nil)
 	}
+}
+
+// statsTracker keeps the prior tick's frame counters so the
+// stats panel can derive a per-second rate without each call to
+// Stats() mutating shared state.
+type statsTracker struct {
+	lastTotal     uint64
+	lastRecovered uint64
+	lastSampledAt time.Time
+}
+
+func newStatsTracker() *statsTracker {
+	return &statsTracker{lastSampledAt: time.Now()}
+}
+
+// sample returns the per-second frame and recovery rate since
+// the previous call, alongside the cumulative totals. The first
+// call after newStatsTracker has a tiny window (now - construct
+// time), so the rate is approximate until the second tick.
+func (t *statsTracker) sample(stats adsb.Stats) (float64, float64) {
+	now := time.Now()
+	elapsed := now.Sub(t.lastSampledAt).Seconds()
+
+	var framesPerSec, recoveredPerSec float64
+	if elapsed > 0 {
+		framesPerSec = float64(stats.TotalFrames-t.lastTotal) / elapsed
+		recoveredPerSec = float64(stats.RecoveredFrames-t.lastRecovered) / elapsed
+	}
+
+	t.lastTotal = stats.TotalFrames
+	t.lastRecovered = stats.RecoveredFrames
+	t.lastSampledAt = now
+
+	return framesPerSec, recoveredPerSec
+}
+
+// updateStatsPanel refreshes the stats panel with the latest
+// ingest counters and plane-list-derived aggregates. Aircraft
+// without resolved positions (lat/lon = 0) are excluded from the
+// distance and altitude reductions; their absence is normal in
+// the first few seconds after a position-less squitter.
+func updateStatsPanel(
+	statsPanel *tview.TextView,
+	stream *adsb.ADSB,
+	tracker *statsTracker,
+	myLocation *location.Location,
+	planeList *airplanes.Airplanes,
+) {
+	frameStats := stream.Stats()
+	framesPerSec, recoveredPerSec := tracker.sample(frameStats)
+
+	receiverLat, receiverLon := myLocation.GetCoordinates()
+
+	tracked := planeList.Count()
+
+	var (
+		positioned                        int
+		nearestDist                       = math.MaxFloat64
+		farthestDist                      float64
+		nearestCallsign, farthestCallsign string
+		highestAlt                        float64
+		highestCallsign                   string
+	)
+
+	for _, plane := range planeList.Sorted(receiverLat, receiverLon) {
+		snap := plane.GetSnapshot()
+		if snap.Latitude == 0 && snap.Longitude == 0 {
+			continue
+		}
+
+		distance := airplanes.HaversineDistance(receiverLat, receiverLon, snap.Latitude, snap.Longitude)
+		if distance == math.MaxFloat64 {
+			continue
+		}
+
+		positioned++
+
+		if distance < nearestDist {
+			nearestDist = distance
+			nearestCallsign = displayIdent(snap)
+		}
+
+		if distance > farthestDist {
+			farthestDist = distance
+			farthestCallsign = displayIdent(snap)
+		}
+
+		if snap.Altitude > highestAlt {
+			highestAlt = snap.Altitude
+			highestCallsign = displayIdent(snap)
+		}
+	}
+
+	statsPanel.SetText(formatStatsText(statsRender{
+		tracked:          tracked,
+		positioned:       positioned,
+		nearestDist:      nearestDist,
+		nearestCallsign:  nearestCallsign,
+		farthestDist:     farthestDist,
+		farthestCallsign: farthestCallsign,
+		highestAlt:       highestAlt,
+		highestCallsign:  highestCallsign,
+		framesPerSec:     framesPerSec,
+		recoveredPerSec:  recoveredPerSec,
+		totalFrames:      frameStats.TotalFrames,
+		recoveredFrames:  frameStats.RecoveredFrames,
+	}))
+}
+
+// statsRender packages the aggregated values formatStatsText
+// renders. Hoisted to a struct so the formatter signature stays
+// readable as fields accumulate.
+type statsRender struct {
+	tracked, positioned               int
+	nearestDist, farthestDist         float64
+	nearestCallsign, farthestCallsign string
+	highestAlt                        float64
+	highestCallsign                   string
+	framesPerSec, recoveredPerSec     float64
+	totalFrames, recoveredFrames      uint64
+}
+
+func formatStatsText(render statsRender) string {
+	nearest := "—"
+	if render.positioned > 0 {
+		nearest = fmt.Sprintf("%.1f nm  [gray]%s[white]", render.nearestDist, render.nearestCallsign)
+	}
+
+	farthest := "—"
+	if render.positioned > 0 {
+		farthest = fmt.Sprintf("%.1f nm  [gray]%s[white]", render.farthestDist, render.farthestCallsign)
+	}
+
+	highest := "—"
+	if render.highestAlt > 0 {
+		highest = fmt.Sprintf("%.0f ft  [gray]%s[white]", render.highestAlt, render.highestCallsign)
+	}
+
+	return fmt.Sprintf(
+		"[::b]Tracked[::-]    %d  ([gray]%d positioned[white])\n"+
+			"[::b]Nearest[::-]    %s\n"+
+			"[::b]Farthest[::-]   %s\n"+
+			"[::b]Highest[::-]    %s\n"+
+			"[::b]Frames/s[::-]   %.1f  ([gray]rec %.2f[white])\n"+
+			"[::b]Total[::-]      %d  ([gray]rec %d[white])",
+		render.tracked, render.positioned,
+		nearest,
+		farthest,
+		highest,
+		render.framesPerSec, render.recoveredPerSec,
+		render.totalFrames, render.recoveredFrames,
+	)
+}
+
+// displayIdent picks the callsign when present, falling back to
+// the bare ICAO so the stats panel always names something.
+func displayIdent(snap airplane.Snapshot) string {
+	if snap.Callsign != "" {
+		return snap.Callsign
+	}
+
+	return snap.ICAO
 }
 
 // updateFooter updates the footer text with the current scope range and heading indicator settings.
