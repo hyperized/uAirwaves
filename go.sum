@@ -6,6 +6,8 @@ github.com/hyperized/modes v0.1.0 h1:YOpThL3j1rHVl8ggc3DfH57UXsKanHsC0a04jLpcIsM
 github.com/hyperized/modes v0.1.0/go.mod h1:91Mi9u5mxZE4QmQTzN6ln29iiUmK9LgrpOGD0XjFKJQ=
 github.com/hyperized/rtl2832u v0.1.0 h1:xWt54jeBgpRJICs2qSgYQjHwBnJuUzs88Putp9WGhMk=
 github.com/hyperized/rtl2832u v0.1.0/go.mod h1:wvIMZIU2j/GmxjWFlbFaiklLYV/Dg+umi9oiPu+6WMs=
+github.com/hyperized/rtl2832u v0.1.1 h1:z51uMRPUbVsXOWMvxhJLFvr5DdSstt0oFisAvGLnx2M=
+github.com/hyperized/rtl2832u v0.1.1/go.mod h1:wvIMZIU2j/GmxjWFlbFaiklLYV/Dg+umi9oiPu+6WMs=
 github.com/lucasb-eyer/go-colorful v1.3.0 h1:2/yBRLdWBZKrf7gB40FoiKfAWYQ0lqNcbuQwVHXptag=
 github.com/lucasb-eyer/go-colorful v1.3.0/go.mod h1:R4dSotOR9KMtayYi1e77YzuveK+i7ruzyGqttikkLy0=
 github.com/rivo/tview v0.42.0 h1:b/ftp+RxtDsHSaynXTbJb+/n/BxDEi+W3UfF5jILK6c=
