@@ -190,10 +190,10 @@ func testAutoScopeDisabled(t *testing.T, loc *location.Location, screen tcell.Sc
 
 func testNoPlanesResetsScope(t *testing.T, loc *location.Location, screen tcell.Screen) {
 	t.Helper()
-	t.Run("no planes resets scope", func(t *testing.T) {
+	t.Run("autoscope sits at max regardless of planes", func(t *testing.T) {
 		t.Parallel()
 
-		// Create a new view to test reset behavior
+		// Create a new view to test autoscope behavior
 		newPlanes := airplanes.New()
 		newView := radar.New(newPlanes, loc)
 		newView.SetScopeRange(100)
@@ -201,8 +201,9 @@ func testNoPlanesResetsScope(t *testing.T, loc *location.Location, screen tcell.
 
 		newView.Draw(screen)
 
-		if newView.GetScopeRange() != 20 { // default min is 20
-			t.Errorf("expected scope range to reset to 20, got %f", newView.GetScopeRange())
+		const wantMax = 500.0
+		if newView.GetScopeRange() != wantMax {
+			t.Errorf("expected autoscope to pin scope at max %f, got %f", wantMax, newView.GetScopeRange())
 		}
 
 		newView.ToggleAutoScope()

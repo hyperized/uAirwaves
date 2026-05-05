@@ -163,8 +163,8 @@ func (r *View) Draw(screen tcell.Screen) { //nolint:funlen
 	centerLatitude, centerLongitude := r.myLocation.GetCoordinates()
 	planeList := r.planes.Sorted(centerLatitude, centerLongitude)
 
-	if len(planeList) == 0 && r.autoScope {
-		r.myScope.Update(scope.WithCurrent(r.myScope.GetMin()))
+	if r.autoScope {
+		r.myScope.Update(scope.WithCurrent(r.myScope.GetMax()))
 	}
 
 	r.drawPlanes(screen, planeList, centerX, centerY, xScale, yScale, centerLatitude, centerLongitude)
@@ -228,10 +228,6 @@ func (r *View) drawPlanes(
 		// Skip if outside scope
 		dist := math.Sqrt(nmX*nmX + nmY*nmY)
 		if dist > r.myScope.GetCurrent() {
-			if r.autoScope {
-				r.myScope.Update(scope.WithCurrent(r.myScope.GetCurrent() + r.myScope.GetMin()))
-			}
-
 			continue
 		}
 
