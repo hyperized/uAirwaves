@@ -2,12 +2,24 @@ package adsb
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/hyperized/demod1090/demod"
 	"github.com/hyperized/modes"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
 )
+
+// validCallsign reports whether s looks like a real Mode S
+// identification. The modes decoder maps unassigned 6-bit values
+// to '#', so any '#' is a strong signal the source frame was
+// noise that happened to slip past the preamble + CRC checks
+// with TC 1..4 in the type-code position. We also reject empty
+// strings so the airplane.WithCallsign no-op guard isn't the
+// only line of defence.
+func validCallsign(s string) bool {
+	return s != "" && !strings.ContainsRune(s, '#')
+}
 
 // handleFrame routes a freshly-demodulated frame through the
 // modes decoder and folds the result into the live airplanes
@@ -133,7 +145,7 @@ func applyCommBAltitude(plane *airplane.Airplane, frame modes.Frame, icao modes.
 		plane.Update(airplane.WithAltitude(float64(reply.AltitudeFeet)))
 	}
 
-	if callsign, ok := modes.DecodeBDS20Callsign(reply.MB); ok {
+	if callsign, ok := modes.DecodeBDS20Callsign(reply.MB); ok && validCallsign(callsign) {
 		plane.Update(airplane.WithCallsign(callsign))
 	}
 }
@@ -146,7 +158,7 @@ func applyCommBIdentity(plane *airplane.Airplane, frame modes.Frame, icao modes.
 
 	plane.Update(airplane.WithSquawk(fmt.Sprintf("%04d", reply.Squawk)))
 
-	if callsign, ok := modes.DecodeBDS20Callsign(reply.MB); ok {
+	if callsign, ok := modes.DecodeBDS20Callsign(reply.MB); ok && validCallsign(callsign) {
 		plane.Update(airplane.WithCallsign(callsign))
 	}
 }
@@ -171,7 +183,9 @@ func (a *ADSB) applyExtendedSquitter(plane *airplane.Airplane, frame modes.Frame
 func (a *ADSB) applyESMessage(plane *airplane.Airplane, icao modes.ICAO, msg modes.Message) {
 	switch typed := msg.(type) {
 	case modes.IdentificationMessage:
-		plane.Update(airplane.WithCallsign(typed.Callsign))
+		if validCallsign(typed.Callsign) {
+			plane.Update(airplane.WithCallsign(typed.Callsign))
+		}
 	case modes.AirbornePositionMessage:
 		applyAirbornePosition(a, plane, icao, typed)
 	case modes.SurfacePositionMessage:
