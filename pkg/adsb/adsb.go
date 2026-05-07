@@ -175,11 +175,25 @@ func defaultReceiverFactory() (Receiver, error) {
 }
 
 // defaultDemodulatorFactory builds a demod1090 Demodulator at the
-// rtl2832u stack's default sample rate (2.4 MS/s).
+// rtl2832u stack's default sample rate (2.4 MS/s) with the two
+// preamble / bit-recovery knobs that meaningfully improve real-
+// world yield: permissive preamble matching plus single-bit
+// error correction.
+//
+// Field measurement on a Jetvision antenna direct-feeding a
+// uConsole-attached RTL-SDR (no LNA, auto-gain, 60 s capture):
+// strict-default produces 7 DF 17 frames and 1 ident; permissive
+// + error-correction produces 43 DF 17 and 7 idents — a 6× /7×
+// jump. Closes the long-standing "I see flights but never IDs"
+// gap relative to readsb's defaults.
 //
 //nolint:ireturn // factory: returning the interface is the seam tests rely on.
 func defaultDemodulatorFactory() Demodulator {
-	return demod.New(demod.WithSampleRate(rtl2832u.DefaultSampleRateHz))
+	return demod.New(
+		demod.WithSampleRate(rtl2832u.DefaultSampleRateHz),
+		demod.WithPermissivePreamble(),
+		demod.WithErrorCorrection(),
+	)
 }
 
 // WithPruneFrequency sets how often stale aircraft are evicted
