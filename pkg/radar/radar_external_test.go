@@ -25,8 +25,8 @@ func TestNew(t *testing.T) {
 		t.Errorf("expected default scope range 20, got %f", view.GetScopeRange())
 	}
 
-	if !view.GetHeadingIndicatorEnabled() {
-		t.Error("expected heading indicator to be enabled by default")
+	if view.GetHeadingIndicatorEnabled() {
+		t.Error("expected heading indicator to be disabled by default")
 	}
 
 	if !view.GetAutoScopeEnabled() {
