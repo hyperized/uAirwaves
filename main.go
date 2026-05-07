@@ -106,7 +106,7 @@ func configureUI() *uiComponents {
 		myLocation:     myLocation,
 		waitGroup:      &sync.WaitGroup{},
 		planeList:      planeList,
-		adsbStream:     adsb.New(adsb.WithLocation(myLocation)),
+		adsbStream:     adsb.New(buildADSBOptions(myLocation)...),
 		statsTracker:   newStatsTracker(),
 		batteryStatus:  battery.NewStatus(),
 		clock:          clock,
@@ -119,6 +119,26 @@ func configureUI() *uiComponents {
 		gpsStatus:      gpsStatus,
 		footer:         configureFooter(commands),
 	}
+}
+
+// buildADSBOptions assembles the adsb.New option slice from the
+// runtime environment: WithLocation always; WithReceiverFactory
+// when UAIRWAVES_REPLAY_IQ points at a capture file (which means
+// pkg/adsb consumes the file instead of opening the SDR — the
+// path stays bit-identical between live and replay so the same
+// binary smoke-tests both modes on the device).
+func buildADSBOptions(myLocation *location.Location) []adsb.Option {
+	opts := []adsb.Option{adsb.WithLocation(myLocation)}
+
+	if path := envOr("UAIRWAVES_REPLAY_IQ", ""); path != "" {
+		opts = append(opts, adsb.WithReceiverFactory(func() (adsb.Receiver, error) {
+			return adsb.NewFileReceiver(path)
+		}))
+
+		slog.Info("adsb: replaying from file", slog.String("path", path))
+	}
+
+	return opts
 }
 
 func configureGrid(components *uiComponents) *tview.Grid {
