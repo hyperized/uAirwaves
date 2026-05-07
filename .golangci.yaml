@@ -37,6 +37,11 @@ linters:
           arguments: [ 20 ]
         - name: cyclomatic
           arguments: [ 15 ]
+        - name: max-public-structs
+          # pkg/adsb exposes the receiver / demodulator interfaces and
+          # their factory aliases alongside the existing ADSB + Stats;
+          # the default of 5 forces unrelated splits.
+          arguments: [ 50 ]
     mnd:
       ignored-numbers: [ "0", "1", "2", "3" ] # quoted per v2.12 schema; these are often used as defaults, not magic numbers
     funlen:

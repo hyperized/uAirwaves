@@ -50,12 +50,44 @@ const (
 // from fmt.Errorf; static + %w keeps callers branchable.
 var errOpenReceiver = errors.New("adsb: open RTL-SDR receiver")
 
+// Receiver is the slice of *rtl2832u.Receiver pkg/adsb actually
+// uses. Hoisted to an interface so Stream() can be tested with a
+// fake or driven by a non-USB source (UAIRWAVES_REPLAY_IQ in main).
+type Receiver interface {
+	Read(ctx context.Context, p []byte) (int, error)
+	Close() error
+}
+
+// ReceiverFactory builds a Receiver. Producing the receiver inside
+// Stream (rather than passing one in) keeps the API consistent
+// with rtl2832u's "open at use-site" pattern — the lifetime is
+// scoped to a single Stream call so a re-call after a transient
+// failure can re-open without the caller wiring up the lifecycle.
+type ReceiverFactory func() (Receiver, error)
+
+// Demodulator is the slice of *demod.Demodulator pkg/adsb uses.
+// Same rationale as Receiver: an interface means the test path
+// can substitute a fake that returns pre-canned frames.
+type Demodulator interface {
+	Process(samples []byte) []demod.Frame
+}
+
+// DemodulatorFactory builds a Demodulator. Same rationale as
+// ReceiverFactory.
+type DemodulatorFactory func() Demodulator
+
 // ADSB is the SDR-driven ADS-B ingest. The shape mirrors the
 // original (TCP) implementation so main.go does not change:
 // `adsb.New(opts...).Stream(ctx, planes)`.
 type ADSB struct {
 	pruneThreshold time.Duration
 	pruneFrequency time.Duration
+
+	// receiverFactory and demodulatorFactory default to the
+	// rtl2832u + demod stack. Tests inject fakes to drive Stream
+	// without real silicon.
+	receiverFactory    ReceiverFactory
+	demodulatorFactory DemodulatorFactory
 
 	// myLocation, when set, supplies the reference position for
 	// locally-unambiguous CPR decoding — fast first-fix on every
@@ -106,12 +138,16 @@ func (a *ADSB) Stats() Stats {
 type Option func(*ADSB)
 
 // New returns an ADSB stream with the supplied options. Defaults
-// to a 1-minute prune threshold and 5-second prune frequency.
+// to a 1-minute prune threshold and 5-second prune frequency, and
+// the production rtl2832u + demod1090 stack for the receiver and
+// demodulator.
 func New(opts ...Option) *ADSB {
 	stream := &ADSB{
-		pruneThreshold: defaultPruneThreshold,
-		pruneFrequency: defaultPruneFrequency,
-		cpr:            newCPRCache(),
+		pruneThreshold:     defaultPruneThreshold,
+		pruneFrequency:     defaultPruneFrequency,
+		cpr:                newCPRCache(),
+		receiverFactory:    defaultReceiverFactory,
+		demodulatorFactory: defaultDemodulatorFactory,
 	}
 
 	for _, opt := range opts {
@@ -119,6 +155,31 @@ func New(opts ...Option) *ADSB {
 	}
 
 	return stream
+}
+
+// defaultReceiverFactory opens a real RTL-SDR via the rtl2832u
+// driver. rtl2832u's default config puts every R820T2 stage on
+// the chip's internal AGC loops, with the demod's RF/IF AGC loop
+// disabled (rtl2832u v0.1.3+ — earlier versions kept it on for
+// SignalStats and the two AGCs fought, killing decode). Same
+// config librtlsdr / readsb use for `--gain auto`.
+//
+//nolint:ireturn // factory: returning the interface is the seam tests rely on.
+func defaultReceiverFactory() (Receiver, error) {
+	rcv, err := rtl2832u.Open()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errOpenReceiver, err)
+	}
+
+	return rcv, nil
+}
+
+// defaultDemodulatorFactory builds a demod1090 Demodulator at the
+// rtl2832u stack's default sample rate (2.4 MS/s).
+//
+//nolint:ireturn // factory: returning the interface is the seam tests rely on.
+func defaultDemodulatorFactory() Demodulator {
+	return demod.New(demod.WithSampleRate(rtl2832u.DefaultSampleRateHz))
 }
 
 // WithPruneFrequency sets how often stale aircraft are evicted
@@ -151,13 +212,36 @@ func WithLocation(loc *location.Location) Option {
 	return func(a *ADSB) { a.myLocation = loc }
 }
 
+// WithReceiverFactory replaces the default rtl2832u-backed
+// receiver builder. The factory is invoked once per Stream call,
+// so a re-entrant Stream after a transient failure produces a
+// fresh receiver. Pass nil to clear and fall back to the default.
+func WithReceiverFactory(factory ReceiverFactory) Option {
+	return func(a *ADSB) {
+		if factory != nil {
+			a.receiverFactory = factory
+		}
+	}
+}
+
+// WithDemodulatorFactory replaces the default demod1090-backed
+// demodulator builder. Same lifecycle as WithReceiverFactory:
+// invoked once per Stream call. Pass nil to clear.
+func WithDemodulatorFactory(factory DemodulatorFactory) Option {
+	return func(a *ADSB) {
+		if factory != nil {
+			a.demodulatorFactory = factory
+		}
+	}
+}
+
 // Stream drives the SDR pipeline and updates planes as decoded
 // frames arrive. Returns nil on context cancellation, an error
 // wrapping errOpenReceiver if the dongle won't open.
 func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
-	receiver, err := rtl2832u.Open(rtl2832u.WithAutoGain())
+	receiver, err := a.receiverFactory()
 	if err != nil {
-		return fmt.Errorf("%w: %w", errOpenReceiver, err)
+		return err
 	}
 
 	defer func() {
@@ -166,7 +250,7 @@ func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
 		}
 	}()
 
-	demodulator := demod.New(demod.WithSampleRate(rtl2832u.DefaultSampleRateHz))
+	demodulator := a.demodulatorFactory()
 
 	go a.prune(ctx, planes)
 	go a.cpr.runCleanup(ctx, cprCacheCleanupInterval)
