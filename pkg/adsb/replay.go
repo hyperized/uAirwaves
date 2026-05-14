@@ -13,13 +13,22 @@ import (
 // fmt.Errorf; static + %w keeps callers branchable.
 var errOpenReplay = errors.New("adsb: open replay")
 
+// ErrReplayEnded is the sentinel the file-backed Receiver returns
+// when the IQ capture is fully consumed. Stream recognises it and
+// returns nil so the UI exits cleanly; downstream code can still
+// branch on it via errors.Is when the distinction between
+// "operator cancelled" and "replay file exhausted" matters.
+var ErrReplayEnded = errors.New("adsb: replay ended")
+
 // NewFileReceiver opens path for reading and returns a Receiver
 // that streams the file's contents through Read calls. The file
 // is expected to hold raw interleaved unsigned 8-bit IQ samples
 // (rtl_sdr / dump1090 --ifile / rtl-probe --capture format).
 //
-// EOF is surfaced as context.Canceled rather than io.EOF so the
-// Stream loop in pkg/adsb treats end-of-replay as a clean shutdown.
+// EOF is surfaced as ErrReplayEnded so callers can distinguish
+// "replay file exhausted" from "operator cancelled the context";
+// Stream maps ErrReplayEnded back to a nil return so the UI
+// shutdown path is unchanged.
 //
 // Useful for off-line A/B testing of the demod chain on hosts
 // without an SDR, and for the UAIRWAVES_REPLAY_IQ workflow that
@@ -42,7 +51,8 @@ type fileReceiver struct {
 }
 
 // Read pulls the next chunk from the file. EOF is mapped to
-// context.Canceled so the Stream loop's cancel-arm fires.
+// ErrReplayEnded so Stream can distinguish "capture exhausted"
+// from "operator cancelled".
 func (r *fileReceiver) Read(ctx context.Context, p []byte) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, fmt.Errorf("adsb: replay context: %w", err)
@@ -50,7 +60,7 @@ func (r *fileReceiver) Read(ctx context.Context, p []byte) (int, error) {
 
 	count, err := r.file.Read(p)
 	if errors.Is(err, io.EOF) {
-		return count, context.Canceled
+		return count, ErrReplayEnded
 	}
 
 	if err != nil {

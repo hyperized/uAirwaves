@@ -98,8 +98,12 @@ type ADSB struct {
 
 	// cpr caches the most recent even / odd half-position
 	// per aircraft so a paired frame can resolve to lat/lon
-	// when no reference position is available.
-	cpr cprCache
+	// when no reference position is available. Stored as a
+	// pointer so the embedded sync.Mutex is never copied (e.g.
+	// if ADSB itself is ever moved by value) — go vet copylocks
+	// would otherwise flag the implicit address-take in
+	// `go a.cpr.runCleanup(...)`.
+	cpr *cprCache
 
 	// totalFrames is every frame that came out of the demod
 	// (clean + corrected). recoveredFrames counts the subset
@@ -250,8 +254,24 @@ func WithDemodulatorFactory(factory DemodulatorFactory) Option {
 }
 
 // Stream drives the SDR pipeline and updates planes as decoded
-// frames arrive. Returns nil on context cancellation, an error
-// wrapping errOpenReceiver if the dongle won't open.
+// frames arrive.
+//
+// Returns:
+//
+//   - nil on context cancellation (user pressed q / SIGINT) or on
+//     ErrReplayEnded (the file-backed receiver exhausted its
+//     capture). Both are clean shutdowns from the UI's perspective.
+//   - an error from the configured ReceiverFactory if the source
+//     can't be opened. The default factory wraps errOpenReceiver
+//     for SDR-open failures; NewFileReceiver wraps errOpenReplay
+//     for missing replay files.
+//   - a wrapped read error for anything else.
+//
+// Callers that need to distinguish "operator cancelled" from
+// "replay file ended" can branch on errors.Is(err, ErrReplayEnded)
+// against the Receiver's Read return value directly; Stream's
+// return value collapses both into nil because the UI lifecycle
+// is identical.
 func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
 	receiver, err := a.receiverFactory()
 	if err != nil {
@@ -281,7 +301,9 @@ func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
 		}
 
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			if errors.Is(err, context.Canceled) ||
+				errors.Is(err, context.DeadlineExceeded) ||
+				errors.Is(err, ErrReplayEnded) {
 				return nil
 			}
 
@@ -323,8 +345,8 @@ type cprEntry struct {
 	hasOdd     bool
 }
 
-func newCPRCache() cprCache {
-	return cprCache{entries: make(map[modes.ICAO]*cprEntry)}
+func newCPRCache() *cprCache {
+	return &cprCache{entries: make(map[modes.ICAO]*cprEntry)}
 }
 
 // store records the latest CPR position for the aircraft and

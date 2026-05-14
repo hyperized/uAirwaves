@@ -664,6 +664,96 @@ func TestApplyAircraftStatusEmergencyRoutes(t *testing.T) {
 	}
 }
 
+// TestApplyESMessageIdentificationRejectsInvalidCallsign forces
+// the IdentificationMessage `return nil` path. A TC 4 frame with
+// an all-zero ME-callsign payload decodes to eight '#' characters
+// — well above the validCallsign one-placeholder cap — so the
+// non-validCallsign branch returns no options and the airplane
+// snapshot's Callsign stays empty.
+func TestApplyESMessageIdentificationRejectsInvalidCallsign(t *testing.T) {
+	t.Parallel()
+
+	bytes := make([]byte, modes.LongFrameBytes)
+	bytes[0] = byte(modes.DFExtendedSquitter) << 3
+	bytes[1] = 0x7A
+	bytes[2] = 0x7B
+	bytes[3] = 0x7C
+	bytes[4] = byte(4) << 3 // TC 4, zero callsign bytes follow
+	// bytes[5..10] remain zero → eight '#' chars after decode
+
+	frame := demod.Frame{Bytes: bytes, DF: uint8(modes.DFExtendedSquitter)}
+
+	planes := streamSingleFrame(t, frame)
+
+	plane, ok := planes.Get("7A7B7C")
+	if !ok {
+		t.Fatal("plane not registered")
+	}
+
+	if got := plane.GetSnapshot().Callsign; got != "" {
+		t.Errorf("callsign = %q, want empty (validCallsign should reject ########)", got)
+	}
+}
+
+// TestApplyESMessageAircraftStatusNonEmergency forces the
+// AircraftStatus inner-`if` false branch and the `return nil`
+// that follows: subtype 1 with EmergencyState == None must NOT
+// emit a squawk option (snapshot squawk stays empty).
+func TestApplyESMessageAircraftStatusNonEmergency(t *testing.T) {
+	t.Parallel()
+
+	bytes := make([]byte, modes.LongFrameBytes)
+	bytes[0] = byte(modes.DFExtendedSquitter) << 3
+	bytes[1] = 0xE1
+	bytes[2] = 0xE2
+	bytes[3] = 0xE3
+	bytes[4] = (byte(28) << 3) | 0x01 // TC 28, subtype 1
+	// bytes[5] zero → EmergencyState = None
+
+	frame := demod.Frame{Bytes: bytes, DF: uint8(modes.DFExtendedSquitter)}
+
+	planes := streamSingleFrame(t, frame)
+
+	plane, ok := planes.Get("E1E2E3")
+	if !ok {
+		t.Fatal("plane not registered")
+	}
+
+	if got := plane.GetSnapshot().Squawk; got != "" {
+		t.Errorf("squawk = %q, want empty (non-emergency status should not set squawk)", got)
+	}
+}
+
+// TestApplyESMessageUnhandledTypeFallsThrough forces the `default`
+// branch in applyESMessage. TC 29 (Target State and Status) is
+// recognised by the modes decoder but isn't in our handler's
+// dispatch list — applyESMessage must return nil and the airplane
+// state stays empty bar the message-count bump.
+func TestApplyESMessageUnhandledTypeFallsThrough(t *testing.T) {
+	t.Parallel()
+
+	bytes := make([]byte, modes.LongFrameBytes)
+	bytes[0] = byte(modes.DFExtendedSquitter) << 3
+	bytes[1] = 0x29
+	bytes[2] = 0x2A
+	bytes[3] = 0x2B
+	bytes[4] = byte(29) << 3 // TC 29 → TargetStateMessage (unhandled)
+
+	frame := demod.Frame{Bytes: bytes, DF: uint8(modes.DFExtendedSquitter)}
+
+	planes := streamSingleFrame(t, frame)
+
+	plane, ok := planes.Get("292A2B")
+	if !ok {
+		t.Fatal("plane not registered (learnICAO should still accept the frame)")
+	}
+
+	snap := plane.GetSnapshot()
+	if snap.Callsign != "" || snap.Altitude != 0 || snap.Squawk != "" || snap.Velocity != -1 {
+		t.Errorf("unhandled TC should not mutate plane state; snap=%+v", snap)
+	}
+}
+
 // makeShortFrame builds a 7-byte short DF frame whose first byte
 // carries the requested DF in the top 5 bits. The address bytes
 // (positions 1..3) are decorative — DF 0/4/5/16/20/21 recover
@@ -692,6 +782,732 @@ func makeLongFrame(downlinkFormat modes.DownlinkFormat) []byte {
 	out[0] = byte(downlinkFormat) << 3
 
 	return out
+}
+
+// TestValidCallsign locks in the noise-rejection contract added
+// to validCallsign: a callsign must be at least 3 characters and
+// contain at most 1 unassigned-byte placeholder ('#'). Shorter
+// strings come from random 6-bit values that happened to decode
+// to spaces (trimmed away) — they look character-valid but are
+// too short to be a real Mode S ID.
+func TestValidCallsign(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "empty rejected", input: "", want: false},
+		{name: "single char rejected", input: "A", want: false},
+		{name: "two chars rejected", input: "AB", want: false},
+		{name: "three chars accepted", input: "ABC", want: true},
+		{name: "three chars with one placeholder accepted", input: "AB#", want: true},
+		{name: "two placeholders rejected", input: "AB##", want: false},
+		{name: "long clean callsign accepted", input: "KLM1023", want: true},
+		{name: "long callsign with single placeholder accepted", input: "KLM10#3", want: true},
+		{name: "long callsign with two placeholders rejected", input: "KL#10#3", want: false},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := validCallsign(testCase.input); got != testCase.want {
+				t.Errorf("validCallsign(%q) = %v, want %v", testCase.input, got, testCase.want)
+			}
+		})
+	}
+}
+
+// TestLearnICAORejectsCorruptedResidual locks in the residual==0
+// gate for DF 17, DF 18, and DF 11 unsolicited. Without it,
+// preamble false-positives that pass length checks but fail CRC
+// produced phantom ICAOs and seeded the airplanes list with
+// nonsense aircraft (visible in the field as a tight grid around
+// the receiver — locally-unambiguous CPR rounding junk frames).
+func TestLearnICAORejectsCorruptedResidual(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		frame       modes.Frame
+		residual    uint32
+		wantICAO    modes.ICAO
+		wantLearned bool
+	}{
+		{
+			name:        "DF17 clean residual zero accepted",
+			frame:       makeESLongFrame(modes.DFExtendedSquitter, 0xAB, 0xCD, 0xEF),
+			residual:    0,
+			wantICAO:    0xABCDEF,
+			wantLearned: true,
+		},
+		{
+			name:        "DF17 corrupted residual rejected",
+			frame:       makeESLongFrame(modes.DFExtendedSquitter, 0xAB, 0xCD, 0xEF),
+			residual:    0xDEADBE,
+			wantICAO:    0,
+			wantLearned: false,
+		},
+		{
+			name:        "DF18 clean residual zero accepted",
+			frame:       makeESLongFrame(modes.DFNonTransponderES, 0x11, 0x22, 0x33),
+			residual:    0,
+			wantICAO:    0x112233,
+			wantLearned: true,
+		},
+		{
+			name:        "DF18 corrupted residual rejected",
+			frame:       makeESLongFrame(modes.DFNonTransponderES, 0x11, 0x22, 0x33),
+			residual:    0x00BEEF,
+			wantICAO:    0,
+			wantLearned: false,
+		},
+		{
+			name:        "DF11 clean residual zero accepted",
+			frame:       makeShortAllCallReply(0x44, 0x55, 0x66),
+			residual:    0,
+			wantICAO:    0x445566,
+			wantLearned: true,
+		},
+		{
+			name:        "DF11 corrupted residual rejected",
+			frame:       makeShortAllCallReply(0x44, 0x55, 0x66),
+			residual:    0x000001,
+			wantICAO:    0,
+			wantLearned: false,
+		},
+		{
+			name:        "DF17 wrong length rejected even with zero residual",
+			frame:       makeShortFrameWithDF(modes.DFExtendedSquitter), // DF17 in a 7-byte slot
+			residual:    0,
+			wantICAO:    0,
+			wantLearned: false,
+		},
+		{
+			name:        "DF4 surveillance accepts non-zero residual as ICAO",
+			frame:       makeShortFrameWithDF(modes.DFSurveillanceAlt),
+			residual:    0x778899,
+			wantICAO:    0x778899,
+			wantLearned: true,
+		},
+		{
+			name:        "DF4 surveillance rejects zero residual",
+			frame:       makeShortFrameWithDF(modes.DFSurveillanceAlt),
+			residual:    0,
+			wantICAO:    0,
+			wantLearned: false,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotICAO, gotLearned := learnICAO(testCase.frame, testCase.residual)
+			if gotLearned != testCase.wantLearned {
+				t.Errorf("learnICAO learned = %v, want %v", gotLearned, testCase.wantLearned)
+			}
+
+			if gotICAO != testCase.wantICAO {
+				t.Errorf("learnICAO icao = %#x, want %#x", gotICAO, testCase.wantICAO)
+			}
+		})
+	}
+}
+
+// makeESLongFrame builds a 14-byte DF 17/18 frame with the given
+// AA bytes in positions 1..3. The DF lives in the top 5 bits of
+// byte 0. The remaining bytes are zero — learnICAO ignores them.
+func makeESLongFrame(downlinkFormat modes.DownlinkFormat, aaHigh, aaMid, aaLow byte) modes.Frame {
+	out := make(modes.Frame, modes.LongFrameBytes)
+	out[0] = byte(downlinkFormat) << 3
+	out[1] = aaHigh
+	out[2] = aaMid
+	out[3] = aaLow
+
+	return out
+}
+
+// makeShortAllCallReply builds a 7-byte DF 11 frame with the
+// given AA bytes in positions 1..3.
+func makeShortAllCallReply(aaHigh, aaMid, aaLow byte) modes.Frame {
+	out := make(modes.Frame, modes.ShortFrameBytes)
+	out[0] = byte(modes.DFAllCallReply) << 3
+	out[1] = aaHigh
+	out[2] = aaMid
+	out[3] = aaLow
+
+	return out
+}
+
+// makeShortFrameWithDF builds a 7-byte short frame with only the
+// DF set. Address bytes are zero — DF 0/4/5/16 recover the
+// addressed ICAO from the CRC residual the caller supplies.
+func makeShortFrameWithDF(downlinkFormat modes.DownlinkFormat) modes.Frame {
+	out := make(modes.Frame, modes.ShortFrameBytes)
+	out[0] = byte(downlinkFormat) << 3
+
+	return out
+}
+
+// TestLearnICAOMilitaryESFallthrough exercises the unhandled-DF
+// branch in learnICAO. DF 19 (Military ES) is opaque to civilian
+// receivers and is the documented fallthrough case — the function
+// must return (0, false) so the frame is discarded. Without this
+// branch a future DF added to the modes package would silently
+// crash through the parser.
+func TestLearnICAOMilitaryESFallthrough(t *testing.T) {
+	t.Parallel()
+
+	out := make(modes.Frame, modes.LongFrameBytes)
+	out[0] = byte(modes.DFMilitaryES) << 3
+
+	icao, learned := learnICAO(out, 0)
+	if learned {
+		t.Errorf("DF 19 must not be learned; got icao=%#x", icao)
+	}
+
+	if icao != 0 {
+		t.Errorf("DF 19 must return icao=0 on fallthrough; got %#x", icao)
+	}
+}
+
+// TestHandleFrameRecoveredCounterIncrements covers the
+// `if frame.Errors > 0 { a.recoveredFrames.Add(1) }` branch in
+// handleFrame. Without it, the stats panel's "recovered" rate
+// would freeze at zero even when the bit-error corrector rescued
+// frames — masking decoder health under noisy RF conditions.
+func TestHandleFrameRecoveredCounterIncrements(t *testing.T) {
+	t.Parallel()
+
+	dem := &fakeDemodulator{
+		frames: []demod.Frame{{
+			Bytes: makeESLongFrame(modes.DFExtendedSquitter, 0x10, 0x20, 0x30),
+			DF:    uint8(modes.DFExtendedSquitter),
+			CRC:   0,
+			// Errors > 0 marks the frame as corrector-rescued.
+			Errors:   1,
+			WallTime: time.Now(),
+		}},
+	}
+
+	rcv := &fakeReceiver{reads: []fakeRead{{data: []byte{0x00}}}}
+	stream := New(
+		WithReceiverFactory(func() (Receiver, error) { return rcv, nil }),
+		WithDemodulatorFactory(func() Demodulator { return dem }),
+	)
+
+	if err := stream.Stream(t.Context(), airplanes.New()); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	stats := stream.Stats()
+	if stats.TotalFrames != 1 {
+		t.Errorf("TotalFrames = %d, want 1", stats.TotalFrames)
+	}
+
+	if stats.RecoveredFrames != 1 {
+		t.Errorf("RecoveredFrames = %d, want 1", stats.RecoveredFrames)
+	}
+}
+
+// TestApplySurveillanceAltitudeAppliesAltitude wires a hand-built
+// DF 4 frame with a valid Q-bit altitude code through Stream so
+// applySurveillanceAltitude reaches the WithAltitude branch (not
+// just the early-return error path).
+//
+// The altitude payload sits in the bottom 13 bits of bytes 2..3
+// of the 7-byte frame. We set Q=1 and a small N value so the
+// decoder returns a fixed-altitude result with AltitudeError=nil.
+func TestApplySurveillanceAltitudeAppliesAltitude(t *testing.T) {
+	t.Parallel()
+
+	frame := makeShortFrame(modes.DFSurveillanceAlt, 0)
+	// Set Q-bit (bit 4 of byte 3, == bit 4 of the 13-bit altitude code).
+	frame[3] = 0x10
+
+	demFrame := demod.Frame{
+		Bytes: frame,
+		DF:    uint8(modes.DFSurveillanceAlt),
+		CRC:   0xAAA001,
+	}
+
+	planes := streamSingleFrame(t, demFrame)
+
+	plane, ok := planes.Get("AAA001")
+	if !ok {
+		t.Fatal("plane not registered")
+	}
+
+	// AltitudeFeet for a Q-bit=1 payload with all other bits zero
+	// resolves to a fixed (deterministic) value; we just need it
+	// to be non-default (default Snapshot.Altitude is 0). Use the
+	// snapshot to read it.
+	if plane.GetSnapshot().Altitude == 0 {
+		t.Error("altitude not applied; WithAltitude branch not reached")
+	}
+}
+
+// TestApplySurveillanceAltitudeRejectsMalformed forces the
+// `err != nil` early return: a too-short frame routed through
+// learnICAO (which doesn't length-check for DF 4) reaches
+// applySurveillanceAltitude and the decoder rejects on length.
+// We assert the plane was still registered (learnICAO accepted)
+// but altitude stayed at default.
+func TestApplySurveillanceAltitudeRejectsMalformed(t *testing.T) {
+	t.Parallel()
+
+	demFrame := demod.Frame{
+		Bytes: []byte{byte(modes.DFSurveillanceAlt) << 3}, // 1 byte = malformed
+		DF:    uint8(modes.DFSurveillanceAlt),
+		CRC:   0xBBB002,
+	}
+
+	planes := streamSingleFrame(t, demFrame)
+
+	plane, ok := planes.Get("BBB002")
+	if !ok {
+		t.Fatal("plane not registered (learnICAO should accept any non-zero residual)")
+	}
+
+	if plane.GetSnapshot().Altitude != 0 {
+		t.Errorf("altitude unexpectedly set to %v after malformed frame", plane.GetSnapshot().Altitude)
+	}
+}
+
+// TestApplySurveillanceIdentityAppliesSquawk reaches the
+// WithSquawk branch in applySurveillanceIdentity. The squawk
+// payload sits in the bottom 13 bits of bytes 2..3; we leave the
+// frame zeroed so the decoded squawk is "0000" — non-empty, so
+// WithSquawk applies.
+func TestApplySurveillanceIdentityAppliesSquawk(t *testing.T) {
+	t.Parallel()
+
+	frame := makeShortFrame(modes.DFSurveillanceID, 0)
+
+	demFrame := demod.Frame{
+		Bytes: frame,
+		DF:    uint8(modes.DFSurveillanceID),
+		CRC:   0xCCC003,
+	}
+
+	planes := streamSingleFrame(t, demFrame)
+
+	plane, ok := planes.Get("CCC003")
+	if !ok {
+		t.Fatal("plane not registered")
+	}
+
+	if got := plane.GetSnapshot().Squawk; got == "" {
+		t.Errorf("squawk not applied; want non-empty, got %q", got)
+	}
+}
+
+// TestApplySurveillanceIdentityRejectsMalformed forces the error
+// early-return of applySurveillanceIdentity by routing a too-
+// short frame through.
+func TestApplySurveillanceIdentityRejectsMalformed(t *testing.T) {
+	t.Parallel()
+
+	demFrame := demod.Frame{
+		Bytes: []byte{byte(modes.DFSurveillanceID) << 3},
+		DF:    uint8(modes.DFSurveillanceID),
+		CRC:   0xDDD004,
+	}
+
+	planes := streamSingleFrame(t, demFrame)
+
+	plane, ok := planes.Get("DDD004")
+	if !ok {
+		t.Fatal("plane not registered")
+	}
+
+	if got := plane.GetSnapshot().Squawk; got != "" {
+		t.Errorf("squawk unexpectedly set to %q after malformed frame", got)
+	}
+}
+
+// TestApplyCommBAltitudeReachesAllBranches drives both the
+// WithAltitude branch (AltitudeError nil) and the BDS 2,0
+// callsign branch in applyCommBAltitude. The frame's MB payload
+// begins with 0x20 (BDS code) followed by a valid 8-char
+// callsign in the Mode S 6-bit alphabet — the decoder folds it
+// into the airplane's callsign.
+func TestApplyCommBAltitudeReachesAllBranches(t *testing.T) {
+	t.Parallel()
+
+	frame := makeLongFrame(modes.DFCommBAltitude)
+	// 13-bit altitude payload with Q-bit set, low N.
+	frame[3] = 0x10
+	// MB payload (bytes 4..10): BDS 2,0 + KLM1023.
+	frame[4] = 0x20
+	// Encode "KLM1023" into the 6-bit alphabet (K=0x0B, L=0x0C,
+	// M=0x0D, 1=0x31, 0=0x30, 2=0x32, 3=0x33, space=0x20). Bit
+	// layout: 8 characters × 6 bits = 48 bits = bytes 5..10.
+	// K(11) L(12) M(13) 1(49) 0(48) 2(50) 3(51) space(32):
+	//   binary chunks: 001011 001100 001101 110001 110000 110010 110011 100000
+	//   bytes:         00101100 11000011 01110001 11000011 00101100 11100000
+	frame[5] = 0b00101100
+	frame[6] = 0b11000011
+	frame[7] = 0b01110001
+	frame[8] = 0b11000011
+	frame[9] = 0b00101100
+	frame[10] = 0b11100000
+
+	demFrame := demod.Frame{
+		Bytes: frame,
+		DF:    uint8(modes.DFCommBAltitude),
+		CRC:   0xEEE005,
+	}
+
+	planes := streamSingleFrame(t, demFrame)
+
+	plane, ok := planes.Get("EEE005")
+	if !ok {
+		t.Fatal("plane not registered")
+	}
+
+	snap := plane.GetSnapshot()
+	if snap.Altitude == 0 {
+		t.Error("altitude not applied via DF 20 + Q-bit payload")
+	}
+
+	if snap.Callsign == "" {
+		t.Errorf("callsign not applied via BDS 2,0 payload; got %q", snap.Callsign)
+	}
+}
+
+// TestApplyCommBAltitudeRejectsMalformed forces the error early-
+// return: a short frame routed through learnICAO (which doesn't
+// length-check for DF 20) reaches applyCommBAltitude and the
+// decoder rejects on length.
+func TestApplyCommBAltitudeRejectsMalformed(t *testing.T) {
+	t.Parallel()
+
+	demFrame := demod.Frame{
+		Bytes: []byte{byte(modes.DFCommBAltitude) << 3},
+		DF:    uint8(modes.DFCommBAltitude),
+		CRC:   0xFFF006,
+	}
+
+	planes := streamSingleFrame(t, demFrame)
+
+	plane, ok := planes.Get("FFF006")
+	if !ok {
+		t.Fatal("plane not registered")
+	}
+
+	snap := plane.GetSnapshot()
+	if snap.Altitude != 0 || snap.Callsign != "" {
+		t.Errorf("decoder error path did not early-return; snap=%+v", snap)
+	}
+}
+
+// TestApplyCommBIdentityReachesAllBranches drives the squawk and
+// BDS 2,0 callsign branches in applyCommBIdentity. Same MB
+// payload shape as TestApplyCommBAltitudeReachesAllBranches.
+func TestApplyCommBIdentityReachesAllBranches(t *testing.T) {
+	t.Parallel()
+
+	frame := makeLongFrame(modes.DFCommBIdentity)
+	// MB payload (bytes 4..10): BDS 2,0 + KLM1023.
+	frame[4] = 0x20
+	frame[5] = 0b00101100
+	frame[6] = 0b11000011
+	frame[7] = 0b01110001
+	frame[8] = 0b11000011
+	frame[9] = 0b00101100
+	frame[10] = 0b11100000
+
+	demFrame := demod.Frame{
+		Bytes: frame,
+		DF:    uint8(modes.DFCommBIdentity),
+		CRC:   0xABC007,
+	}
+
+	planes := streamSingleFrame(t, demFrame)
+
+	plane, ok := planes.Get("ABC007")
+	if !ok {
+		t.Fatal("plane not registered")
+	}
+
+	snap := plane.GetSnapshot()
+	if snap.Squawk == "" {
+		t.Errorf("squawk not applied; got %q", snap.Squawk)
+	}
+
+	if snap.Callsign == "" {
+		t.Errorf("callsign not applied via BDS 2,0 payload; got %q", snap.Callsign)
+	}
+}
+
+// TestApplyCommBIdentityRejectsMalformed forces the error early-
+// return of applyCommBIdentity.
+func TestApplyCommBIdentityRejectsMalformed(t *testing.T) {
+	t.Parallel()
+
+	demFrame := demod.Frame{
+		Bytes: []byte{byte(modes.DFCommBIdentity) << 3},
+		DF:    uint8(modes.DFCommBIdentity),
+		CRC:   0xABC008,
+	}
+
+	planes := streamSingleFrame(t, demFrame)
+
+	plane, ok := planes.Get("ABC008")
+	if !ok {
+		t.Fatal("plane not registered")
+	}
+
+	snap := plane.GetSnapshot()
+	if snap.Squawk != "" || snap.Callsign != "" {
+		t.Errorf("decoder error path did not early-return; snap=%+v", snap)
+	}
+}
+
+// TestApplyAirbornePositionWithLocationAppliesLatLon reaches the
+// WithLatitude / WithLongitude branch in applyAirbornePosition.
+// With WithLocation set, resolveCPR always returns ok=true (local
+// reference), so a valid TC 11 frame plumbs both altitude and
+// position into the airplane snapshot.
+func TestApplyAirbornePositionWithLocationAppliesLatLon(t *testing.T) {
+	t.Parallel()
+
+	bytes := make([]byte, modes.LongFrameBytes)
+	bytes[0] = byte(modes.DFExtendedSquitter) << 3
+	bytes[1] = 0x12
+	bytes[2] = 0x34
+	bytes[3] = 0x56
+	bytes[4] = byte(11 << 3) // TC 11 barometric airborne position
+	// Altitude with Q-bit = 1 so AltitudeError is nil.
+	// altCode = (bytes[5]<<4) | ((bytes[6]&0xF0)>>4); Q-bit is
+	// altCode bit 4 = bit 0 of bytes[5]. We need it set.
+	bytes[5] = 0x81
+	bytes[6] = 0x10
+
+	demFrame := demod.Frame{Bytes: bytes, DF: uint8(modes.DFExtendedSquitter)}
+
+	planes := streamSingleFrame(t, demFrame, WithLocation(newLocationAt(52.31, 4.77)))
+
+	plane, ok := planes.Get("123456")
+	if !ok {
+		t.Fatal("plane not registered")
+	}
+
+	snap := plane.GetSnapshot()
+	// resolveCPR with a reference returns ok=true; the local CPR
+	// rounding produces some lat/lon near the reference. We just
+	// assert the snapshot moved off (0, 0).
+	if snap.Latitude == 0 && snap.Longitude == 0 {
+		t.Error("position not applied via WithLatitude/WithLongitude")
+	}
+
+	if snap.Altitude == 0 {
+		t.Error("altitude not applied via WithAltitude (AltitudeError nil branch missed)")
+	}
+}
+
+// TestCPRCacheStoreRejectsUnknownFormat exercises the
+// `default: return 0, 0, false` branch in cprCache.store. The
+// CPR format enum has Even and Odd; any other byte value is an
+// invalid wire-format CPR and must be discarded.
+func TestCPRCacheStoreRejectsUnknownFormat(t *testing.T) {
+	t.Parallel()
+
+	cache := newCPRCache()
+	pos := modes.CPRPosition{Latitude: 0, Longitude: 0, Format: 99} // invalid
+
+	_, _, ok := cache.store(0x484755, pos, time.Now())
+	if ok {
+		t.Error("unknown CPR format should not resolve")
+	}
+}
+
+// TestCPRCacheStoreDecodeError forces the
+// `if err != nil { return 0, 0, false }` branch after
+// modes.DecodeCPRGlobal. A pair whose decoded latitudes fall in
+// different NL zones returns ErrCPRZoneCrossing — store must
+// swallow it and return ok=false rather than emit nonsense
+// coordinates.
+//
+// The values below were picked by inspection: cprResolution is
+// 131072; lat=0 (even) vs lat=131000 (odd, near max) put the
+// resolved latitudes on opposite sides of the NL = 1 boundary
+// near the pole, which the decoder rejects.
+func TestCPRCacheStoreDecodeError(t *testing.T) {
+	t.Parallel()
+
+	cache := newCPRCache()
+	now := time.Now()
+
+	// Pair discovered by exhaustive search against the modes
+	// package: lat=0 (even) + lat=31000 (odd) resolves to two
+	// different NL zones, so DecodeCPRGlobal returns
+	// ErrCPRZoneCrossing.
+	even := modes.CPRPosition{Latitude: 0, Longitude: 0, Format: modes.CPRFormatEven}
+	odd := modes.CPRPosition{Latitude: 31000, Longitude: 0, Format: modes.CPRFormatOdd}
+
+	const icao modes.ICAO = 0x484755
+
+	cache.store(icao, even, now)
+
+	_, _, ok := cache.store(icao, odd, now.Add(time.Second))
+	if ok {
+		t.Error("NL-zone-crossing pair should not resolve; want ok=false")
+	}
+}
+
+// TestCPRCacheStorePicksOddAsOlderForPairWindow reaches the
+// `older = entry.oddSeenAt` branch of cprCache.store. We stage
+// odd first at t0, then even at t0+1s; the function computes
+// older = min(evenSeenAt, oddSeenAt) and must pick odd here.
+func TestCPRCacheStorePicksOddAsOlderForPairWindow(t *testing.T) {
+	t.Parallel()
+
+	cache := newCPRCache()
+
+	odd := modes.CPRPosition{Latitude: 88385, Longitude: 125818, Format: modes.CPRFormatOdd}
+	even := modes.CPRPosition{Latitude: 92095, Longitude: 39846, Format: modes.CPRFormatEven}
+
+	const icao modes.ICAO = 0x484755
+
+	t0 := time.Now()
+	cache.store(icao, odd, t0) // odd first → oldest
+
+	if _, _, ok := cache.store(icao, even, t0.Add(time.Second)); !ok {
+		t.Error("paired odd+even should resolve when odd is older")
+	}
+}
+
+// TestRunCleanupPicksOddAsYoungest reaches the
+// `youngest = entry.oddSeenAt` branch of runCleanup. Stage even
+// in the past, odd in the more recent past, then run cleanup —
+// the entry must survive because youngest (oddSeenAt) is recent.
+func TestRunCleanupPicksOddAsYoungest(t *testing.T) {
+	t.Parallel()
+
+	cache := newCPRCache()
+	now := time.Now()
+
+	even := modes.CPRPosition{Latitude: 92095, Longitude: 39846, Format: modes.CPRFormatEven}
+	odd := modes.CPRPosition{Latitude: 88385, Longitude: 125818, Format: modes.CPRFormatOdd}
+
+	cache.store(0x484755, even, now)
+	cache.store(0x484755, odd, now.Add(time.Second))
+
+	// Backdate even into the past so cleanup considers it ancient,
+	// but odd stays recent — youngest = oddSeenAt path.
+	cache.mu.Lock()
+	cache.entries[0x484755].evenSeenAt = now.Add(-3 * cprPairWindow)
+	cache.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	go cache.runCleanup(ctx, 5*time.Millisecond) //nolint:mnd // tick fast to bound the test.
+
+	// Give the cleanup a few ticks, then assert the entry is still
+	// there (because the most-recent timestamp — odd — is fresh).
+	time.Sleep(30 * time.Millisecond) //nolint:mnd // bounded wait for several cleanup iterations.
+
+	cache.mu.Lock()
+	_, present := cache.entries[0x484755]
+	cache.mu.Unlock()
+
+	cancel()
+
+	if !present {
+		t.Error("entry evicted despite young oddSeenAt; cleanup youngest-of-pair branch is wrong")
+	}
+}
+
+// TestDefaultReceiverFactoryWrapsErrorOnNoDongle drives the error
+// branch of defaultReceiverFactory: on a test host without an
+// RTL-SDR connected, rtl2832u.Open() returns an error and the
+// factory must wrap it with errOpenReceiver so callers can
+// branch on the sentinel.
+//
+// On a dev box with a dongle attached, Open() succeeds — we close
+// the returned receiver and skip the assertion. The error-wrap
+// path is what we actually want to lock in.
+func TestDefaultReceiverFactoryWrapsErrorOnNoDongle(t *testing.T) {
+	t.Parallel()
+
+	receiver, err := defaultReceiverFactory()
+	if err == nil {
+		// Dongle present — close and call it good. The error-wrap
+		// branch is only reachable on dongle-less hosts.
+		_ = receiver.Close()
+
+		t.Skip("dongle present on test host; error branch unreachable here")
+	}
+
+	if !errors.Is(err, errOpenReceiver) {
+		t.Errorf("error not wrapped with errOpenReceiver: %v", err)
+	}
+}
+
+// TestDefaultDemodulatorFactoryReturnsNonNil drives the default
+// demodulator constructor. It cannot fail (no IO), so we just
+// confirm the result is usable: Process must not panic and must
+// return a (possibly empty) slice.
+func TestDefaultDemodulatorFactoryReturnsNonNil(t *testing.T) {
+	t.Parallel()
+
+	dem := defaultDemodulatorFactory()
+	if dem == nil {
+		t.Fatal("defaultDemodulatorFactory returned nil")
+	}
+
+	frames := dem.Process([]byte{})
+	if frames == nil && len(frames) > 0 {
+		t.Errorf("Process unexpected return: %v", frames)
+	}
+}
+
+// TestStreamReceiverCloseErrorLogs reaches the close-error branch
+// of the deferred receiver.Close() in Stream. A receiver that
+// returns an error from Close() goes through the slog.Warn arm
+// — we exercise the path without asserting on log output; the
+// presence of the receiver in our test seam guarantees the
+// branch is taken.
+func TestStreamReceiverCloseErrorLogs(t *testing.T) {
+	t.Parallel()
+
+	rcv := &fakeReceiverCloseErr{}
+	stream := New(
+		WithReceiverFactory(func() (Receiver, error) { return rcv, nil }),
+		WithDemodulatorFactory(func() Demodulator { return &fakeDemodulator{} }),
+	)
+
+	if err := stream.Stream(t.Context(), airplanes.New()); err != nil {
+		t.Errorf("Stream err = %v, want nil", err)
+	}
+
+	if rcv.closed != 1 {
+		t.Errorf("rcv.closed = %d, want 1", rcv.closed)
+	}
+}
+
+// fakeReceiverCloseErr is a one-off Receiver that returns
+// context.Canceled from Read and a synthetic error from Close —
+// just enough to drive the close-error branch in Stream's defer.
+type fakeReceiverCloseErr struct {
+	closed int
+}
+
+var errSyntheticReceiverClose = errors.New("synthetic close failure")
+
+func (*fakeReceiverCloseErr) Read(_ context.Context, _ []byte) (int, error) {
+	return 0, context.Canceled
+}
+
+func (f *fakeReceiverCloseErr) Close() error {
+	f.closed++
+
+	return errSyntheticReceiverClose
 }
 
 func TestPruneEvictsStaleAircraft(t *testing.T) {

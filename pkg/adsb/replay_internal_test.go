@@ -69,10 +69,10 @@ func TestFileReceiverReadStreamsBytesThenSurfacesEOF(t *testing.T) {
 		}
 	}
 
-	// Second read must surface EOF as context.Canceled so the
-	// Stream loop's cancel-arm fires.
-	if _, err := rcv.Read(t.Context(), buf); !errors.Is(err, context.Canceled) {
-		t.Errorf("second Read err = %v, want context.Canceled", err)
+	// Second read must surface EOF as ErrReplayEnded so callers
+	// can distinguish "capture exhausted" from "operator cancelled".
+	if _, err := rcv.Read(t.Context(), buf); !errors.Is(err, ErrReplayEnded) {
+		t.Errorf("second Read err = %v, want ErrReplayEnded", err)
 	}
 }
 
@@ -102,8 +102,8 @@ func TestFileReceiverReadOnClosedFileSurfacesError(t *testing.T) {
 		t.Fatal("Read on closed file: want error, got nil")
 	}
 
-	if errors.Is(err, context.Canceled) {
-		t.Errorf("Read on closed file = %v; should not be context.Canceled (only EOF maps that way)", err)
+	if errors.Is(err, ErrReplayEnded) {
+		t.Errorf("Read on closed file = %v; should not be ErrReplayEnded (only EOF maps that way)", err)
 	}
 }
 
@@ -157,6 +157,28 @@ func TestFileReceiverCloseTwiceIsSurfacedAsError(t *testing.T) {
 	// receiver must wrap that error rather than swallow it.
 	if err := rcv.Close(); err == nil {
 		t.Error("second Close: want non-nil error, got nil")
+	}
+}
+
+// TestStreamMapsReplayEndedToNil locks the documented contract on
+// Stream: when the receiver returns ErrReplayEnded the loop exits
+// cleanly with nil so the UI shutdown path is identical to a
+// user-initiated context cancellation. Without this branch the
+// replay path would surface an "adsb: read" wrap to the error
+// channel and the UI would log a spurious fatal at end-of-file.
+func TestStreamMapsReplayEndedToNil(t *testing.T) {
+	t.Parallel()
+
+	rcv := &fakeReceiver{
+		reads: []fakeRead{{err: ErrReplayEnded}},
+	}
+	stream := New(
+		WithReceiverFactory(func() (Receiver, error) { return rcv, nil }),
+		WithDemodulatorFactory(func() Demodulator { return &fakeDemodulator{} }),
+	)
+
+	if err := stream.Stream(t.Context(), airplanes.New()); err != nil {
+		t.Errorf("Stream err = %v, want nil (ErrReplayEnded must map to clean exit)", err)
 	}
 }
 
