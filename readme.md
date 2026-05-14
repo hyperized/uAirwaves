@@ -62,11 +62,37 @@ make build-macos      # local build for development
 
 Environment variables (all optional):
 
-| Variable        | Default                  | Effect |
-|-----------------|--------------------------|--------|
-| `GPS_ADDRESS`   | `localhost:2947`         | `gpsd` socket. |
+| Variable              | Default                                            | Effect |
+|-----------------------|----------------------------------------------------|--------|
+| `GPSD_ADDRESS`        | `127.0.0.1:2947`                                   | `gpsd` socket. |
+| `BATTERY_PATH`        | `/sys/class/power_supply/axp20x-battery/uevent`    | `power_supply` uevent file. Missing/unreadable is non-fatal — the watcher logs a warning and keeps polling, so a transient udev race at boot doesn't take the app down. |
+| `UAIRWAVES_REPLAY_IQ` | unset                                              | Path to a captured IQ file. When set, the SDR backend is bypassed and the file is streamed through the demod chain instead — useful for deterministic on-device replay and off-line A/B testing. The receiver returns `adsb.ErrReplayEnded` on EOF, which `Stream` converts to a clean shutdown. |
 
 The ADS-B path no longer takes an `ADSB_ADDRESS` — it owns the SDR directly.
+
+## Repository layout
+
+```
+main.go                 — wiring only (workers, ticker, panic recovery)
+internal/ui/            — pure UI helpers extracted out of main for testability (100% covered)
+pkg/adsb/               — Receiver/Demodulator factories, frame dispatch, CPR resolution
+pkg/airplane/           — single-plane state + Snapshot (lock-free read path)
+pkg/airplanes/          — thread-safe map; Sorted() returns []Snapshot
+pkg/battery/            — power_supply uevent watcher (resilient to transient read errors)
+pkg/gps/                — gpsd client with reconnect-on-hangup (errSessionClosed sentinel)
+pkg/location/           — receiver lat/lon
+pkg/radar/              — scope, plane rendering, heatmap, trails
+pkg/scope/              — auto-scope range arithmetic
+```
+
+## Testing
+
+```sh
+go test -race -cover ./...           # matches CI
+go test -race -run TestName ./pkg/x  # single test
+```
+
+Internal/external test split per package (`*_internal_test.go` for unexported access, `*_external_test.go` for the public surface). All package tests run with `-race` and `t.Parallel()`.
 
 ## Status
 
