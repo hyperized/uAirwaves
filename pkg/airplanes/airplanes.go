@@ -1,8 +1,9 @@
 package airplanes
 
 import (
+	"cmp"
 	"math"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -11,8 +12,10 @@ import (
 
 type airplaneMap map[string]*airplane.Airplane
 
-// List is a thread-safe slice of airplanes.
-type List []*airplane.Airplane
+// List is a thread-safe slice of snapshot-level airplane data.
+// Snapshots are point-in-time value copies — safe to iterate
+// without holding any package lock.
+type List []airplane.Snapshot
 
 // Airplanes represents a thread-safe list of airplanes.
 type Airplanes struct {
@@ -61,41 +64,47 @@ func (l *Airplanes) Prune(threshold time.Duration) {
 	}
 }
 
-// Sorted returns a thread-safe snapshot of planes sorted by:
-// 1. Distance to receiver (ascending)
-// 2. Last update (descending)
-// 3. ICAO (ascending).
+// Sorted returns a thread-safe slice of plane snapshots sorted
+// by:
+//
+//  1. Distance to receiver (ascending)
+//  2. Last update (descending)
+//  3. ICAO (ascending)
+//
+// Each plane's snapshot is taken once during the read pass, so
+// the comparator works on value copies and the per-tick total is
+// one RLock per *Airplane (not three: previous shape took a
+// snapshot pair per comparator call). Callers consume snapshots
+// directly — no re-acquire on the hot path.
 func (l *Airplanes) Sorted(receiverLat, receiverLon float64) List {
 	l.mu.RLock()
-	defer l.mu.RUnlock()
 
-	result := make(List, 0, len(l.planes))
+	snapshots := make(List, 0, len(l.planes))
 	for _, p := range l.planes {
-		result = append(result, p)
+		snapshots = append(snapshots, p.GetSnapshot())
 	}
 
-	sort.Slice(result, func(i, j int) bool {
-		snapI := result[i].GetSnapshot()
-		snapJ := result[j].GetSnapshot()
+	l.mu.RUnlock()
 
-		// 2. Distance to receiver (ascending - closer first)
-		distI := HaversineDistance(receiverLat, receiverLon, snapI.Latitude, snapI.Longitude)
-		distJ := HaversineDistance(receiverLat, receiverLon, snapJ.Latitude, snapJ.Longitude)
+	slices.SortFunc(snapshots, func(left, right airplane.Snapshot) int {
+		// 1. Distance to receiver (ascending - closer first)
+		distL := HaversineDistance(receiverLat, receiverLon, left.Latitude, left.Longitude)
+		distR := HaversineDistance(receiverLat, receiverLon, right.Latitude, right.Longitude)
 
-		if distI != distJ {
-			return distI < distJ
+		if cmpDist := cmp.Compare(distL, distR); cmpDist != 0 {
+			return cmpDist
 		}
 
-		// 3. Last update (descending - more recent first)
-		if !snapI.LastUpdate.Equal(snapJ.LastUpdate) {
-			return snapI.LastUpdate.After(snapJ.LastUpdate)
+		// 2. Last update (descending - more recent first)
+		if !left.LastUpdate.Equal(right.LastUpdate) {
+			return right.LastUpdate.Compare(left.LastUpdate)
 		}
 
-		// 4. icao (ascending)
-		return snapI.ICAO < snapJ.ICAO
+		// 3. ICAO (ascending)
+		return cmp.Compare(left.ICAO, right.ICAO)
 	})
 
-	return result
+	return snapshots
 }
 
 // HaversineDistance calculates the distance in nautical miles between two coordinates.

@@ -9,21 +9,22 @@ import (
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
 )
 
+const testICAO = "ABCDEF"
+
 func TestNew(t *testing.T) {
 	t.Parallel()
 
-	icao := "ABCDEF"
-	plane := airplane.New(icao)
+	plane := airplane.New(testICAO)
 
-	if plane.GetICAO() != "ABCDEF" {
-		t.Errorf("expected ABCDEF, got %s", plane.GetICAO())
+	if got := plane.GetSnapshot().ICAO; got != testICAO {
+		t.Errorf("expected %s, got %s", testICAO, got)
 	}
 }
 
 func TestAirplane_String(t *testing.T) {
 	t.Parallel()
 
-	plane := airplane.New("ABCDEF")
+	plane := airplane.New(testICAO)
 	plane.Update(
 		airplane.WithAltitude(30000),
 		airplane.WithHeading(180),
@@ -38,10 +39,36 @@ func TestAirplane_String(t *testing.T) {
 	}
 }
 
+// TestSnapshotSummaryMatchesString locks the contract that
+// Snapshot.Summary returns the same byte sequence as
+// Airplane.String when called against the same plane state.
+// Snapshot.Summary is the lock-free path the UI list rendering
+// uses; if the two ever drift, list rows would silently disagree
+// with the live String() format under inspection from tests.
+func TestSnapshotSummaryMatchesString(t *testing.T) {
+	t.Parallel()
+
+	plane := airplane.New(testICAO)
+	plane.Update(
+		airplane.WithAltitude(30000),
+		airplane.WithHeading(180),
+		airplane.WithVelocity(450),
+		airplane.WithVertRate(-1000),
+		airplane.WithLastUpdate(time.Now().Add(-10*time.Second)),
+	)
+
+	// Snapshot.Summary computes its "age" against the snapshot's
+	// LastUpdate just like Airplane.String, so as long as both run
+	// against the same instant they must agree byte-for-byte.
+	if got, want := plane.GetSnapshot().Summary(), plane.String(); got != want {
+		t.Errorf("Snapshot.Summary() = %q, want %q (must match Airplane.String)", got, want)
+	}
+}
+
 func TestAirplane_GetSnapshot(t *testing.T) {
 	t.Parallel()
 
-	plane := airplane.New("ABCDEF")
+	plane := airplane.New(testICAO)
 	now := time.Now()
 	plane.Update(
 		airplane.WithCallsign("DLH123"),
@@ -57,7 +84,7 @@ func TestAirplane_GetSnapshot(t *testing.T) {
 
 	snap := plane.GetSnapshot()
 
-	if snap.ICAO != "ABCDEF" ||
+	if snap.ICAO != testICAO ||
 		snap.Callsign != "DLH123" ||
 		snap.Altitude != 30000 ||
 		snap.Heading != 180 ||
@@ -73,58 +100,12 @@ func TestAirplane_GetSnapshot(t *testing.T) {
 	}
 }
 
-func TestGetters(t *testing.T) {
+func TestGetLastUpdate(t *testing.T) {
 	t.Parallel()
 
-	plane := airplane.New("ABCDEF")
+	plane := airplane.New(testICAO)
 	now := time.Now()
-	plane.Update(
-		airplane.WithCallsign("DLH123"),
-		airplane.WithLatitude(52.5),
-		airplane.WithLongitude(13.4),
-		airplane.WithAltitude(30000),
-		airplane.WithHeading(180),
-		airplane.WithVelocity(450),
-		airplane.WithVertRate(-1000),
-		airplane.WithSquawk("1234"),
-		airplane.WithLastUpdate(now),
-	)
-
-	if plane.GetCallsign() != "DLH123" {
-		t.Error("GetCallsign failed")
-	}
-
-	if plane.GetLatitude() != 52.5 {
-		t.Error("GetLatitude failed")
-	}
-
-	if plane.GetLongitude() != 13.4 {
-		t.Error("GetLongitude failed")
-	}
-
-	if plane.GetAltitude() != 30000 {
-		t.Error("GetAltitude failed")
-	}
-
-	if plane.GetHeading() != 180 {
-		t.Error("GetHeading failed")
-	}
-
-	if plane.GetVelocity() != 450 {
-		t.Error("GetVelocity failed")
-	}
-
-	if plane.GetVertRate() != -1000 {
-		t.Error("GetVertRate failed")
-	}
-
-	if plane.GetSquawk() != "1234" {
-		t.Error("GetSquawk failed")
-	}
-
-	if plane.GetMessageCount() != 2 {
-		t.Errorf("GetMessageCount failed, got %d", plane.GetMessageCount())
-	}
+	plane.Update(airplane.WithLastUpdate(now))
 
 	if !plane.GetLastUpdate().Equal(now) {
 		t.Error("GetLastUpdate failed")
@@ -148,17 +129,17 @@ func testWithCallsign(t *testing.T) {
 	t.Run("WithCallsign", func(t *testing.T) {
 		t.Parallel()
 
-		plane := airplane.New("ABCDEF")
+		plane := airplane.New(testICAO)
 		plane.Update(airplane.WithCallsign("NEW"))
 
-		if plane.GetCallsign() != "NEW" {
-			t.Errorf("expected NEW, got %s", plane.GetCallsign())
+		if got := plane.GetSnapshot().Callsign; got != "NEW" {
+			t.Errorf("expected NEW, got %s", got)
 		}
 
 		plane.Update(airplane.WithCallsign(""))
 
-		if plane.GetCallsign() != "NEW" {
-			t.Errorf("expected NEW to persist on empty string, got %s", plane.GetCallsign())
+		if got := plane.GetSnapshot().Callsign; got != "NEW" {
+			t.Errorf("expected NEW to persist on empty string, got %s", got)
 		}
 	})
 }
@@ -182,25 +163,26 @@ func testWithSquawk(t *testing.T) {
 			t.Run(testCase.squawk, func(t *testing.T) {
 				t.Parallel()
 
-				plane := airplane.New("ABCDEF")
+				plane := airplane.New(testICAO)
 				plane.Update(airplane.WithSquawk(testCase.squawk))
 
-				if plane.GetSquawk() != testCase.squawk {
-					t.Errorf("expected squawk %s, got %s", testCase.squawk, plane.GetSquawk())
+				snap := plane.GetSnapshot()
+				if snap.Squawk != testCase.squawk {
+					t.Errorf("expected squawk %s, got %s", testCase.squawk, snap.Squawk)
 				}
 
-				if plane.GetSnapshot().Emergency != testCase.emergency {
+				if snap.Emergency != testCase.emergency {
 					t.Errorf("expected emergency %v for squawk %s", testCase.emergency, testCase.squawk)
 				}
 			})
 		}
 
-		plane := airplane.New("ABCDEF")
+		plane := airplane.New(testICAO)
 		plane.Update(airplane.WithSquawk("7777"))
 		plane.Update(airplane.WithSquawk(""))
 
-		if plane.GetSquawk() != "7777" {
-			t.Error("expected 7777 to persist on empty string")
+		if got := plane.GetSnapshot().Squawk; got != "7777" {
+			t.Errorf("expected 7777 to persist on empty string, got %s", got)
 		}
 	})
 }
@@ -210,7 +192,7 @@ func testWithLastUpdate(t *testing.T) {
 	t.Run("WithLastUpdate", func(t *testing.T) {
 		t.Parallel()
 
-		plane := airplane.New("ABCDEF")
+		plane := airplane.New(testICAO)
 		now := time.Now()
 		plane.Update(airplane.WithLastUpdate(now))
 
@@ -242,11 +224,11 @@ func testWithLatitude(t *testing.T) {
 			t.Run(fmt.Sprintf("%f", testCase.input), func(t *testing.T) {
 				t.Parallel()
 
-				plane := airplane.New("ABCDEF")
+				plane := airplane.New(testICAO)
 				plane.Update(airplane.WithLatitude(testCase.input))
 
-				if plane.GetLatitude() != testCase.want {
-					t.Errorf("WithLatitude(%f) = %f, want %f", testCase.input, plane.GetLatitude(), testCase.want)
+				if got := plane.GetSnapshot().Latitude; got != testCase.want {
+					t.Errorf("WithLatitude(%f) = %f, want %f", testCase.input, got, testCase.want)
 				}
 			})
 		}
@@ -269,11 +251,11 @@ func testWithLongitude(t *testing.T) {
 			t.Run(fmt.Sprintf("%f", testCase.input), func(t *testing.T) {
 				t.Parallel()
 
-				plane := airplane.New("ABCDEF")
+				plane := airplane.New(testICAO)
 				plane.Update(airplane.WithLongitude(testCase.input))
 
-				if plane.GetLongitude() != testCase.want {
-					t.Errorf("WithLongitude(%f) = %f, want %f", testCase.input, plane.GetLongitude(), testCase.want)
+				if got := plane.GetSnapshot().Longitude; got != testCase.want {
+					t.Errorf("WithLongitude(%f) = %f, want %f", testCase.input, got, testCase.want)
 				}
 			})
 		}
@@ -285,17 +267,17 @@ func testWithVelocity(t *testing.T) {
 	t.Run("WithVelocity", func(t *testing.T) {
 		t.Parallel()
 
-		plane := airplane.New("ABCDEF")
+		plane := airplane.New(testICAO)
 		plane.Update(airplane.WithVelocity(100))
 
-		if plane.GetVelocity() != 100 {
-			t.Error("WithVelocity failed")
+		if got := plane.GetSnapshot().Velocity; got != 100 {
+			t.Errorf("WithVelocity failed, got %f", got)
 		}
 
 		plane.Update(airplane.WithVelocity(-10))
 
-		if plane.GetVelocity() != 100 {
-			t.Error("WithVelocity should not update with negative value")
+		if got := plane.GetSnapshot().Velocity; got != 100 {
+			t.Errorf("WithVelocity should not update with negative value, got %f", got)
 		}
 	})
 }
@@ -316,11 +298,11 @@ func testWithHeading(t *testing.T) {
 			t.Run(fmt.Sprintf("%f", testCase.input), func(t *testing.T) {
 				t.Parallel()
 
-				plane := airplane.New("ABCDEF")
+				plane := airplane.New(testICAO)
 				plane.Update(airplane.WithHeading(testCase.input))
 
-				if plane.GetHeading() != testCase.want {
-					t.Errorf("WithHeading(%f) = %f, want %f", testCase.input, plane.GetHeading(), testCase.want)
+				if got := plane.GetSnapshot().Heading; got != testCase.want {
+					t.Errorf("WithHeading(%f) = %f, want %f", testCase.input, got, testCase.want)
 				}
 			})
 		}
@@ -330,7 +312,7 @@ func testWithHeading(t *testing.T) {
 func TestConcurrency(t *testing.T) {
 	t.Parallel()
 
-	plane := airplane.New("ABCDEF")
+	plane := airplane.New(testICAO)
 
 	var waitGroup sync.WaitGroup
 	waitGroup.Add(2)

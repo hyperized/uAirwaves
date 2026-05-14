@@ -15,11 +15,11 @@ const (
 	maxHeading   = 360
 	minVelocity  = 0
 
-	defaultMessageCount    = 1
-	defaultHeading         = -1
-	defaultVelocity        = -1
-	defaultVertRate        = 0
-	maxPositionHistory     = 10
+	defaultMessageCount     = 1
+	defaultHeading          = -1
+	defaultVelocity         = -1
+	defaultVertRate         = 0
+	maxPositionHistory      = 10
 	positionHistoryInterval = 10 * time.Second
 
 	squawkHijacking        = "7500"
@@ -115,92 +115,34 @@ func (a *Airplane) GetSnapshot() Snapshot {
 	}
 }
 
+// Summary returns the same one-line "alt heading velocity vrate
+// age" string as Airplane.String, computed against the snapshot
+// values so callers that already hold a Snapshot don't have to
+// round-trip through the live airplane (and reacquire its lock)
+// to format a list entry. The two outputs are byte-identical for
+// a snapshot taken from the same airplane.
+func (s Snapshot) Summary() string {
+	return fmt.Sprintf("%.0fft %.0fo %.0fkts %.0ffpm %.0fs",
+		s.Altitude,
+		s.Heading,
+		s.Velocity,
+		s.VertRate,
+		time.Since(s.LastUpdate.UTC()).Seconds(),
+	)
+}
+
 // GetLastUpdate returns the last time the plane was updated.
+// Kept as a per-field accessor because two hot paths
+// (airplanes.Prune and pkg/adsb CPR resolution) read just this
+// field per plane per frame; using GetSnapshot for that would
+// allocate and copy the entire snapshot purely to discard
+// everything but lastUpdate. All other fields go through
+// GetSnapshot — see CLAUDE.md's "Snapshots for lock-free reads".
 func (a *Airplane) GetLastUpdate() time.Time {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
 	return a.lastUpdate
-}
-
-// GetICAO returns the ICAO code of the plane.
-func (a *Airplane) GetICAO() string {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	return a.icao
-}
-
-// GetCallsign returns the callsign of the plane.
-func (a *Airplane) GetCallsign() string {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	return a.callsign
-}
-
-// GetLatitude returns the latitude of the plane.
-func (a *Airplane) GetLatitude() float64 {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	return a.latitude
-}
-
-// GetLongitude returns the longitude of the plane.
-func (a *Airplane) GetLongitude() float64 {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	return a.longitude
-}
-
-// GetAltitude returns the altitude of the plane.
-func (a *Airplane) GetAltitude() float64 {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	return a.altitude
-}
-
-// GetHeading returns the heading of the plane.
-func (a *Airplane) GetHeading() float64 {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	return a.heading
-}
-
-// GetVelocity returns the velocity of the plane.
-func (a *Airplane) GetVelocity() float64 {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	return a.velocity
-}
-
-// GetVertRate returns the vertical rate of the plane.
-func (a *Airplane) GetVertRate() float64 {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	return a.vertRate
-}
-
-// GetSquawk returns the squawk code of the plane.
-func (a *Airplane) GetSquawk() string {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	return a.squawk
-}
-
-// GetMessageCount returns the number of messages received from the plane.
-func (a *Airplane) GetMessageCount() int64 {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	return a.messageCount
 }
 
 // Update updates the airplane with new data.
@@ -224,12 +166,17 @@ func WithCallsign(c string) Option {
 	}
 }
 
-// WithSquawk returns an option to update the squawk.
+// WithSquawk returns an option to update the squawk. The emergency
+// flag is recomputed on every non-empty update so a plane that
+// transitions out of an emergency squawk (e.g. 7700 → 1200) clears
+// the flag instead of staying stuck in the previous state.
 func WithSquawk(squawk string) Option {
 	return func(airplane *Airplane) {
 		if squawk != "" {
 			airplane.squawk = squawk
-			airplane.emergency = squawk == squawkHijacking || squawk == squawkRadioFailure || squawk == squawkGeneralEmergency
+			airplane.emergency = squawk == squawkHijacking ||
+				squawk == squawkRadioFailure ||
+				squawk == squawkGeneralEmergency
 		}
 	}
 }
@@ -282,29 +229,29 @@ func WithHeading(heading float64) Option {
 
 // WithVertRate returns an option to update the vertical rate.
 func WithVertRate(vertRate float64) Option {
-	return func(a *Airplane) {
-		a.vertRate = vertRate
+	return func(plane *Airplane) {
+		plane.vertRate = vertRate
 	}
 }
 
 // WithPosition updates both latitude and longitude and appends the fix to position history
 // at most once per positionHistoryInterval to avoid filling history with near-identical entries.
 func WithPosition(latitude, longitude float64) Option {
-	return func(a *Airplane) {
-		a.latitude = max(min(latitude, maxLatitude), minLatitude)
-		a.longitude = max(min(longitude, maxLongitude), minLongitude)
+	return func(plane *Airplane) {
+		plane.latitude = max(min(latitude, maxLatitude), minLatitude)
+		plane.longitude = max(min(longitude, maxLongitude), minLongitude)
 
-		if time.Since(a.lastPositionTime) < positionHistoryInterval {
+		if time.Since(plane.lastPositionTime) < positionHistoryInterval {
 			return
 		}
 
-		a.lastPositionTime = time.Now()
+		plane.lastPositionTime = time.Now()
 
-		entry := PositionEntry{Latitude: a.latitude, Longitude: a.longitude}
-		a.positionHistory = append(a.positionHistory, entry)
+		entry := PositionEntry{Latitude: plane.latitude, Longitude: plane.longitude}
+		plane.positionHistory = append(plane.positionHistory, entry)
 
-		if len(a.positionHistory) > maxPositionHistory {
-			a.positionHistory = a.positionHistory[len(a.positionHistory)-maxPositionHistory:]
+		if len(plane.positionHistory) > maxPositionHistory {
+			plane.positionHistory = plane.positionHistory[len(plane.positionHistory)-maxPositionHistory:]
 		}
 	}
 }

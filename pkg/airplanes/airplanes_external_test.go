@@ -126,24 +126,24 @@ func TestSorted(t *testing.T) {
 		t.Fatalf("expected 5 planes, got %d", len(sorted))
 	}
 
-	if sorted[0].GetSnapshot().ICAO != "P1" {
-		t.Errorf("expected 1st plane to be P1, got %s", sorted[0].GetSnapshot().ICAO)
+	if sorted[0].ICAO != "P1" {
+		t.Errorf("expected 1st plane to be P1, got %s", sorted[0].ICAO)
 	}
 
-	if sorted[1].GetSnapshot().ICAO != "P5" {
-		t.Errorf("expected 2nd plane to be P5, got %s", sorted[1].GetSnapshot().ICAO)
+	if sorted[1].ICAO != "P5" {
+		t.Errorf("expected 2nd plane to be P5, got %s", sorted[1].ICAO)
 	}
 
-	if sorted[2].GetSnapshot().ICAO != "P3" {
-		t.Errorf("expected 3rd plane to be P3, got %s", sorted[2].GetSnapshot().ICAO)
+	if sorted[2].ICAO != "P3" {
+		t.Errorf("expected 3rd plane to be P3, got %s", sorted[2].ICAO)
 	}
 
-	if sorted[3].GetSnapshot().ICAO != "P2" {
-		t.Errorf("expected 4th plane to be P2, got %s", sorted[3].GetSnapshot().ICAO)
+	if sorted[3].ICAO != "P2" {
+		t.Errorf("expected 4th plane to be P2, got %s", sorted[3].ICAO)
 	}
 
-	if sorted[4].GetSnapshot().ICAO != "P4" {
-		t.Errorf("expected 5th plane to be P4, got %s", sorted[4].GetSnapshot().ICAO)
+	if sorted[4].ICAO != "P4" {
+		t.Errorf("expected 5th plane to be P4, got %s", sorted[4].ICAO)
 	}
 }
 
