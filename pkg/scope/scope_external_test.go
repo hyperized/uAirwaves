@@ -82,6 +82,19 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestScope_GetIncrement(t *testing.T) {
+	t.Parallel()
+
+	// The default increment is the +/- step size; the radar relies
+	// on it to grow or shrink the scope on every keystroke. Hard-
+	// code the contract here so an accidental change to the
+	// package constant breaks the build.
+	scopeInstance := scope.New()
+	if got := scopeInstance.GetIncrement(); got != 20 {
+		t.Errorf("GetIncrement() = %v, want 20", got)
+	}
+}
+
 func TestScope_Update(t *testing.T) {
 	t.Parallel()
 
