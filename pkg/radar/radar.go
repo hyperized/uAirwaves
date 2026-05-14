@@ -25,6 +25,25 @@ const (
 	circleSteps            = 8
 	circleMaxWidth         = 5
 	callsignMaxWidth       = 7
+
+	// Trail dot colours, from darkest (oldest entry) to lightest (most recent).
+	trailColor1 = 0x606060
+	trailColor2 = 0x808080
+	trailColor3 = 0xa0a0a0
+
+	// Flight-level bucket boundaries (in feet) used by
+	// getFlightLevelColor. Each constant is the exclusive upper
+	// bound of a colour band; altitudes at or above the highest
+	// band fall through to white. Hoisted out of the switch so the
+	// numbers carry their meaning in the file rather than relying
+	// on inline comments.
+	flightLevelSub5   = 500
+	flightLevelSub100 = 10000
+	flightLevelSub200 = 20000
+	flightLevelSub300 = 30000
+	flightLevelSub400 = 40000
+	flightLevelSub500 = 50000
+	flightLevelSub600 = 60000
 )
 
 // View is a custom tview component.
@@ -141,14 +160,35 @@ func (r *View) GetAutoScopeEnabled() bool {
 	return r.autoScope
 }
 
+// GetAircraftCount returns the number of tracked aircraft.
+func (r *View) GetAircraftCount() int {
+	return r.planes.Count()
+}
+
+// drawToggles is a point-in-time copy of the four boolean
+// indicators Draw consults. Bundled into a struct so the lock
+// window in snapshotToggles is a single statement and so the
+// downstream rendering helpers receive one read-only argument
+// instead of a fan of control-flag bools.
+type drawToggles struct {
+	heading, autoScope, heat, trail bool
+}
+
 // Draw draws the radar scope view on the screen.
-func (r *View) Draw(screen tcell.Screen) { //nolint:funlen
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+//
+// The toggle/auto-scope booleans are sampled into a single
+// drawToggles value under a short RLock window and released
+// before any rendering happens. The heatmap and scope have their
+// own internal locks, so the entire plane-walk and scope-grow
+// path runs lock-free at View level — getter-style readers
+// (footer updater, key dispatch) never block on the full render
+// path.
+func (r *View) Draw(screen tcell.Screen) {
+	toggles := r.snapshotToggles()
 
 	r.DrawForSubclass(screen, r)
-	x, y, width, height := r.GetInnerRect()
-	centerX, centerY := x+width/2, y+height/2
+	innerX, innerY, width, height := r.GetInnerRect()
+	centerX, centerY := innerX+width/2, innerY+height/2
 
 	xScale, yScale := r.calculateScales(width, height)
 
@@ -157,24 +197,40 @@ func (r *View) Draw(screen tcell.Screen) { //nolint:funlen
 
 	// 2. Draw Center Point (You) and compass indicators
 	r.drawCenterPoint(screen, centerX, centerY)
-	r.drawCompassIndicators(screen, x, y, centerX, centerY, width, height)
+	r.drawCompassIndicators(screen, innerX, innerY, centerX, centerY, width, height)
 
 	// 3. Draw Planes (also accumulates heat as a side effect)
 	centerLatitude, centerLongitude := r.myLocation.GetCoordinates()
 	planeList := r.planes.Sorted(centerLatitude, centerLongitude)
 
-	if r.autoScope {
+	if toggles.autoScope {
 		r.myScope.Update(scope.WithCurrent(r.myScope.GetMax()))
 	}
 
-	r.drawPlanes(screen, planeList, centerX, centerY, xScale, yScale, centerLatitude, centerLongitude)
+	r.drawPlanes(screen, planeList, centerX, centerY, xScale, yScale, centerLatitude, centerLongitude, toggles)
 
 	// 4. Decay and draw heat map last so nothing overwrites it
 	r.heat.decay()
-	if r.heatIndicator {
+
+	if toggles.heat {
 		r.heat.draw(screen, centerX, centerY, xScale, yScale)
 	}
+}
 
+// snapshotToggles captures the toggle indicators Draw needs under
+// a single short RLock window. The struct return lets the rest of
+// Draw run lock-free at View level while the heatmap and scope
+// keep their own internal serialisation.
+func (r *View) snapshotToggles() drawToggles {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return drawToggles{
+		heading:   r.headingIndicator,
+		autoScope: r.autoScope,
+		heat:      r.heatIndicator,
+		trail:     r.trailIndicator,
+	}
 }
 
 func (r *View) calculateScales(width, height int) (float64, float64) {
@@ -190,29 +246,33 @@ func (*View) drawCenterPoint(screen tcell.Screen, centerX, centerY int) {
 	screen.SetContent(centerX, centerY, 'X', nil, tcell.StyleDefault.Foreground(tcell.ColorDarkMagenta))
 }
 
-func (*View) drawCompassIndicators(screen tcell.Screen, x, y, centerX, centerY, width, height int) {
+func (*View) drawCompassIndicators(
+	screen tcell.Screen,
+	innerX, innerY, centerX, centerY, width, height int,
+) {
 	compassStyle := tcell.StyleDefault.Foreground(tcell.ColorGreen)
 
 	// North: top-center
-	tview.Print(screen, "N", centerX, y, 1, tview.AlignLeft, tcell.ColorGreen)
+	tview.Print(screen, "N", centerX, innerY, 1, tview.AlignLeft, tcell.ColorGreen)
 	// South: bottom-center
-	tview.Print(screen, "S", centerX, y+height-1, 1, tview.AlignLeft, tcell.ColorGreen)
+	tview.Print(screen, "S", centerX, innerY+height-1, 1, tview.AlignLeft, tcell.ColorGreen)
 	// East: right-center
-	screen.SetContent(x+width-1, centerY, 'E', nil, compassStyle)
+	screen.SetContent(innerX+width-1, centerY, 'E', nil, compassStyle)
 	// West: left edge
-	screen.SetContent(x, centerY, 'W', nil, compassStyle)
+	screen.SetContent(innerX, centerY, 'W', nil, compassStyle)
 }
 
+//nolint:revive // argument-limit: the scale, centre and toggle parameters are all load-bearing here.
 func (r *View) drawPlanes(
 	screen tcell.Screen,
-	planeList []*airplane.Airplane,
+	planeList []airplane.Snapshot,
 	centerX, centerY int,
 	xScale, yScale, centerLatitude, centerLongitude float64,
+	toggles drawToggles,
 ) {
 	planeStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
 
-	for _, p := range planeList {
-		plane := p.GetSnapshot()
+	for _, plane := range planeList {
 		if plane.Latitude == 0 || plane.Longitude == 0 {
 			continue
 		}
@@ -238,18 +298,25 @@ func (r *View) drawPlanes(
 
 		r.heat.add(nmX, nmY)
 
-		if r.trailIndicator {
-			r.drawTrail(screen, plane.PositionHistory, centerX, centerY, xScale, yScale, centerLatitude, centerLongitude)
+		if toggles.trail {
+			r.drawTrail(
+				screen, plane.PositionHistory,
+				centerX, centerY, xScale, yScale,
+				centerLatitude, centerLongitude,
+			)
 		}
-		r.drawPlane(screen, plane, planeX, planeY, planeStyle)
+
+		r.drawPlane(screen, plane, planeX, planeY, planeStyle, toggles)
 	}
 }
 
-func (r *View) drawPlane(screen tcell.Screen, plane airplane.Snapshot, planeX, planeY int, style tcell.Style) {
+func (*View) drawPlane(
+	screen tcell.Screen, plane airplane.Snapshot, planeX, planeY int, style tcell.Style, toggles drawToggles,
+) {
 	altColor := getFlightLevelColor(plane.Altitude)
 
 	// Draw heading indicator line if heading is valid
-	if plane.Heading != -1 && r.headingIndicator {
+	if plane.Heading != -1 && toggles.heading {
 		headingStyle := tcell.StyleDefault.Foreground(altColor).Background(tcell.ColorBlack)
 		drawHeadingLine(screen, planeX, planeY, plane.Heading, headingStyle)
 	}
@@ -282,13 +349,13 @@ func (*View) drawTrail(
 ) {
 	trailColors := []tcell.Color{
 		tcell.ColorGray,
-		tcell.NewHexColor(0x606060),
-		tcell.NewHexColor(0x808080),
-		tcell.NewHexColor(0xa0a0a0),
+		tcell.NewHexColor(trailColor1),
+		tcell.NewHexColor(trailColor2),
+		tcell.NewHexColor(trailColor3),
 	}
 
-	n := len(history)
-	for i, entry := range history {
+	historyLen := len(history)
+	for idx, entry := range history {
 		if entry.Latitude == 0 || entry.Longitude == 0 {
 			continue
 		}
@@ -298,22 +365,17 @@ func (*View) drawTrail(
 		nmY := dLat * nauticalMilePerDegree
 		nmX := dLon * nauticalMilePerDegree
 
-		px := centerX + int(nmX*xScale)
-		py := centerY - int(nmY*yScale/yMultiplier)
+		screenX := centerX + int(nmX*xScale)
+		screenY := centerY - int(nmY*yScale/yMultiplier)
 
 		// Map entry index to a color bucket: older entries use darker colors.
-		colorIdx := (i * len(trailColors)) / n
-		if colorIdx >= len(trailColors) {
-			colorIdx = len(trailColors) - 1
-		}
+		// (idx * len) / historyLen with idx ∈ [0, historyLen-1] is always < len,
+		// so no clamp is needed.
+		colorIdx := (idx * len(trailColors)) / historyLen
 
-		screen.SetContent(px, py, '·', nil, tcell.StyleDefault.Foreground(trailColors[colorIdx]).Background(tcell.ColorBlack))
+		style := tcell.StyleDefault.Foreground(trailColors[colorIdx]).Background(tcell.ColorBlack)
+		screen.SetContent(screenX, screenY, '·', nil, style)
 	}
-}
-
-// GetAircraftCount returns the number of tracked aircraft.
-func (r *View) GetAircraftCount() int {
-	return r.planes.Count()
 }
 
 func (r *View) drawScopeRings(screen tcell.Screen, centerX, centerY int, xScale, yScale float64) {
@@ -322,6 +384,7 @@ func (r *View) drawScopeRings(screen tcell.Screen, centerX, centerY int, xScale,
 
 	for ring := increments; ring <= r.myScope.GetCurrent(); ring += increments {
 		drawCircle(screen, centerX, centerY, int(ring*xScale), int(ring*yScale/2), ringStyle)
+
 		if ring < r.myScope.GetCurrent() {
 			tview.Print(screen,
 				fmt.Sprintf("%0.0fnm", ring),
@@ -409,19 +472,19 @@ func altitudeToFL(altitude float64) string {
 // getFlightLevelColor returns a color based on altitude.
 func getFlightLevelColor(altitude float64) tcell.Color {
 	switch {
-	case altitude < 500: //nolint:mnd
+	case altitude < flightLevelSub5:
 		return tcell.ColorWhite
-	case altitude < 10000: //nolint:mnd
+	case altitude < flightLevelSub100:
 		return tcell.ColorYellow
-	case altitude < 20000: //nolint:mnd
+	case altitude < flightLevelSub200:
 		return tcell.ColorGreen
-	case altitude < 30000: //nolint:mnd
+	case altitude < flightLevelSub300:
 		return tcell.ColorLightBlue
-	case altitude < 40000: //nolint:mnd
+	case altitude < flightLevelSub400:
 		return tcell.ColorDarkBlue
-	case altitude < 50000: //nolint:mnd
+	case altitude < flightLevelSub500:
 		return tcell.ColorPurple
-	case altitude < 60000: //nolint:mnd
+	case altitude < flightLevelSub600:
 		return tcell.ColorRed
 	default:
 		return tcell.ColorWhite

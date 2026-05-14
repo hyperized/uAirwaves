@@ -83,6 +83,269 @@ func TestView_Toggles(t *testing.T) {
 	if view.GetAutoScopeEnabled() == initialAutoScope {
 		t.Error("ToggleAutoScope() failed to change state")
 	}
+
+	// Trail and heat toggles live alongside the heading/autoScope
+	// pair. Same contract: each call flips the flag, and the
+	// matching getter reflects it. Default-on per radar.New —
+	// flipping once must reach false.
+	if !view.GetTrailIndicatorEnabled() {
+		t.Error("trail indicator should default to enabled")
+	}
+
+	view.ToggleTrailIndicator()
+
+	if view.GetTrailIndicatorEnabled() {
+		t.Error("ToggleTrailIndicator() failed to flip to disabled")
+	}
+
+	view.ToggleTrailIndicator()
+
+	if !view.GetTrailIndicatorEnabled() {
+		t.Error("ToggleTrailIndicator() failed to flip back to enabled")
+	}
+
+	if !view.GetHeatIndicatorEnabled() {
+		t.Error("heat indicator should default to enabled")
+	}
+
+	view.ToggleHeatIndicator()
+
+	if view.GetHeatIndicatorEnabled() {
+		t.Error("ToggleHeatIndicator() failed to flip to disabled")
+	}
+
+	view.ToggleHeatIndicator()
+
+	if !view.GetHeatIndicatorEnabled() {
+		t.Error("ToggleHeatIndicator() failed to flip back to enabled")
+	}
+}
+
+// TestView_GetAircraftCount makes sure GetAircraftCount delegates
+// to airplanes.Count and reflects insertions. No fancy plumbing
+// needed — Ensure adds an entry, the getter must observe it.
+func TestView_GetAircraftCount(t *testing.T) {
+	t.Parallel()
+
+	planes := airplanes.New()
+	view := radar.New(planes, location.New())
+
+	if got := view.GetAircraftCount(); got != 0 {
+		t.Errorf("initial GetAircraftCount() = %d, want 0", got)
+	}
+
+	planes.Ensure("AAA111")
+	planes.Ensure("BBB222")
+
+	if got := view.GetAircraftCount(); got != 2 {
+		t.Errorf("after two Ensure: GetAircraftCount() = %d, want 2", got)
+	}
+}
+
+// TestView_Draw_TrailRendersHistory exercises the drawTrail code
+// path: a plane with a populated PositionHistory whose entries
+// all fall inside scope must produce at least one '·' cell on
+// the simulation screen. The plane's own '+' glyph is drawn last
+// for its own position, so we count '·' separately — the trail
+// is the only producer of that rune in the radar package outside
+// the heading indicator (off here).
+//
+// We use airplane.WithPosition iteratively, manipulating no
+// internal state — the pure public surface drives the trail.
+//
+//nolint:funlen // assembling fixtures + 4 deterministic poses leaves nothing to extract usefully.
+func TestView_Draw_TrailRendersHistory(t *testing.T) {
+	t.Parallel()
+
+	loc := location.New(location.WithLatitude(52.0), location.WithLongitude(13.0))
+	planes := airplanes.New()
+	view := radar.New(planes, loc)
+	view.SetRect(0, 0, 80, 24)
+
+	// Disable auto-scope so the scope range stays at the default
+	// 20nm, and disable heat so '·' is unambiguously trail-sourced.
+	// (heatRune draws ░/▒/▓ glyphs, not '·' — but we kill it for
+	// the same reason we kill heading: keep the screen clean.)
+	view.ToggleAutoScope()
+	view.ToggleHeatIndicator()
+
+	planes.Ensure("TRAILY")
+
+	plane, ok := planes.Get("TRAILY")
+	if !ok {
+		t.Fatal("plane not found after Ensure")
+	}
+
+	// First WithPosition always appends (lastPositionTime is zero).
+	// Then move the plane to a *different* lat/lon via the bare
+	// setters so the history entry sits visibly behind the '+'
+	// glyph on the screen — otherwise '+' would overwrite the
+	// single trail dot at the same grid cell.
+	plane.Update(airplane.WithPosition(52.01, 13.01))
+	plane.Update(
+		airplane.WithLatitude(52.05),
+		airplane.WithLongitude(13.05),
+		airplane.WithAltitude(30000),
+		airplane.WithHeading(-1), // explicit invalid -> no heading line
+	)
+
+	screen := tcell.NewSimulationScreen("")
+	if err := screen.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	screen.SetSize(80, 24)
+	view.Draw(screen)
+
+	const trailDot = '·'
+
+	var found bool
+
+	for posY := range 24 {
+		for posX := range 80 {
+			cellStr, _, _ := screen.Get(posX, posY)
+			if []rune(cellStr)[0] == trailDot {
+				found = true
+
+				break
+			}
+		}
+
+		if found {
+			break
+		}
+	}
+
+	if !found {
+		t.Error("trail '·' not found anywhere on the simulation screen after Draw")
+	}
+}
+
+// TestView_Draw_TrailSkipsZeroPositionEntries exercises the
+// `entry.Latitude == 0 || entry.Longitude == 0` continue branch
+// in drawTrail. A history entry at (0, 0) is the unresolved-fix
+// sentinel and must not produce a screen dot — otherwise stale
+// pre-CPR-resolution states would smear across the scope centre.
+//
+// We can't drive history through the public WithPosition path
+// without time control, so we use an aux package-test fixture
+// that places a plane with a non-zero current position plus a
+// fake history that includes one (0, 0) entry; the test passes
+// when at most one '·' (for the non-zero history entry) renders
+// — the (0, 0) one is dropped.
+//
+// We have no public seam for "set history"; the next best move is
+// to drive Draw with a plane whose only history fix is at (0,0).
+// drawTrail must take the `continue` and emit no dot. We assert
+// the screen has no '·' anywhere — '+' at the plane position is
+// the only glyph from the plane itself in this configuration.
+func TestView_Draw_TrailSkipsZeroPositionEntries(t *testing.T) {
+	t.Parallel()
+
+	loc := location.New(location.WithLatitude(52.0), location.WithLongitude(13.0))
+	planes := airplanes.New()
+	view := radar.New(planes, loc)
+	view.SetRect(0, 0, 80, 24)
+	view.ToggleAutoScope()
+	view.ToggleHeatIndicator()
+
+	planes.Ensure("ZEROHIST")
+
+	plane, ok := planes.Get("ZEROHIST")
+	if !ok {
+		t.Fatal("plane not found after Ensure")
+	}
+
+	// Seed the history with one (0, 0) entry via the public path:
+	// WithPosition(0, 0) appends and clamps to (0, 0). Then move
+	// the plane to a real position via WithLatitude/Longitude so
+	// the '+' glyph lands inside scope.
+	plane.Update(airplane.WithPosition(0, 0))
+	plane.Update(
+		airplane.WithLatitude(52.05),
+		airplane.WithLongitude(13.05),
+		airplane.WithAltitude(30000),
+		airplane.WithHeading(-1),
+	)
+
+	// Sanity: the snapshot must report exactly one history entry
+	// at (0, 0). If WithPosition's behaviour changes this assertion
+	// becomes the canary.
+	hist := plane.GetSnapshot().PositionHistory
+	if len(hist) != 1 || hist[0].Latitude != 0 || hist[0].Longitude != 0 {
+		t.Fatalf("test fixture broken: history = %+v", hist)
+	}
+
+	screen := tcell.NewSimulationScreen("")
+	if err := screen.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	screen.SetSize(80, 24)
+	view.Draw(screen)
+
+	const trailDot = '·'
+
+	for posY := range 24 {
+		for posX := range 80 {
+			cellStr, _, _ := screen.Get(posX, posY)
+			if []rune(cellStr)[0] == trailDot {
+				t.Errorf("found trail '·' at (%d, %d) despite history entry at (0, 0)", posX, posY)
+			}
+		}
+	}
+}
+
+// TestView_Draw_HeadingLineRenders exercises drawHeadingLine via
+// the public Draw path: enable headings, give the plane a valid
+// heading, and check the screen for at least one '·' dot. Trail
+// is off (it defaults on, so we toggle), and the plane is placed
+// inside scope so it actually gets drawn.
+func TestView_Draw_HeadingLineRenders(t *testing.T) {
+	t.Parallel()
+
+	loc := location.New(location.WithLatitude(52.0), location.WithLongitude(13.0))
+	planes := airplanes.New()
+	view := radar.New(planes, loc)
+	view.SetRect(0, 0, 80, 24)
+	view.ToggleAutoScope() // pin scope at 20nm
+	view.ToggleHeadingIndicator()
+	view.ToggleTrailIndicator() // off, so '·' is heading-only
+
+	planes.Ensure("HEADED")
+
+	plane, ok := planes.Get("HEADED")
+	if !ok {
+		t.Fatal("plane not found after Ensure")
+	}
+
+	plane.Update(
+		airplane.WithLatitude(52.01),
+		airplane.WithLongitude(13.01),
+		airplane.WithAltitude(30000),
+		airplane.WithHeading(90), // east, valid (!= -1)
+	)
+
+	screen := tcell.NewSimulationScreen("")
+	if err := screen.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	screen.SetSize(80, 24)
+	view.Draw(screen)
+
+	const headingDot = '·'
+
+	for posY := range 24 {
+		for posX := range 80 {
+			cellStr, _, _ := screen.Get(posX, posY)
+			if []rune(cellStr)[0] == headingDot {
+				return
+			}
+		}
+	}
+
+	t.Error("heading-line '·' not found anywhere on the simulation screen after Draw")
 }
 
 func TestView_Draw(t *testing.T) {

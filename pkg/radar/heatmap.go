@@ -13,6 +13,9 @@ const (
 	heatHalfLife   = 120.0 // seconds for heat to decay to 50%
 	heatAddAmount  = 0.5
 	heatMinVisible = 0.04
+
+	heatHighThreshold = 0.66
+	heatLowThreshold  = 0.33
 )
 
 type heatKey struct{ x, y int }
@@ -47,12 +50,18 @@ func (h *heatMap) add(nmX, nmY float64) {
 	h.cells[key] = v
 }
 
+// decay applies an exponential half-life decay to every cell
+// based on the wall-clock delta since the previous call.
+// time.Now() is captured *inside* the lock so two concurrent
+// callers can't both sample now-outside-then-decay-inside and
+// double-decay against the same lastDecay; this preserves the
+// contract that decay is idempotent on a per-tick basis even if
+// a future caller joins Draw on the read path.
 func (h *heatMap) decay() {
-	now := time.Now()
-
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	now := time.Now()
 	elapsed := now.Sub(h.lastDecay).Seconds()
 	h.lastDecay = now
 
@@ -87,9 +96,9 @@ func (h *heatMap) draw(screen tcell.Screen, centerX, centerY int, xScale, yScale
 
 func heatRune(heat float64) rune {
 	switch {
-	case heat > 0.66:
+	case heat > heatHighThreshold:
 		return '▓'
-	case heat > 0.33:
+	case heat > heatLowThreshold:
 		return '▒'
 	default:
 		return '░'
@@ -98,9 +107,9 @@ func heatRune(heat float64) rune {
 
 func heatColor(heat float64) tcell.Color {
 	switch {
-	case heat > 0.66:
+	case heat > heatHighThreshold:
 		return tcell.ColorAqua
-	case heat > 0.33:
+	case heat > heatLowThreshold:
 		return tcell.ColorTeal
 	default:
 		return tcell.ColorNavy
