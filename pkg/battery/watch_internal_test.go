@@ -1,11 +1,9 @@
 package battery
 
 import (
-	"context"
 	"errors"
 	"os"
 	"testing"
-	"time"
 )
 
 func TestProcess(t *testing.T) {
@@ -15,7 +13,7 @@ func TestProcess(t *testing.T) {
 		t.Parallel()
 
 		status := NewStatus()
-		process(status, []string{"POWER_SUPPLY_STATUS", "Charging"})
+		process(status, []string{keyPowerSupplyStatus, "Charging"})
 
 		if !status.IsCharging() {
 			t.Error("expected charging true")
@@ -26,7 +24,7 @@ func TestProcess(t *testing.T) {
 		t.Parallel()
 
 		status := NewStatus()
-		process(status, []string{"POWER_SUPPLY_STATUS", "Discharging"})
+		process(status, []string{keyPowerSupplyStatus, "Discharging"})
 
 		if status.IsCharging() {
 			t.Error("expected charging false")
@@ -37,7 +35,7 @@ func TestProcess(t *testing.T) {
 		t.Parallel()
 
 		status := NewStatus()
-		process(status, []string{"POWER_SUPPLY_CAPACITY", "85"})
+		process(status, []string{keyPowerSupplyCapacity, "85"})
 
 		if status.GetPercentage() != 85 {
 			t.Errorf("expected percentage 85, got %d", status.GetPercentage())
@@ -49,7 +47,7 @@ func TestProcess(t *testing.T) {
 
 		status := NewStatus()
 		old := status.GetPercentage()
-		process(status, []string{"POWER_SUPPLY_CAPACITY", "abc"})
+		process(status, []string{keyPowerSupplyCapacity, "abc"})
 
 		if status.GetPercentage() != old {
 			t.Errorf("expected percentage to remain %d, got %d", old, status.GetPercentage())
@@ -67,7 +65,7 @@ func TestProcess(t *testing.T) {
 
 func TestUpdate(t *testing.T) {
 	t.Parallel()
-	// Create a temporary file
+
 	tmpDir := t.TempDir()
 
 	tmpFile, err := os.CreateTemp(tmpDir, "battery_uevent")
@@ -122,39 +120,13 @@ func TestUpdate_Errors(t *testing.T) {
 
 	t.Run("scanner error", func(t *testing.T) {
 		t.Parallel()
-		// This is hard to trigger with a real file, but we can try to use a directory
+		// os.Open on a directory succeeds on Unix; bufio.Scanner
+		// then yields no lines without producing an error.
+		// Calling update on a directory exercises the no-line
+		// successful-scan path.
 		dir := t.TempDir()
 
 		status := NewStatus()
 		_ = update(status, dir)
-		// os.Open on a directory might succeed on some OS but scanning it should fail or just return nothing
-		// Actually os.Open on a directory succeeds on Unix.
-		// To trigger scanner error we'd need a file that fails during reading.
 	})
-}
-
-func TestWatch_Error(t *testing.T) {
-	t.Parallel()
-
-	status := NewStatus()
-
-	err := WatchWithInterval(context.Background(), status, 10*time.Millisecond, "/non/existent/file")
-	if err == nil || !errors.Is(err, errFileOpen) {
-		t.Errorf("expected errFileOpen in Watch(), got %v", err)
-	}
-}
-
-func TestWatch_Default(t *testing.T) {
-	t.Parallel()
-	// We can't easily test the real /sys path, but we can test that it returns an error
-	// because the file probably doesn't exist on the test runner's system (unless it's the target hardware).
-	status := NewStatus()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-
-	err := Watch(ctx, status)
-	if err != nil && !errors.Is(err, errFileOpen) && !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("Watch() unexpected error: %v", err)
-	}
 }

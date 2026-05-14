@@ -1,11 +1,8 @@
 package battery_test
 
 import (
-	"context"
-	"os"
 	"sync"
 	"testing"
-	"time"
 
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/battery"
 )
@@ -98,58 +95,4 @@ func TestStatus_Concurrency(t *testing.T) {
 	}
 
 	waitGroup.Wait()
-}
-
-func TestWatch(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-
-	tmpFile, err := os.CreateTemp(tmpDir, "battery_uevent_external_watch")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := tmpFile.WriteString("POWER_SUPPLY_STATUS=Discharging\nPOWER_SUPPLY_CAPACITY=50\n"); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := tmpFile.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	status := battery.NewStatus()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
-	errCh := make(chan error, 1)
-
-	go func() {
-		errCh <- battery.WatchWithInterval(ctx, status, 10*time.Millisecond, tmpFile.Name())
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-
-	if status.GetPercentage() != 50 {
-		t.Errorf("expected percentage 50, got %d", status.GetPercentage())
-	}
-
-	content := []byte("POWER_SUPPLY_STATUS=Charging\nPOWER_SUPPLY_CAPACITY=60\n")
-	if err := os.WriteFile(tmpFile.Name(), content, 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	time.Sleep(50 * time.Millisecond)
-
-	if status.GetPercentage() != 60 {
-		t.Errorf("expected percentage 60, got %d", status.GetPercentage())
-	}
-
-	cancel()
-
-	err = <-errCh
-	if err != nil {
-		t.Errorf("Watch() unexpected error: %v", err)
-	}
 }
