@@ -11,7 +11,15 @@ import (
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
 )
 
-var errDial = errors.New("failed to dial gpsd service")
+var (
+	errDial = errors.New("failed to dial gpsd service")
+	// errSessionClosed is returned by watchOnce when gpsd's
+	// `done` channel fires without ctx being cancelled — i.e.
+	// the server hung up on us. Watch treats it as a reconnect
+	// trigger so the outer loop does not silently exit on a
+	// remote disconnect.
+	errSessionClosed = errors.New("gpsd session closed by server")
+)
 
 // Session defines the interface for a gpsd session.
 type Session interface {
@@ -88,7 +96,10 @@ const (
 )
 
 // Watch starts the GPS monitoring process.
-// When reconnect is enabled, it retries with exponential backoff on errors.
+// When reconnect is enabled, it retries with exponential backoff on errors,
+// including the case where gpsd hangs up server-side (errSessionClosed).
+// Without that distinction, a remote disconnect looked identical to ctx
+// cancellation and the outer loop exited silently.
 func (g *GPS) Watch(ctx context.Context, myLocation *location.Location) error {
 	backoff := reconnectBaseDelay
 
@@ -135,7 +146,10 @@ func (g *GPS) watchOnce(ctx context.Context, myLocation *location.Location) erro
 
 	select {
 	case <-done:
-		return nil
+		// gpsd's done channel fired without ctx being cancelled —
+		// the server hung up. Surface a sentinel so Watch can
+		// distinguish this from a clean shutdown and reconnect.
+		return errSessionClosed
 	case <-ctx.Done():
 		return nil
 	}

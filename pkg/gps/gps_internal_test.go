@@ -50,6 +50,7 @@ func TestWatch(t *testing.T) {
 
 	testSuccessfulWatch(t)
 	testSessionDone(t)
+	testSessionDoneReconnects(t)
 	testConnectError(t)
 	testInvalidReportType(t)
 }
@@ -115,9 +116,13 @@ func testSuccessfulWatch(t *testing.T) {
 
 func testSessionDone(t *testing.T) {
 	t.Helper()
-	t.Run("session done", func(t *testing.T) {
+	t.Run("session done without reconnect surfaces errSessionClosed", func(t *testing.T) {
 		t.Parallel()
 
+		// Without reconnect, a server-side hangup must propagate
+		// as an error so the caller can decide what to do. Pre-C3
+		// this path silently returned nil and the outer worker
+		// loop in main.go exited without notice.
 		session := &mockSession{
 			filters: make(map[string]gpsd.Filter),
 			done:    make(chan bool),
@@ -139,10 +144,154 @@ func testSessionDone(t *testing.T) {
 		close(session.done)
 
 		err := <-errCh
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+		if !errors.Is(err, errSessionClosed) {
+			t.Errorf("expected errSessionClosed, got %v", err)
 		}
 	})
+
+	t.Run("ctx cancellation returns nil", func(t *testing.T) {
+		t.Parallel()
+
+		// Ctx-driven exit must still be a clean nil return — the
+		// caller is asking us to stop, not telling us we failed.
+		session := &mockSession{
+			filters: make(map[string]gpsd.Filter),
+			done:    make(chan bool),
+		}
+
+		gpsInstance := New(func(gps *GPS) {
+			gps.dial = func(_ string) (Session, error) {
+				return session, nil
+			}
+		})
+
+		ctx, cancel := context.WithCancel(t.Context())
+		errCh := make(chan error, 1)
+
+		go func() {
+			errCh <- gpsInstance.Watch(ctx, location.New())
+		}()
+
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+
+		err := <-errCh
+		if err != nil {
+			t.Errorf("ctx cancel should return nil, got %v", err)
+		}
+	})
+}
+
+// testSessionDoneReconnects locks in the C3 fix: with reconnect
+// enabled, a server-side hangup must drive the outer Watch loop
+// into a fresh watchOnce instead of silently exiting. We let the
+// first session close, observe a second dial happen, then cancel
+// ctx to end the test cleanly.
+func testSessionDoneReconnects(t *testing.T) {
+	t.Helper()
+	t.Run("reconnects on server hangup", func(t *testing.T) {
+		t.Parallel()
+
+		// Two pre-built sessions; each Dial pops the next.
+		first := &mockSession{
+			filters: make(map[string]gpsd.Filter),
+			done:    make(chan bool),
+		}
+		second := &mockSession{
+			filters: make(map[string]gpsd.Filter),
+			done:    make(chan bool),
+		}
+
+		var (
+			dialMu    sync.Mutex
+			dialCount int
+		)
+
+		gpsInstance := New(
+			WithReconnect(true),
+			func(gps *GPS) {
+				gps.dial = func(_ string) (Session, error) {
+					dialMu.Lock()
+					defer dialMu.Unlock()
+
+					dialCount++
+					if dialCount == 1 {
+						return first, nil
+					}
+
+					return second, nil
+				}
+			},
+		)
+
+		// Shrink the reconnect delay for the test — we rely on
+		// the default base of 1s being a problem if we don't.
+		// The base is a package const so we use a tight poll
+		// loop instead and accept a one-second backoff.
+
+		ctx, cancel := context.WithCancel(t.Context())
+		errCh := make(chan error, 1)
+
+		go func() {
+			errCh <- gpsInstance.Watch(ctx, location.New())
+		}()
+
+		// Wait for first dial to land, then close its done
+		// channel to simulate the server hanging up.
+		waitFor(t, func() bool {
+			dialMu.Lock()
+			defer dialMu.Unlock()
+
+			return dialCount >= 1
+		})
+		close(first.done)
+
+		// Reconnect must redial. Backoff starts at 1s so this
+		// poll waits up to ~3s for the second dial.
+		waitForUpTo(t, 3*time.Second, func() bool {
+			dialMu.Lock()
+			defer dialMu.Unlock()
+
+			return dialCount >= 2
+		})
+
+		dialMu.Lock()
+		got := dialCount
+		dialMu.Unlock()
+
+		if got < 2 {
+			t.Fatalf("expected reconnect to redial; dialCount=%d", got)
+		}
+
+		cancel()
+
+		err := <-errCh
+		if err != nil {
+			t.Errorf("ctx-cancelled Watch should return nil, got %v", err)
+		}
+	})
+}
+
+// waitFor blocks until pred returns true, polling every 5ms with
+// a default 500ms deadline. Fails the test if the deadline lapses.
+func waitFor(t *testing.T, pred func() bool) {
+	t.Helper()
+	waitForUpTo(t, 500*time.Millisecond, pred)
+}
+
+func waitForUpTo(t *testing.T, deadline time.Duration, pred func() bool) {
+	t.Helper()
+
+	stopAt := time.Now().Add(deadline)
+	for time.Now().Before(stopAt) {
+		if pred() {
+			return
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t.Fatalf("predicate never became true within %s", deadline)
 }
 
 func testConnectError(t *testing.T) {
@@ -262,5 +411,81 @@ func TestOptions(t *testing.T) {
 
 	if gpsInstance.protocol != "udp" {
 		t.Errorf("expected protocol udp, got %s", gpsInstance.protocol)
+	}
+}
+
+// TestWithReconnectTogglesField locks the WithReconnect contract:
+// the option flips the private reconnect field used by Watch's
+// outer loop to decide between "redial on error" and "return the
+// error to the caller". The field is not exported; this internal
+// test is the only place that can read it.
+func TestWithReconnectTogglesField(t *testing.T) {
+	t.Parallel()
+
+	defaultGPS := New()
+	if defaultGPS.reconnect {
+		t.Error("default reconnect should be false")
+	}
+
+	enabledGPS := New(WithReconnect(true))
+	if !enabledGPS.reconnect {
+		t.Error("WithReconnect(true) did not set the field")
+	}
+
+	disabledGPS := New(WithReconnect(true), WithReconnect(false))
+	if disabledGPS.reconnect {
+		t.Error("WithReconnect(false) did not clear the field after enable")
+	}
+}
+
+// TestWatchCtxCancelDuringBackoff drives the backoff arm of
+// Watch's select: once watchOnce returns errSessionClosed and the
+// outer loop enters time.After(backoff), cancelling ctx must
+// short-circuit the sleep and produce a nil return (graceful
+// exit). Without that branch a ctx cancel during backoff would
+// block for up to reconnectMaxDelay before the loop noticed.
+func TestWatchCtxCancelDuringBackoff(t *testing.T) {
+	t.Parallel()
+
+	session := &mockSession{
+		filters: make(map[string]gpsd.Filter),
+		done:    make(chan bool),
+	}
+
+	gpsInstance := New(
+		WithReconnect(true),
+		func(gps *GPS) {
+			gps.dial = func(_ string) (Session, error) {
+				return session, nil
+			}
+		},
+	)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- gpsInstance.Watch(ctx, location.New())
+	}()
+
+	// Wait for Watch to enter the session select, then close the
+	// session so watchOnce returns errSessionClosed and the outer
+	// loop drops into time.After(backoff). The base delay is 1s
+	// — plenty of time to fire the cancel before the sleep
+	// elapses.
+	time.Sleep(20 * time.Millisecond) //nolint:mnd // long enough for the goroutine to enter watchOnce.
+	close(session.done)
+
+	// Briefly let the loop transition into backoff, then cancel.
+	time.Sleep(20 * time.Millisecond) //nolint:mnd // bound for the loop to reach select.
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Errorf("ctx-cancel during backoff should return nil, got %v", err)
+		}
+	case <-time.After(2 * time.Second): //nolint:mnd // would-fail-anyway deadline; passes well under 100ms in practice.
+		t.Fatal("Watch did not return after ctx cancel during backoff")
 	}
 }
