@@ -26,8 +26,16 @@ func TestNew(t *testing.T) {
 		t.Errorf("expected default scope range 20, got %f", view.GetScopeRange())
 	}
 
-	if view.GetHeadingIndicatorEnabled() {
-		t.Error("expected heading indicator to be disabled by default")
+	if !view.GetHeadingIndicatorEnabled() {
+		t.Error("expected heading indicator to be enabled by default")
+	}
+
+	if !view.GetTrailIndicatorEnabled() {
+		t.Error("expected trail indicator to be enabled by default")
+	}
+
+	if view.GetHeatIndicatorEnabled() {
+		t.Error("expected heat indicator to be disabled by default")
 	}
 
 	if !view.GetAutoScopeEnabled() {
@@ -105,20 +113,20 @@ func TestView_Toggles(t *testing.T) {
 		t.Error("ToggleTrailIndicator() failed to flip back to enabled")
 	}
 
+	if view.GetHeatIndicatorEnabled() {
+		t.Error("heat indicator should default to disabled")
+	}
+
+	view.ToggleHeatIndicator()
+
 	if !view.GetHeatIndicatorEnabled() {
-		t.Error("heat indicator should default to enabled")
+		t.Error("ToggleHeatIndicator() failed to flip to enabled")
 	}
 
 	view.ToggleHeatIndicator()
 
 	if view.GetHeatIndicatorEnabled() {
-		t.Error("ToggleHeatIndicator() failed to flip to disabled")
-	}
-
-	view.ToggleHeatIndicator()
-
-	if !view.GetHeatIndicatorEnabled() {
-		t.Error("ToggleHeatIndicator() failed to flip back to enabled")
+		t.Error("ToggleHeatIndicator() failed to flip back to disabled")
 	}
 }
 
@@ -164,11 +172,13 @@ func TestView_Draw_TrailRendersHistory(t *testing.T) {
 	view.SetRect(0, 0, 80, 24)
 
 	// Disable auto-scope so the scope range stays at the default
-	// 20nm, and disable heat so '·' is unambiguously trail-sourced.
-	// (heatRune draws ░/▒/▓ glyphs, not '·' — but we kill it for
-	// the same reason we kill heading: keep the screen clean.)
+	// 20nm. Heat already defaults off; trail defaults on. Heading
+	// defaults on too, but WithHeading clamps -1 to 0 so a "no
+	// heading" plane would still spray a northward line of '·'
+	// across the screen — kill heading explicitly so the only
+	// source of '·' is the trail.
 	view.ToggleAutoScope()
-	view.ToggleHeatIndicator()
+	view.ToggleHeadingIndicator()
 
 	planes.Ensure("TRAILY")
 
@@ -248,7 +258,7 @@ func TestView_Draw_TrailSkipsZeroPositionEntries(t *testing.T) {
 	view := radar.New(planes, loc)
 	view.SetRect(0, 0, 80, 24)
 	view.ToggleAutoScope()
-	view.ToggleHeatIndicator()
+	view.ToggleHeadingIndicator() // -1 clamps to 0 in WithHeading; kill the line explicitly.
 
 	planes.Ensure("ZEROHIST")
 
@@ -309,9 +319,8 @@ func TestView_Draw_HeadingLineRenders(t *testing.T) {
 	planes := airplanes.New()
 	view := radar.New(planes, loc)
 	view.SetRect(0, 0, 80, 24)
-	view.ToggleAutoScope() // pin scope at 20nm
-	view.ToggleHeadingIndicator()
-	view.ToggleTrailIndicator() // off, so '·' is heading-only
+	view.ToggleAutoScope()      // pin scope at 20nm
+	view.ToggleTrailIndicator() // off, so '·' is heading-only (heading defaults on)
 
 	planes.Ensure("HEADED")
 

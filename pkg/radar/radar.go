@@ -70,9 +70,9 @@ type View struct {
 func New(planes *airplanes.Airplanes, myLocation *location.Location) *View {
 	return &View{
 		Box:              tview.NewBox().SetBorder(false).SetBorderPadding(1, 1, 1, 1),
-		headingIndicator: false,
+		headingIndicator: true,
 		trailIndicator:   true,
-		heatIndicator:    true,
+		heatIndicator:    false,
 		myScope:          scope.New(),
 		autoScope:        true,
 		planes:           planes,
