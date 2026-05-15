@@ -189,6 +189,58 @@ func FormatPlaneListEntry(
 	return mainText, secondaryText
 }
 
+// UpdateSourceStatus writes the formatted source-line into
+// the header's source TextView. Thin SetText wrapper so
+// FormatSourceText is independently testable.
+func UpdateSourceStatus(sourceStatus *tview.TextView, stream *adsb.ADSB) {
+	sourceStatus.SetText(FormatSourceText(stream.Source()))
+}
+
+// FormatSourceText renders the data-source line shown in the
+// header. Label is the source identifier ("SDR", "BEAST host:port",
+// "Replay file"); a coloured dot signals connection state; the
+// running byte count is shown only when bytes have actually been
+// pulled (so SDR and replay stay terse).
+func FormatSourceText(info adsb.SourceInfo) string {
+	label := info.Label
+	if label == "" {
+		label = "unknown"
+	}
+
+	state := "[red]●[white]"
+	if info.Connected {
+		state = "[green]●[white]"
+	}
+
+	if info.BytesIn > 0 {
+		return fmt.Sprintf("Source: %s %s %s", label, state, FormatBytes(info.BytesIn))
+	}
+
+	return fmt.Sprintf("Source: %s %s", label, state)
+}
+
+// FormatBytes renders a byte count using base-1024 units (B / KiB
+// / MiB / GiB). One decimal place above the unit boundary, exact
+// otherwise. Sized for header use, not log lines.
+func FormatBytes(bytes uint64) string {
+	const (
+		kib = 1024
+		mib = kib * 1024
+		gib = mib * 1024
+	)
+
+	switch {
+	case bytes >= gib:
+		return fmt.Sprintf("%.1f GiB", float64(bytes)/gib)
+	case bytes >= mib:
+		return fmt.Sprintf("%.1f MiB", float64(bytes)/mib)
+	case bytes >= kib:
+		return fmt.Sprintf("%.1f KiB", float64(bytes)/kib)
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
+}
+
 // UpdateStatsPanel refreshes the stats panel with the latest
 // ingest counters and plane-list-derived aggregates. Thin
 // wrapper around AggregateStats + FormatStatsText so the side

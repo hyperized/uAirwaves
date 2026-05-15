@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -88,6 +89,7 @@ type uiComponents struct {
 	rightColumn    *tview.Flex
 	commands       *tview.TextView
 	gpsStatus      *tview.TextView
+	sourceStatus   *tview.TextView
 	footer         *tview.Flex
 }
 
@@ -99,6 +101,7 @@ func configureUI() *uiComponents {
 	statusBar := configureStatusbar()
 	commands := configureCommands()
 	gpsStatus := configureGpsStatus()
+	sourceStatus := configureSourceStatus()
 	planeListPanel := configurePlaneList()
 	statsPanel := configureStatsPanel()
 
@@ -116,12 +119,13 @@ func configureUI() *uiComponents {
 		batteryStatus:  battery.NewStatus(),
 		clock:          clock,
 		statusBar:      statusBar,
-		headerPanel:    configureHeader(clock, gpsStatus, statusBar),
+		headerPanel:    configureHeader(clock, gpsStatus, sourceStatus, statusBar),
 		planeListPanel: planeListPanel,
 		statsPanel:     statsPanel,
 		rightColumn:    configureRightColumn(planeListPanel, statsPanel),
 		commands:       commands,
 		gpsStatus:      gpsStatus,
+		sourceStatus:   sourceStatus,
 		footer:         configureFooter(commands),
 	}
 }
@@ -151,7 +155,7 @@ func buildADSBOptions(myLocation *location.Location) []adsb.Option {
 			}
 
 			return rcv, nil
-		}))
+		}), adsb.WithSourceLabel("Replay "+filepath.Base(path)))
 
 		slog.Info("adsb: replaying from file", slog.String("path", path))
 
@@ -159,9 +163,13 @@ func buildADSBOptions(myLocation *location.Location) []adsb.Option {
 	}
 
 	if addr := ui.EnvOr("BEAST_ADDRESS", ""); addr != "" {
-		opts = append(opts, adsb.WithBeastAddress(addr))
+		opts = append(opts, adsb.WithBeastAddress(addr), adsb.WithSourceLabel("BEAST "+addr))
 		slog.Info("adsb: consuming BEAST", slog.String("address", addr))
+
+		return opts
 	}
+
+	opts = append(opts, adsb.WithSourceLabel("SDR"))
 
 	return opts
 }
@@ -309,6 +317,7 @@ func startUIUpdater(components *uiComponents) {
 					ui.UpdateStatsPanel(components.statsPanel, components.adsbStream, components.statsTracker,
 						components.myLocation, components.planeList)
 					ui.UpdateFooter(components.commands, components.radarPanel, positionedOnly)
+					ui.UpdateSourceStatus(components.sourceStatus, components.adsbStream)
 					components.gpsStatus.SetText("GPS: " + components.myLocation.String())
 				})
 			}
@@ -378,11 +387,26 @@ func configureRightColumn(planeListPanel *tview.List, statsPanel *tview.TextView
 }
 
 // configureHeader configures the header panel.
-func configureHeader(clock *tview.TextView, gpsStatus *tview.TextView, statusBar *tview.TextView) *tview.Flex {
+func configureHeader(
+	clock *tview.TextView, gpsStatus *tview.TextView, sourceStatus *tview.TextView, statusBar *tview.TextView,
+) *tview.Flex {
 	return tview.NewFlex().SetDirection(tview.FlexColumn).
 		AddItem(clock, 0, 1, false).
 		AddItem(gpsStatus, 0, 1, false).
+		AddItem(sourceStatus, 0, 1, false).
 		AddItem(statusBar, 0, 1, false)
+}
+
+// configureSourceStatus configures the data-source status text
+// view in the header. Shares the GPS pill's colour scheme so the
+// header reads as one band.
+func configureSourceStatus() *tview.TextView {
+	sourceStatus := tview.NewTextView().SetTextAlign(tview.AlignCenter)
+	sourceStatus.SetDynamicColors(true)
+	sourceStatus.SetBackgroundColor(tcell.ColorDarkGreen)
+	sourceStatus.SetTextColor(tcell.ColorBlack)
+
+	return sourceStatus
 }
 
 // configureStatusbar configures the status bar text view.

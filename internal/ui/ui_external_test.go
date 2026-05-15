@@ -404,6 +404,93 @@ func TestUpdateFooterReadsRadarState(t *testing.T) {
 	}
 }
 
+func TestFormatBytes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input uint64
+		want  string
+	}{
+		{"zero", 0, "0 B"},
+		{"bytes", 512, "512 B"},
+		{"kib boundary", 1024, "1.0 KiB"},
+		{"kib", 2_560, "2.5 KiB"},
+		{"mib boundary", 1024 * 1024, "1.0 MiB"},
+		{"mib", 1024*1024*3 + 1024*512, "3.5 MiB"},
+		{"gib boundary", 1024 * 1024 * 1024, "1.0 GiB"},
+		{"gib", 1024*1024*1024*4 + 1024*1024*256, "4.2 GiB"},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := ui.FormatBytes(testCase.input); got != testCase.want {
+				t.Errorf("FormatBytes(%d) = %q, want %q", testCase.input, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestFormatSourceText(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		info adsb.SourceInfo
+		want string
+	}{
+		{
+			name: "empty label connected with bytes",
+			info: adsb.SourceInfo{Label: "", Connected: true, BytesIn: 1024},
+			want: "Source: unknown [green]●[white] 1.0 KiB",
+		},
+		{
+			name: "sdr connected no bytes",
+			info: adsb.SourceInfo{Label: "SDR", Connected: true, BytesIn: 0},
+			want: "Source: SDR [green]●[white]",
+		},
+		{
+			name: "beast disconnected",
+			info: adsb.SourceInfo{Label: "BEAST host:30005", Connected: false, BytesIn: 0},
+			want: "Source: BEAST host:30005 [red]●[white]",
+		},
+		{
+			name: "beast connected with bytes",
+			info: adsb.SourceInfo{Label: "BEAST host:30005", Connected: true, BytesIn: 5_242_880},
+			want: "Source: BEAST host:30005 [green]●[white] 5.0 MiB",
+		},
+		{
+			name: "replay connected",
+			info: adsb.SourceInfo{Label: "Replay capture.iq", Connected: true, BytesIn: 0},
+			want: "Source: Replay capture.iq [green]●[white]",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := ui.FormatSourceText(testCase.info); got != testCase.want {
+				t.Errorf("FormatSourceText(%+v) = %q, want %q", testCase.info, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestUpdateSourceStatusWritesText(t *testing.T) {
+	t.Parallel()
+
+	stream := adsb.New(adsb.WithSourceLabel("SDR"))
+	panel := tview.NewTextView()
+	ui.UpdateSourceStatus(panel, stream)
+
+	if got := panel.GetText(true); !strings.Contains(got, "Source: SDR") {
+		t.Errorf("UpdateSourceStatus text missing 'Source: SDR'; got %q", got)
+	}
+}
+
 // TestUpdateStatsPanelWritesText drives the side-effecting
 // wrapper through one tick. The pure halves (AggregateStats /
 // FormatStatsText) are independently tested; this exists to
