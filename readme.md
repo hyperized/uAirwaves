@@ -102,8 +102,25 @@ Environment variables (all optional):
 | `BATTERY_PATH`        | `/sys/class/power_supply/axp20x-battery/uevent`    | `power_supply` uevent file. Missing/unreadable is non-fatal — the watcher logs a warning and keeps polling, so a transient udev race at boot doesn't take the app down. |
 | `BEAST_ADDRESS`       | unset                                              | `host:port` of a remote BEAST TCP server. When set, uAirwaves consumes Mode-S Beast frames from that server instead of opening the local SDR. Reconnects with exponential backoff (1 s base, 30 s cap). Precedence: `UAIRWAVES_REPLAY_IQ > BEAST_ADDRESS > local SDR`. |
 | `UAIRWAVES_REPLAY_IQ` | unset                                              | Path to a captured IQ file. When set, the SDR backend is bypassed and the file is streamed through the demod chain instead — useful for deterministic on-device replay and off-line A/B testing. The receiver returns `adsb.ErrReplayEnded` on EOF, which `Stream` converts to a clean shutdown. |
+| `UAIRWAVES_CHECK`     | unset                                              | Go duration (1 s – 5 min). When set, uAirwaves skips the TUI, runs the GPS + ADSB workers for the window, writes a JSON report to stdout, and exits non-zero when default thresholds (≥ 1 frame, ≥ 1 tracked plane) are not met. Useful as a deployment smoke test. |
 
 The ADS-B path no longer takes an `ADSB_ADDRESS` — it owns the SDR directly (or speaks BEAST natively over `BEAST_ADDRESS`).
+
+### Check mode
+
+A non-TUI diagnostic, gated by `UAIRWAVES_CHECK=<duration>`. The duration is parsed with `time.ParseDuration` and clamped to `[1s, 5m]`. JSON is written to stdout; structured logs stay on stderr, so `jq` works straight through:
+
+```sh
+UAIRWAVES_CHECK=10s BEAST_ADDRESS=192.168.1.50:30005 ./uAirwaves | jq .
+```
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| `0`  | Window completed, thresholds met. |
+| `1`  | Window completed, one or more thresholds failed (`failures` array in the JSON names them). |
+| `2`  | Bad duration, or a worker returned a fatal error. |
 
 ## Repository layout
 
