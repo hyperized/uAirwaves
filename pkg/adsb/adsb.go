@@ -43,6 +43,12 @@ const (
 
 	defaultPruneThreshold = 1 * time.Minute
 	defaultPruneFrequency = 5 * time.Second
+
+	// beastReconnectBaseDelay and beastReconnectMaxDelay mirror the
+	// pkg/gps backoff schedule (1 s base, doubling, 30 s cap) so a
+	// single behavioural envelope covers every TCP-backed source.
+	beastReconnectBaseDelay = 1 * time.Second
+	beastReconnectMaxDelay  = 30 * time.Second
 )
 
 // errOpenReceiver is the static sentinel for the "couldn't open
@@ -88,6 +94,18 @@ type ADSB struct {
 	// without real silicon.
 	receiverFactory    ReceiverFactory
 	demodulatorFactory DemodulatorFactory
+
+	// beastAddress, when non-empty, switches Stream away from
+	// the SDR pipeline and into the BEAST-over-TCP path: dial,
+	// read framed Mode S messages from a remote demodulator,
+	// reconnect with backoff on failure.
+	beastAddress string
+
+	// beastDialer is the net.Dialer Stream uses for BEAST
+	// connections. Tests override it via WithBeastDialer to point
+	// at a loopback listener without going through the real
+	// resolver.
+	beastDialer BeastDialer
 
 	// myLocation, when set, supplies the reference position for
 	// locally-unambiguous CPR decoding — fast first-fix on every
@@ -152,6 +170,7 @@ func New(opts ...Option) *ADSB {
 		cpr:                newCPRCache(),
 		receiverFactory:    defaultReceiverFactory,
 		demodulatorFactory: defaultDemodulatorFactory,
+		beastDialer:        defaultBeastDialer,
 	}
 
 	for _, opt := range opts {
@@ -253,26 +272,69 @@ func WithDemodulatorFactory(factory DemodulatorFactory) Option {
 	}
 }
 
-// Stream drives the SDR pipeline and updates planes as decoded
-// frames arrive.
+// WithBeastAddress switches Stream from the local SDR pipeline
+// to a BEAST-over-TCP consumer: dial the given host:port, read
+// framed Mode S messages from the remote demodulator, and feed
+// them through the same handleFrame path the SDR loop uses.
+//
+// Empty string clears the address and falls back to the SDR
+// pipeline. UAIRWAVES_REPLAY_IQ (set via WithReceiverFactory in
+// main) takes precedence when both are wired — Stream consults
+// beastAddress only when no replay factory has been configured.
+func WithBeastAddress(address string) Option {
+	return func(a *ADSB) { a.beastAddress = address }
+}
+
+// WithBeastDialer overrides the net.Dialer used to reach the
+// BEAST server. Tests point this at a loopback listener so they
+// don't depend on the system resolver or real hardware. nil
+// keeps the default.
+func WithBeastDialer(dialer BeastDialer) Option {
+	return func(a *ADSB) {
+		if dialer != nil {
+			a.beastDialer = dialer
+		}
+	}
+}
+
+// Stream drives the configured ingest source and updates planes
+// as decoded frames arrive. Two paths:
+//
+//   - BEAST mode (WithBeastAddress set): dial a remote BEAST
+//     server, read pre-demodulated Mode S frames, and feed them
+//     through handleFrame. Reconnects with exponential backoff.
+//   - SDR mode (default): drive the receiver + demodulator
+//     factories, processing IQ chunks into frames.
+//
+// Both paths share the prune + CPR-cleanup goroutines started
+// here, so callers don't see different lifecycle semantics across
+// modes.
 //
 // Returns:
 //
 //   - nil on context cancellation (user pressed q / SIGINT) or on
 //     ErrReplayEnded (the file-backed receiver exhausted its
 //     capture). Both are clean shutdowns from the UI's perspective.
-//   - an error from the configured ReceiverFactory if the source
-//     can't be opened. The default factory wraps errOpenReceiver
-//     for SDR-open failures; NewFileReceiver wraps errOpenReplay
-//     for missing replay files.
+//   - an error from the configured ReceiverFactory if the SDR
+//     source can't be opened. The default factory wraps
+//     errOpenReceiver for SDR-open failures; NewFileReceiver wraps
+//     errOpenReplay for missing replay files.
 //   - a wrapped read error for anything else.
-//
-// Callers that need to distinguish "operator cancelled" from
-// "replay file ended" can branch on errors.Is(err, ErrReplayEnded)
-// against the Receiver's Read return value directly; Stream's
-// return value collapses both into nil because the UI lifecycle
-// is identical.
 func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
+	go a.prune(ctx, planes)
+	go a.cpr.runCleanup(ctx, cprCacheCleanupInterval)
+
+	if a.beastAddress != "" {
+		return a.streamBeast(ctx, planes)
+	}
+
+	return a.streamSDR(ctx, planes)
+}
+
+// streamSDR runs the historical receiver+demodulator loop. Held
+// in its own method so Stream can pick between SDR and BEAST
+// without an inline branch obscuring the read-loop shape.
+func (a *ADSB) streamSDR(ctx context.Context, planes *airplanes.Airplanes) error {
 	receiver, err := a.receiverFactory()
 	if err != nil {
 		return err
@@ -285,10 +347,6 @@ func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
 	}()
 
 	demodulator := a.demodulatorFactory()
-
-	go a.prune(ctx, planes)
-	go a.cpr.runCleanup(ctx, cprCacheCleanupInterval)
-
 	iqBuf := make([]byte, readChunkSize)
 
 	for {

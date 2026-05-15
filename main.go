@@ -122,11 +122,17 @@ func configureUI() *uiComponents {
 }
 
 // buildADSBOptions assembles the adsb.New option slice from the
-// runtime environment: WithLocation always; WithReceiverFactory
-// when UAIRWAVES_REPLAY_IQ points at a capture file (which means
-// pkg/adsb consumes the file instead of opening the SDR — the
-// path stays bit-identical between live and replay so the same
-// binary smoke-tests both modes on the device).
+// runtime environment. Sources, in precedence order:
+//
+//  1. UAIRWAVES_REPLAY_IQ → file-backed replay (testing).
+//  2. BEAST_ADDRESS       → consume BEAST frames from a remote
+//     demodulator over TCP (no local SDR).
+//  3. Default             → drive the rtl2832u + demod stack
+//     directly off the on-board SDR.
+//
+// Replay wins over BEAST so a developer can always replay a
+// captured IQ even on a host that also has BEAST_ADDRESS set in
+// its environment.
 func buildADSBOptions(myLocation *location.Location) []adsb.Option {
 	opts := []adsb.Option{adsb.WithLocation(myLocation)}
 
@@ -143,6 +149,13 @@ func buildADSBOptions(myLocation *location.Location) []adsb.Option {
 		}))
 
 		slog.Info("adsb: replaying from file", slog.String("path", path))
+
+		return opts
+	}
+
+	if addr := ui.EnvOr("BEAST_ADDRESS", ""); addr != "" {
+		opts = append(opts, adsb.WithBeastAddress(addr))
+		slog.Info("adsb: consuming BEAST", slog.String("address", addr))
 	}
 
 	return opts
