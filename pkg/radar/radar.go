@@ -190,6 +190,13 @@ func (r *View) Draw(screen tcell.Screen) {
 	innerX, innerY, width, height := r.GetInnerRect()
 	centerX, centerY := innerX+width/2, innerY+height/2
 
+	centerLatitude, centerLongitude := r.myLocation.GetCoordinates()
+	planeList := r.planes.Sorted(centerLatitude, centerLongitude)
+
+	if toggles.autoScope {
+		r.applyAutoScope(planeList, centerLatitude, centerLongitude)
+	}
+
 	xScale, yScale := r.calculateScales(width, height)
 
 	// 1. Draw Scope Rings
@@ -200,13 +207,6 @@ func (r *View) Draw(screen tcell.Screen) {
 	r.drawCompassIndicators(screen, innerX, innerY, centerX, centerY, width, height)
 
 	// 3. Draw Planes (also accumulates heat as a side effect)
-	centerLatitude, centerLongitude := r.myLocation.GetCoordinates()
-	planeList := r.planes.Sorted(centerLatitude, centerLongitude)
-
-	if toggles.autoScope {
-		r.myScope.Update(scope.WithCurrent(r.myScope.GetMax()))
-	}
-
 	r.drawPlanes(screen, planeList, centerX, centerY, xScale, yScale, centerLatitude, centerLongitude, toggles)
 
 	// 4. Decay and draw heat map last so nothing overwrites it
@@ -231,6 +231,38 @@ func (r *View) snapshotToggles() drawToggles {
 		heat:      r.heatIndicator,
 		trail:     r.trailIndicator,
 	}
+}
+
+// applyAutoScope sizes the scope to the farthest position-bearing
+// plane, rounded up to the next Scope.Increment. When no plane has
+// a valid position the current scope is left alone — this avoids
+// the empty-airspace snap-to-Min that drove c3a81e2d and the
+// permanent pin-to-Max that replaced it.
+func (r *View) applyAutoScope(planeList []airplane.Snapshot, centerLatitude, centerLongitude float64) {
+	var maxDist float64
+
+	for _, plane := range planeList {
+		if plane.Latitude == 0 || plane.Longitude == 0 {
+			continue
+		}
+
+		dLat := plane.Latitude - centerLatitude
+		dLon := (plane.Longitude - centerLongitude) * math.Cos(centerLatitude*degreesToRadiansRatio)
+		nmY := dLat * nauticalMilePerDegree
+		nmX := dLon * nauticalMilePerDegree
+
+		if dist := math.Sqrt(nmX*nmX + nmY*nmY); dist > maxDist {
+			maxDist = dist
+		}
+	}
+
+	if maxDist == 0 {
+		return
+	}
+
+	increment := r.myScope.GetIncrement()
+	target := math.Ceil(maxDist/increment) * increment
+	r.myScope.Update(scope.WithCurrent(target))
 }
 
 func (r *View) calculateScales(width, height int) (float64, float64) {

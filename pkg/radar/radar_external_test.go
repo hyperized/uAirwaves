@@ -395,7 +395,8 @@ func TestView_Draw_EdgeCases(t *testing.T) {
 
 	testPlaneOutsideScopeIncreasesRange(t, loc, screen)
 	testAutoScopeDisabled(t, loc, screen)
-	testNoPlanesResetsScope(t, loc, screen)
+	testNoPlanesLeavesScope(t, loc, screen)
+	testAutoScopeShrinksToFarthest(t, loc, screen)
 	testPlaneWithoutLocationSkipped(t, loc, screen)
 	testPlaneWithCallsign(t, loc, screen)
 }
@@ -451,12 +452,11 @@ func testAutoScopeDisabled(t *testing.T, loc *location.Location, screen tcell.Sc
 	})
 }
 
-func testNoPlanesResetsScope(t *testing.T, loc *location.Location, screen tcell.Screen) {
+func testNoPlanesLeavesScope(t *testing.T, loc *location.Location, screen tcell.Screen) {
 	t.Helper()
-	t.Run("autoscope sits at max regardless of planes", func(t *testing.T) {
+	t.Run("autoscope leaves scope unchanged when no plane has a position", func(t *testing.T) {
 		t.Parallel()
 
-		// Create a new view to test autoscope behavior
 		newPlanes := airplanes.New()
 		newView := radar.New(newPlanes, loc)
 		newView.SetScopeRange(100)
@@ -464,17 +464,44 @@ func testNoPlanesResetsScope(t *testing.T, loc *location.Location, screen tcell.
 
 		newView.Draw(screen)
 
-		const wantMax = 500.0
-		if newView.GetScopeRange() != wantMax {
-			t.Errorf("expected autoscope to pin scope at max %f, got %f", wantMax, newView.GetScopeRange())
+		if got := newView.GetScopeRange(); got != 100 {
+			t.Errorf("expected autoscope to leave range at 100 with no planes, got %f", got)
 		}
 
 		newView.ToggleAutoScope()
 		newView.SetScopeRange(100)
 		newView.Draw(screen)
 
-		if newView.GetScopeRange() != 100 {
-			t.Errorf("expected range to stay at 100 with autoScope disabled, got %f", newView.GetScopeRange())
+		if got := newView.GetScopeRange(); got != 100 {
+			t.Errorf("expected range to stay at 100 with autoScope disabled, got %f", got)
+		}
+	})
+}
+
+func testAutoScopeShrinksToFarthest(t *testing.T, loc *location.Location, screen tcell.Screen) {
+	t.Helper()
+	t.Run("autoscope shrinks to fit the farthest plane", func(t *testing.T) {
+		t.Parallel()
+
+		planes := airplanes.New()
+		view := radar.New(planes, loc)
+		view.SetScopeRange(500) // start pinned at max as if previously far traffic
+		view.SetRect(0, 0, 80, 24)
+
+		// Plane at lat=52 + 2deg → ~120 nm north of (52, 13).
+		// Expect autoscope to round up to next 20 nm increment: 120 nm.
+		planes.Ensure("NEAR")
+		plane, _ := planes.Get("NEAR")
+		plane.Update(
+			airplane.WithLatitude(54.0),
+			airplane.WithLongitude(13.0),
+		)
+
+		view.Draw(screen)
+
+		const want = 120.0
+		if got := view.GetScopeRange(); got != want {
+			t.Errorf("expected autoscope to shrink to %f, got %f", want, got)
 		}
 	})
 }
