@@ -13,10 +13,11 @@ import (
 )
 
 type mockSession struct {
-	mu      sync.RWMutex
-	filters map[string]gpsd.Filter
-	done    chan bool
-	closed  bool
+	mu       sync.RWMutex
+	filters  map[string]gpsd.Filter
+	done     chan bool
+	closed   bool
+	closeErr error
 }
 
 func (m *mockSession) AddFilter(f string, filter gpsd.Filter) {
@@ -33,7 +34,7 @@ func (m *mockSession) Watch() chan bool {
 func (m *mockSession) Close() error {
 	m.closed = true
 
-	return nil
+	return m.closeErr
 }
 
 func (m *mockSession) getFilter(f string) (gpsd.Filter, bool) {
@@ -55,7 +56,48 @@ func TestWatch(t *testing.T) {
 	testInvalidReportType(t)
 }
 
-var errDialFailed = errors.New("dial failed")
+var (
+	errDialFailed = errors.New("dial failed")
+	errCloseFake  = errors.New("fake close failure")
+)
+
+// TestDisconnectBranches exercises both arms of disconnect() so
+// coverage covers the Warn-on-error and Info-on-clean paths; the
+// log output itself is not asserted (slog default handler), only
+// that the right Close return value drives the branching.
+func TestDisconnectBranches(t *testing.T) {
+	t.Parallel()
+
+	t.Run("clean close logs at Info, no error key", func(t *testing.T) {
+		t.Parallel()
+
+		session := &mockSession{filters: map[string]gpsd.Filter{}, done: make(chan bool)}
+		gpsInstance := New(func(gps *GPS) { gps.session = session })
+
+		gpsInstance.disconnect()
+
+		if !session.closed {
+			t.Error("Close was not called on clean disconnect")
+		}
+	})
+
+	t.Run("close error logs at Warn", func(t *testing.T) {
+		t.Parallel()
+
+		session := &mockSession{
+			filters:  map[string]gpsd.Filter{},
+			done:     make(chan bool),
+			closeErr: errCloseFake,
+		}
+		gpsInstance := New(func(gps *GPS) { gps.session = session })
+
+		gpsInstance.disconnect()
+
+		if !session.closed {
+			t.Error("Close was not called on error disconnect")
+		}
+	})
+}
 
 func testSuccessfulWatch(t *testing.T) {
 	t.Helper()

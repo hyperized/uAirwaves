@@ -167,5 +167,11 @@ func (g *GPS) connect() error {
 }
 
 func (g *GPS) disconnect() {
-	slog.Info("Disconnecting from GPS daemon", slog.Any("error", g.session.Close()))
+	if err := g.session.Close(); err != nil {
+		slog.Warn("Disconnecting from GPS daemon", slog.Any("error", err))
+
+		return
+	}
+
+	slog.Info("Disconnecting from GPS daemon")
 }
