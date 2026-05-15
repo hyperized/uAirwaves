@@ -48,6 +48,32 @@ func (l *Location) GetCoordinates() (float64, float64) {
 	return l.latitude, l.longitude
 }
 
+// Altitude returns the current altitude in metres.
+func (l *Location) Altitude() float64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	return l.altitude
+}
+
+// Mode returns the human-readable fix mode (e.g. "3D fix").
+// Returns the empty string when no fix has been reported.
+func (l *Location) Mode() string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	return fixMode[l.mode]
+}
+
+// HasFix reports whether the receiver currently has a 2D or 3D
+// GPS fix. Returns false for "no fix" and uninitialised state.
+func (l *Location) HasFix() bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	return l.mode == twoD || l.mode == threeD
+}
+
 // Update applies the provided options to an existing Location.
 func (l *Location) Update(opts ...Option) {
 	l.mu.Lock()

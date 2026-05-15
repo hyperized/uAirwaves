@@ -11,6 +11,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+	"lab.hyperized.net/hyperized/uAirwaves/internal/check"
 	"lab.hyperized.net/hyperized/uAirwaves/internal/ui"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/adsb"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
@@ -32,6 +33,10 @@ const (
 )
 
 func main() {
+	if raw := ui.EnvOr("UAIRWAVES_CHECK", ""); raw != "" {
+		os.Exit(runCheckMode(raw))
+	}
+
 	uic := configureUI()
 	radarPanel := radar.New(uic.planeList, uic.myLocation)
 	uic.radarPanel = radarPanel
@@ -183,13 +188,78 @@ func startBatteryWatcher(components *uiComponents, filePath string) {
 
 func startGPSWatcher(components *uiComponents, address string) {
 	ui.LaunchWorker(components.waitGroup, components.errChan, errGPSRecover, func() error {
-		opts := []gps.Option{gps.WithReconnect(true)}
-		if address != "" {
-			opts = append(opts, gps.WithGpsAddress(address))
-		}
-
-		return gps.New(opts...).Watch(components.ctx, components.myLocation)
+		return runGPSWatch(components.ctx, components.myLocation, address)
 	})
+}
+
+func runGPSWatch(ctx context.Context, loc *location.Location, address string) error {
+	opts := []gps.Option{gps.WithReconnect(true)}
+	if address != "" {
+		opts = append(opts, gps.WithGpsAddress(address))
+	}
+
+	if err := gps.New(opts...).Watch(ctx, loc); err != nil {
+		return fmt.Errorf("gps watch: %w", err)
+	}
+
+	return nil
+}
+
+// runCheckMode runs the JSON-emitting non-TUI check window. Exit
+// codes:
+//
+//	0 — thresholds met, JSON written to stdout
+//	1 — thresholds not met (still emits the JSON; consumer can
+//	    diff which gate failed)
+//	2 — bad input (unparseable duration) or fatal I/O error
+func runCheckMode(rawDuration string) int {
+	const (
+		exitOK       = 0
+		exitFail     = 1
+		exitBadInput = 2
+	)
+
+	duration, err := check.ParseDuration(rawDuration)
+	if err != nil {
+		slog.Error("check: bad UAIRWAVES_CHECK", slog.Any("error", err))
+
+		return exitBadInput
+	}
+
+	check.LogStart(duration)
+
+	myLocation := location.New()
+	planes := airplanes.New()
+	stream := adsb.New(buildADSBOptions(myLocation)...)
+	gpsAddress := ui.EnvOr("GPSD_ADDRESS", "")
+
+	report, passed, runErr := check.Run(context.Background(), check.Options{
+		Duration:   duration,
+		Thresholds: check.DefaultThresholds(),
+		Output:     os.Stdout,
+		Stream:     stream,
+		Planes:     planes,
+		Location:   myLocation,
+		StartGPS: func(ctx context.Context) error {
+			return runGPSWatch(ctx, myLocation, gpsAddress)
+		},
+		StartADSB: func(ctx context.Context) error {
+			return stream.Stream(ctx, planes)
+		},
+	})
+	if runErr != nil {
+		slog.Error("check: worker error", slog.Any("error", runErr))
+
+		return exitBadInput
+	}
+
+	if !passed {
+		slog.Warn("check: thresholds not met", slog.Any("failures", report.Thresholds.Failures))
+
+		return exitFail
+	}
+
+	return exitOK
 }
 
 func startADSBStreamer(components *uiComponents) {
