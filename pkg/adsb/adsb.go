@@ -149,6 +149,23 @@ type ADSB struct {
 	recoveredFrames  atomic.Uint64
 	callsignsDecoded atomic.Uint64
 	callsignsApplied atomic.Uint64
+
+	// sourceLabel is the human-readable identifier the UI shows in
+	// the header (e.g. "SDR", "BEAST 192.168.1.5:30005", "Replay
+	// capture.iq"). Stamped once at construction via WithSourceLabel.
+	sourceLabel string
+
+	// connected reflects whether the current source is actively
+	// producing frames: true after a successful SDR open / BEAST
+	// connect, false during reconnect backoff or after the stream
+	// exits. The BEAST consumer flips it per-attempt; the SDR
+	// branch flips it once at open.
+	connected atomic.Bool
+
+	// bytesIn counts raw bytes pulled from the BEAST stream. SDR
+	// and replay don't surface byte counters because samples are
+	// the wrong unit and the rate is fixed by the demod chain.
+	bytesIn atomic.Uint64
 }
 
 // Stats reports the ingest counters since process start.
@@ -167,6 +184,26 @@ func (a *ADSB) Stats() Stats {
 		RecoveredFrames:  a.recoveredFrames.Load(),
 		CallsignsDecoded: a.callsignsDecoded.Load(),
 		CallsignsApplied: a.callsignsApplied.Load(),
+	}
+}
+
+// SourceInfo describes the active ingest source for the UI
+// header. Label is the human-readable identifier (e.g. "BEAST
+// host:port", "SDR"). Connected mirrors the active-stream state;
+// BytesIn is 0 for non-network sources.
+type SourceInfo struct {
+	Label     string
+	Connected bool
+	BytesIn   uint64
+}
+
+// Source returns a snapshot of the ingest source state. Safe to
+// call from any goroutine.
+func (a *ADSB) Source() SourceInfo {
+	return SourceInfo{
+		Label:     a.sourceLabel,
+		Connected: a.connected.Load(),
+		BytesIn:   a.bytesIn.Load(),
 	}
 }
 
@@ -312,6 +349,13 @@ func WithBeastDialer(dialer BeastDialer) Option {
 	}
 }
 
+// WithSourceLabel sets the human-readable identifier the UI shows
+// in the header (e.g. "SDR", "BEAST 192.168.1.5:30005", "Replay
+// capture.iq"). Empty string leaves the label unset.
+func WithSourceLabel(label string) Option {
+	return func(a *ADSB) { a.sourceLabel = label }
+}
+
 // Stream drives the configured ingest source and updates planes
 // as decoded frames arrive. Two paths:
 //
@@ -356,7 +400,11 @@ func (a *ADSB) streamSDR(ctx context.Context, planes *airplanes.Airplanes) error
 		return err
 	}
 
+	a.connected.Store(true)
+
 	defer func() {
+		a.connected.Store(false)
+
 		if cerr := receiver.Close(); cerr != nil {
 			slog.Warn("adsb: receiver close", "error", cerr)
 		}

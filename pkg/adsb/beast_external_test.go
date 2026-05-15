@@ -108,6 +108,8 @@ func (s *beastServer) run() {
 // waitForPlane polls planes for icao until timeout. Returns true
 // when the plane appears. Used because Stream populates planes
 // asynchronously on a background goroutine.
+//
+//nolint:unparam // every caller uses 40621D — that's the only ICAO in the test fixture; param kept for readability.
 func waitForPlane(planes *airplanes.Airplanes, icao string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -243,6 +245,65 @@ func TestStreamBeastDialerErrorReconnects(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Stream did not return within 2s after cancel")
+	}
+}
+
+func TestSourceDefaults(t *testing.T) {
+	t.Parallel()
+
+	stream := adsb.New()
+
+	got := stream.Source()
+	if got.Label != "" || got.Connected || got.BytesIn != 0 {
+		t.Errorf("Source() defaults = %+v, want zero values", got)
+	}
+}
+
+func TestWithSourceLabel(t *testing.T) {
+	t.Parallel()
+
+	stream := adsb.New(adsb.WithSourceLabel("BEAST 1.2.3.4:30005"))
+
+	if got := stream.Source().Label; got != "BEAST 1.2.3.4:30005" {
+		t.Errorf("Source().Label = %q, want BEAST 1.2.3.4:30005", got)
+	}
+}
+
+func TestBeastSourceConnectedDuringStream(t *testing.T) {
+	t.Parallel()
+
+	srv := newBeastServer(t, true, klm1023Frame)
+
+	stream := adsb.New(adsb.WithBeastAddress(srv.addr()), adsb.WithSourceLabel("BEAST "+srv.addr()))
+
+	planes := airplanes.New()
+	ctx, cancel := context.WithCancel(t.Context())
+
+	done := make(chan error, 1)
+	go func() { done <- stream.Stream(ctx, planes) }()
+
+	if !waitForPlane(planes, "40621D", 2*time.Second) {
+		t.Fatal("plane 40621D not registered within 2s")
+	}
+
+	src := stream.Source()
+	if !src.Connected {
+		t.Error("Source().Connected = false during live stream, want true")
+	}
+
+	if src.BytesIn == 0 {
+		t.Error("Source().BytesIn = 0 after frame delivered, want > 0")
+	}
+
+	if src.Label != "BEAST "+srv.addr() {
+		t.Errorf("Source().Label = %q, want %q", src.Label, "BEAST "+srv.addr())
+	}
+
+	cancel()
+	<-done
+
+	if got := stream.Source().Connected; got {
+		t.Error("Source().Connected = true after Stream exit, want false")
 	}
 }
 

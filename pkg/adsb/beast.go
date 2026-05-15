@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/hyperized/demod1090/beast"
@@ -14,6 +15,26 @@ import (
 	"github.com/hyperized/modes"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
 )
+
+// countingReader is a thin io.Reader wrapper that bumps an
+// atomic.Uint64 by the byte count of every successful Read. Used
+// on the BEAST conn so the UI can surface "bytes pulled from the
+// remote source" in the header without reaching into beast.Reader.
+type countingReader struct {
+	inner   io.Reader
+	counter *atomic.Uint64
+}
+
+func (c *countingReader) Read(buf []byte) (int, error) {
+	//nolint:varnamelen // io.Reader contract uses (n, err); the idiom is universal.
+	n, err := c.inner.Read(buf)
+	if n > 0 {
+		c.counter.Add(uint64(n))
+	}
+
+	//nolint:wrapcheck // pass-through wrapper: the caller already wraps stream errors.
+	return n, err
+}
 
 // BeastDialer is the seam Stream uses to reach a BEAST server.
 // net.Dialer satisfies it via DialContext; tests inject a
@@ -78,10 +99,13 @@ func (a *ADSB) streamBeastOnce(ctx context.Context, planes *airplanes.Airplanes)
 
 	slog.Info("adsb: beast connected", slog.String("address", a.beastAddress))
 
+	a.connected.Store(true)
+	defer a.connected.Store(false)
+
 	cleanup := watchAndClose(ctx, conn)
 	defer cleanup()
 
-	reader := beast.NewReader(conn)
+	reader := beast.NewReader(&countingReader{inner: conn, counter: &a.bytesIn})
 
 	for {
 		frame, err := reader.Frame()
