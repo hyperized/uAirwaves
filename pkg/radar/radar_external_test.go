@@ -232,6 +232,53 @@ func TestView_Draw_TrailRendersHistory(t *testing.T) {
 	}
 }
 
+// TestView_Draw_HeatRenders enables the heat overlay and drives
+// one plane through Draw, asserting that at least one of the heat
+// glyphs ░▒▓ ends up on the simulation screen. Heat defaults off
+// since the toggle-default refactor, so without an explicit test
+// that flips it on the heatmap.draw path goes uncovered.
+func TestView_Draw_HeatRenders(t *testing.T) {
+	t.Parallel()
+
+	loc := location.New(location.WithLatitude(52.0), location.WithLongitude(13.0))
+	planes := airplanes.New()
+	view := radar.New(planes, loc)
+	view.SetRect(0, 0, 80, 24)
+	view.ToggleAutoScope()        // pin scope at 20nm
+	view.ToggleHeadingIndicator() // keep the screen clear of heading dots
+	view.ToggleTrailIndicator()   // and trail dots
+	view.ToggleHeatIndicator()    // turn heat ON
+
+	planes.Ensure("HOTONE")
+
+	plane, _ := planes.Get("HOTONE")
+	plane.Update(
+		airplane.WithLatitude(52.05),
+		airplane.WithLongitude(13.05),
+		airplane.WithAltitude(30000),
+		airplane.WithHeading(-1),
+	)
+
+	screen := tcell.NewSimulationScreen("")
+	if err := screen.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	screen.SetSize(80, 24)
+	view.Draw(screen)
+
+	for row := range 24 {
+		for col := range 80 {
+			mainc, _, _, _ := screen.GetContent(col, row) //nolint:staticcheck
+			if mainc == '░' || mainc == '▒' || mainc == '▓' {
+				return
+			}
+		}
+	}
+
+	t.Error("no heat glyph (░▒▓) found on screen after Draw with heat enabled")
+}
+
 // TestView_Draw_TrailSkipsZeroPositionEntries exercises the
 // `entry.Latitude == 0 || entry.Longitude == 0` continue branch
 // in drawTrail. A history entry at (0, 0) is the unresolved-fix

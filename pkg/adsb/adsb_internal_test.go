@@ -462,6 +462,15 @@ func TestCPRCacheCleanupEvictsAgedEntries(t *testing.T) {
 
 // streamSingleFrame is a test helper that pumps exactly one frame
 // through Stream() and returns the resulting plane snapshot.
+//
+// For family-B frames (DF 0/4/5/16/20/21, residual carries the
+// ICAO) the helper pre-seeds the trust filter with the residual,
+// so the family-B admit gate doesn't reject the test frame for
+// not having a preceding family-A sighting. Real callers always
+// see a DF 17/18 before they see surveillance replies; tests that
+// want to verify the per-DF decoding don't need to re-enact that
+// timeline frame-by-frame. Family-A frames (residual=0) are
+// unaffected because the trust check is short-circuited for them.
 func streamSingleFrame(t *testing.T, frame demod.Frame, opts ...Option) *airplanes.Airplanes {
 	t.Helper()
 
@@ -474,12 +483,53 @@ func streamSingleFrame(t *testing.T, frame demod.Frame, opts ...Option) *airplan
 	}, opts...)
 	stream := New(all...)
 
+	if frame.CRC != 0 {
+		stream.icaoFilter.Trust(modes.ICAO(frame.CRC), time.Now())
+	}
+
 	planes := airplanes.New()
 	if err := stream.Stream(t.Context(), planes); err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
 
 	return planes
+}
+
+// TestPhantomFamilyBFrameRejected verifies the icaofilter gate is
+// actually live in handleFrame: a family-B frame whose residual
+// has NOT been previously trusted via a family-A sighting must not
+// register a plane. Drives the stream directly (not via the
+// streamSingleFrame helper, which pre-seeds trust).
+func TestPhantomFamilyBFrameRejected(t *testing.T) {
+	t.Parallel()
+
+	frame := demod.Frame{
+		Bytes:    makeShortFrameWithDF(modes.DFSurveillanceAlt),
+		DF:       uint8(modes.DFSurveillanceAlt),
+		CRC:      0xC0DECA,
+		WallTime: time.Now(),
+	}
+
+	rcv := &fakeReceiver{reads: []fakeRead{{data: []byte{0x00}}}}
+	dem := &fakeDemodulator{frames: []demod.Frame{frame}}
+
+	stream := New(
+		WithReceiverFactory(func() (Receiver, error) { return rcv, nil }),
+		WithDemodulatorFactory(func() Demodulator { return dem }),
+	)
+
+	planes := airplanes.New()
+	if err := stream.Stream(t.Context(), planes); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	if _, ok := planes.Get("C0DECA"); ok {
+		t.Error("untrusted family-B frame registered a plane; icaofilter not gating")
+	}
+
+	if got := stream.Stats().TotalFrames; got != 1 {
+		t.Errorf("TotalFrames = %d, want 1 (frame counted before reject)", got)
+	}
 }
 
 func TestApplySurveillanceAltitudeRoutes(t *testing.T) {
@@ -820,121 +870,14 @@ func TestValidCallsign(t *testing.T) {
 	}
 }
 
-// TestLearnICAORejectsCorruptedResidual locks in the residual==0
-// gate for DF 17, DF 18, and DF 11 unsolicited. Without it,
-// preamble false-positives that pass length checks but fail CRC
-// produced phantom ICAOs and seeded the airplanes list with
-// nonsense aircraft (visible in the field as a tight grid around
-// the receiver — locally-unambiguous CPR rounding junk frames).
-func TestLearnICAORejectsCorruptedResidual(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		frame       modes.Frame
-		residual    uint32
-		wantICAO    modes.ICAO
-		wantLearned bool
-	}{
-		{
-			name:        "DF17 clean residual zero accepted",
-			frame:       makeESLongFrame(modes.DFExtendedSquitter, 0xAB, 0xCD, 0xEF),
-			residual:    0,
-			wantICAO:    0xABCDEF,
-			wantLearned: true,
-		},
-		{
-			name:        "DF17 corrupted residual rejected",
-			frame:       makeESLongFrame(modes.DFExtendedSquitter, 0xAB, 0xCD, 0xEF),
-			residual:    0xDEADBE,
-			wantICAO:    0,
-			wantLearned: false,
-		},
-		{
-			name:        "DF18 clean residual zero accepted",
-			frame:       makeESLongFrame(modes.DFNonTransponderES, 0x11, 0x22, 0x33),
-			residual:    0,
-			wantICAO:    0x112233,
-			wantLearned: true,
-		},
-		{
-			name:        "DF18 corrupted residual rejected",
-			frame:       makeESLongFrame(modes.DFNonTransponderES, 0x11, 0x22, 0x33),
-			residual:    0x00BEEF,
-			wantICAO:    0,
-			wantLearned: false,
-		},
-		{
-			name:        "DF11 clean residual zero accepted",
-			frame:       makeShortAllCallReply(0x44, 0x55, 0x66),
-			residual:    0,
-			wantICAO:    0x445566,
-			wantLearned: true,
-		},
-		{
-			name:        "DF11 corrupted residual rejected",
-			frame:       makeShortAllCallReply(0x44, 0x55, 0x66),
-			residual:    0x000001,
-			wantICAO:    0,
-			wantLearned: false,
-		},
-		{
-			name:        "DF17 wrong length rejected even with zero residual",
-			frame:       makeShortFrameWithDF(modes.DFExtendedSquitter), // DF17 in a 7-byte slot
-			residual:    0,
-			wantICAO:    0,
-			wantLearned: false,
-		},
-		{
-			name:        "DF4 surveillance accepts non-zero residual as ICAO",
-			frame:       makeShortFrameWithDF(modes.DFSurveillanceAlt),
-			residual:    0x778899,
-			wantICAO:    0x778899,
-			wantLearned: true,
-		},
-		{
-			name:        "DF4 surveillance rejects zero residual",
-			frame:       makeShortFrameWithDF(modes.DFSurveillanceAlt),
-			residual:    0,
-			wantICAO:    0,
-			wantLearned: false,
-		},
-	}
-
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-
-			gotICAO, gotLearned := learnICAO(testCase.frame, testCase.residual)
-			if gotLearned != testCase.wantLearned {
-				t.Errorf("learnICAO learned = %v, want %v", gotLearned, testCase.wantLearned)
-			}
-
-			if gotICAO != testCase.wantICAO {
-				t.Errorf("learnICAO icao = %#x, want %#x", gotICAO, testCase.wantICAO)
-			}
-		})
-	}
-}
-
 // makeESLongFrame builds a 14-byte DF 17/18 frame with the given
 // AA bytes in positions 1..3. The DF lives in the top 5 bits of
-// byte 0. The remaining bytes are zero — learnICAO ignores them.
+// byte 0. The remaining bytes are zero — icaofilter.Admit ignores
+// them for ICAO extraction; per-DF decoders that follow inspect
+// the rest.
 func makeESLongFrame(downlinkFormat modes.DownlinkFormat, aaHigh, aaMid, aaLow byte) modes.Frame {
 	out := make(modes.Frame, modes.LongFrameBytes)
 	out[0] = byte(downlinkFormat) << 3
-	out[1] = aaHigh
-	out[2] = aaMid
-	out[3] = aaLow
-
-	return out
-}
-
-// makeShortAllCallReply builds a 7-byte DF 11 frame with the
-// given AA bytes in positions 1..3.
-func makeShortAllCallReply(aaHigh, aaMid, aaLow byte) modes.Frame {
-	out := make(modes.Frame, modes.ShortFrameBytes)
-	out[0] = byte(modes.DFAllCallReply) << 3
 	out[1] = aaHigh
 	out[2] = aaMid
 	out[3] = aaLow
@@ -950,28 +893,6 @@ func makeShortFrameWithDF(downlinkFormat modes.DownlinkFormat) modes.Frame {
 	out[0] = byte(downlinkFormat) << 3
 
 	return out
-}
-
-// TestLearnICAOMilitaryESFallthrough exercises the unhandled-DF
-// branch in learnICAO. DF 19 (Military ES) is opaque to civilian
-// receivers and is the documented fallthrough case — the function
-// must return (0, false) so the frame is discarded. Without this
-// branch a future DF added to the modes package would silently
-// crash through the parser.
-func TestLearnICAOMilitaryESFallthrough(t *testing.T) {
-	t.Parallel()
-
-	out := make(modes.Frame, modes.LongFrameBytes)
-	out[0] = byte(modes.DFMilitaryES) << 3
-
-	icao, learned := learnICAO(out, 0)
-	if learned {
-		t.Errorf("DF 19 must not be learned; got icao=%#x", icao)
-	}
-
-	if icao != 0 {
-		t.Errorf("DF 19 must return icao=0 on fallthrough; got %#x", icao)
-	}
 }
 
 // TestHandleFrameRecoveredCounterIncrements covers the

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/hyperized/demod1090/demod"
+	"github.com/hyperized/demod1090/icaofilter"
 	"github.com/hyperized/modes"
 	"github.com/hyperized/rtl2832u"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
@@ -43,6 +44,14 @@ const (
 
 	defaultPruneThreshold = 1 * time.Minute
 	defaultPruneFrequency = 5 * time.Second
+
+	// icaoTrustCleanupInterval is how often the icao filter
+	// sweeps expired entries. Bounded enough to keep lock pressure
+	// low, frequent enough that the trust set stays small under
+	// heavy noise. The trust window itself defaults to one minute
+	// (icaofilter.DefaultWindow), matching defaultPruneThreshold
+	// so the trust list and the airplanes list age out together.
+	icaoTrustCleanupInterval = 30 * time.Second
 
 	// beastReconnectBaseDelay and beastReconnectMaxDelay mirror the
 	// pkg/gps backoff schedule (1 s base, doubling, 30 s cap) so a
@@ -123,6 +132,11 @@ type ADSB struct {
 	// `go a.cpr.runCleanup(...)`.
 	cpr *cprCache
 
+	// icaoFilter is the address-parity phantom suppressor: only
+	// admit family-B frames whose ICAO has been seen in a verified
+	// family-A frame recently. See github.com/hyperized/demod1090/icaofilter.
+	icaoFilter *icaofilter.Filter
+
 	// totalFrames is every frame that came out of the demod
 	// (clean + corrected). recoveredFrames counts the subset
 	// the single-bit corrector rescued.
@@ -168,6 +182,7 @@ func New(opts ...Option) *ADSB {
 		pruneThreshold:     defaultPruneThreshold,
 		pruneFrequency:     defaultPruneFrequency,
 		cpr:                newCPRCache(),
+		icaoFilter:         icaofilter.New(),
 		receiverFactory:    defaultReceiverFactory,
 		demodulatorFactory: defaultDemodulatorFactory,
 		beastDialer:        defaultBeastDialer,
@@ -323,6 +338,7 @@ func WithBeastDialer(dialer BeastDialer) Option {
 func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
 	go a.prune(ctx, planes)
 	go a.cpr.runCleanup(ctx, cprCacheCleanupInterval)
+	go a.icaoFilter.RunCleanup(ctx, icaoTrustCleanupInterval)
 
 	if a.beastAddress != "" {
 		return a.streamBeast(ctx, planes)

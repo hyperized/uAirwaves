@@ -37,7 +37,9 @@ func validCallsign(callsign string) bool {
 
 // handleFrame routes a freshly-demodulated frame through the
 // modes decoder and folds the result into the live airplanes
-// list.
+// list. ICAO classification and the address-parity phantom gate
+// are delegated to icaofilter.Filter.Admit — see the package doc
+// over there for the why.
 func (a *ADSB) handleFrame(frame demod.Frame, planes *airplanes.Airplanes) {
 	a.totalFrames.Add(1)
 
@@ -47,8 +49,8 @@ func (a *ADSB) handleFrame(frame demod.Frame, planes *airplanes.Airplanes) {
 
 	mFrame := modes.Frame(frame.Bytes)
 
-	icao, learned := learnICAO(mFrame, frame.CRC)
-	if !learned {
+	icao, admitted := a.icaoFilter.Admit(mFrame, frame.CRC, frame.WallTime)
+	if !admitted {
 		return
 	}
 
@@ -61,52 +63,6 @@ func (a *ADSB) handleFrame(frame demod.Frame, planes *airplanes.Airplanes) {
 	}
 
 	a.applyFrame(plane, mFrame, icao, frame)
-}
-
-// learnICAO extracts the broadcasting/addressed ICAO and decides
-// whether the frame is real enough to act on. The rules:
-//
-//   - DF 17, DF 18, DF 11 unsolicited: plain CRC, no overlay. A
-//     clean frame has residual == 0; we gate on that. Without the
-//     gate, preamble false-positives (random IQ that looks like a
-//     Mode S preamble) flood the airplane list with phantom
-//     ICAOs and feed nonsense CPR frames into the position
-//     decoder, where the locally-unambiguous CPR rounds them
-//     into a tight grid around the receiver. (Square cluster
-//     on-radar = the smoking gun; observed in field with the
-//     gate off and a healthy rtl2832u v0.1.3 chip.)
-//
-//   - DF 0/4/5/16/20/21: address-parity overlay. The CRC residual
-//     IS the addressed aircraft's ICAO. We accept any non-zero
-//     residual; zero would mean the DF was misclassified upstream.
-//
-//nolint:exhaustive // DFMilitaryES (19) is opaque to civilian receivers; falls through to the unrecognised branch.
-func learnICAO(frame modes.Frame, crcResidual uint32) (modes.ICAO, bool) {
-	const (
-		highShift = 16
-		midShift  = 8
-	)
-
-	switch frame.DF() {
-	case modes.DFExtendedSquitter, modes.DFNonTransponderES:
-		if len(frame) != modes.LongFrameBytes || crcResidual != 0 {
-			return 0, false
-		}
-
-		return modes.ICAO(frame[1])<<highShift | modes.ICAO(frame[2])<<midShift | modes.ICAO(frame[3]), true
-	case modes.DFAllCallReply:
-		if len(frame) != modes.ShortFrameBytes || crcResidual != 0 {
-			return 0, false
-		}
-
-		return modes.ICAO(frame[1])<<highShift | modes.ICAO(frame[2])<<midShift | modes.ICAO(frame[3]), true
-	case modes.DFShortAirAir, modes.DFSurveillanceAlt, modes.DFSurveillanceID,
-		modes.DFLongAirAir, modes.DFCommBAltitude, modes.DFCommBIdentity,
-		modes.DFCommDExtendedLength:
-		return modes.ICAO(crcResidual), crcResidual != 0
-	}
-
-	return 0, false
 }
 
 // applyFrame folds a single frame into the per-airplane state.
