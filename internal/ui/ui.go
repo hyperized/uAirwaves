@@ -71,20 +71,31 @@ type RadarController interface {
 	ToggleHeatIndicator()
 }
 
+// PlaneFilterController abstracts the sidebar-filter toggle.
+// Separate from RadarController because the sidebar list is not
+// radar state — the filter only affects the right-column plane
+// list, not the radar render.
+type PlaneFilterController interface {
+	TogglePositionedOnly()
+}
+
 // HandleKeyInput is the global key dispatcher: Esc/q stop the
-// app, +/- adjust scope, a/h/t/m toggle indicators. The event
-// is returned unchanged so tview's input chain can pass it on
-// to the focused widget.
+// app, +/- adjust scope, a/h/t/m toggle indicators, p toggles
+// the sidebar positioned-only filter. The event is returned
+// unchanged so tview's input chain can pass it on to the focused
+// widget.
 //
 // Lifted out of main.go behind the AppController /
-// RadarController interfaces so the dispatch table is testable
-// without a tview event loop.
-func HandleKeyInput(event *tcell.EventKey, app AppController, radarPanel RadarController) *tcell.EventKey {
+// RadarController / PlaneFilterController interfaces so the
+// dispatch table is testable without a tview event loop.
+func HandleKeyInput(
+	event *tcell.EventKey, app AppController, radarPanel RadarController, filter PlaneFilterController,
+) *tcell.EventKey {
 	if event.Key() == tcell.KeyEsc {
 		app.Stop()
 	}
 
-	dispatchRune(event.Rune(), app, radarPanel)
+	dispatchRune(event.Rune(), app, radarPanel, filter)
 
 	return event
 }
@@ -92,7 +103,7 @@ func HandleKeyInput(event *tcell.EventKey, app AppController, radarPanel RadarCo
 // dispatchRune is a strategy-table dispatcher keyed on the
 // pressed rune. Split out of HandleKeyInput so the switch stays
 // small enough for revive's cyclomatic-complexity gate.
-func dispatchRune(pressed rune, app AppController, radarPanel RadarController) {
+func dispatchRune(pressed rune, app AppController, radarPanel RadarController, filter PlaneFilterController) {
 	switch pressed {
 	case '+':
 		radarPanel.IncrementScope()
@@ -106,6 +117,8 @@ func dispatchRune(pressed rune, app AppController, radarPanel RadarController) {
 		radarPanel.ToggleTrailIndicator()
 	case 'm':
 		radarPanel.ToggleHeatIndicator()
+	case 'p':
+		filter.TogglePositionedOnly()
 	case 'q':
 		app.Stop()
 	default:
@@ -117,13 +130,22 @@ func dispatchRune(pressed rune, app AppController, radarPanel RadarController) {
 // from the current airplanes list, sorted by distance from
 // myLocation. Emergency squawks are red-highlighted; planes
 // without a resolved position get a distance-less secondary
-// line.
-func UpdatePlaneList(planeListPanel *tview.List, myLocation *location.Location, planeList *airplanes.Airplanes) {
+// line. When positionedOnly is true, position-less contacts are
+// skipped entirely — the default sidebar mode.
+//
+//nolint:revive // flag-parameter: positionedOnly selects the sidebar's filter mode, not a behaviour switch.
+func UpdatePlaneList(
+	planeListPanel *tview.List, myLocation *location.Location, planeList *airplanes.Airplanes, positionedOnly bool,
+) {
 	planeListPanel.Clear()
 
 	latitude, longitude := myLocation.GetCoordinates()
 
 	for _, snap := range planeList.Sorted(latitude, longitude) {
+		if positionedOnly && (snap.Latitude == 0 || snap.Longitude == 0) {
+			continue
+		}
+
 		mainText, secondaryText := FormatPlaneListEntry(snap, snap.Summary(), latitude, longitude)
 
 		planeListPanel.AddItem(mainText, secondaryText, 0, nil)
@@ -185,11 +207,11 @@ func UpdateStatsPanel(
 // UpdateFooter rewrites the footer command/status line. Pulled
 // out to internal/ui so the footer string format is testable
 // against a fake radar source.
-func UpdateFooter(commands *tview.TextView, radarPanel *radar.View) {
-	commands.SetText(FormatFooter(footerStateFromRadar(radarPanel)))
+func UpdateFooter(commands *tview.TextView, radarPanel *radar.View, positionedOnly bool) {
+	commands.SetText(FormatFooter(footerStateFromRadar(radarPanel, positionedOnly)))
 }
 
-// FooterState is the snapshot of radar settings the footer line
+// FooterState is the snapshot of UI settings the footer line
 // summarises. The pure formatter takes this struct so test code
 // can render every combination without driving a real radar.
 type FooterState struct {
@@ -199,6 +221,7 @@ type FooterState struct {
 	TrailEnabled     bool
 	HeatEnabled      bool
 	AutoScopeEnabled bool
+	PositionedOnly   bool
 }
 
 // FormatFooter renders a FooterState into the tview-coloured
@@ -206,17 +229,18 @@ type FooterState struct {
 func FormatFooter(state FooterState) string {
 	return fmt.Sprintf(
 		"[::b]Tracking: %d - [::b]Range (+/-): %0.0f nm - [::b]Heading (h): %t - "+
-			"[::b]Trail (t): %t - [::b]Heat (m): %t - [::b]Autoscope (a): %t",
+			"[::b]Trail (t): %t - [::b]Heat (m): %t - [::b]Autoscope (a): %t - [::b]Positioned (p): %t",
 		state.AircraftCount,
 		state.ScopeRange,
 		state.HeadingEnabled,
 		state.TrailEnabled,
 		state.HeatEnabled,
 		state.AutoScopeEnabled,
+		state.PositionedOnly,
 	)
 }
 
-func footerStateFromRadar(radarPanel *radar.View) FooterState {
+func footerStateFromRadar(radarPanel *radar.View, positionedOnly bool) FooterState {
 	return FooterState{
 		AircraftCount:    radarPanel.GetAircraftCount(),
 		ScopeRange:       radarPanel.GetScopeRange(),
@@ -224,5 +248,6 @@ func footerStateFromRadar(radarPanel *radar.View) FooterState {
 		TrailEnabled:     radarPanel.GetTrailIndicatorEnabled(),
 		HeatEnabled:      radarPanel.GetHeatIndicatorEnabled(),
 		AutoScopeEnabled: radarPanel.GetAutoScopeEnabled(),
+		PositionedOnly:   positionedOnly,
 	}
 }

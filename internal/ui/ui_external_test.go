@@ -88,19 +88,28 @@ func (r *fakeRadar) ToggleHeadingIndicator() { r.heading++ }
 func (r *fakeRadar) ToggleTrailIndicator()   { r.trail++ }
 func (r *fakeRadar) ToggleHeatIndicator()    { r.heat++ }
 
+// fakeFilter implements PlaneFilterController and records every
+// toggle so the dispatch table can assert the right key fired.
+type fakeFilter struct {
+	positionedToggles int
+}
+
+func (f *fakeFilter) TogglePositionedOnly() { f.positionedToggles++ }
+
 // keyDispatchCase pins one row of the HandleKeyInput dispatch
 // table. Each int is the expected per-method call count for the
 // matching fakeRadar field; wantAppStops counts fakeApp.Stop.
 type keyDispatchCase struct {
-	name          string
-	event         *tcell.EventKey
-	wantAppStops  int
-	wantInc       int
-	wantDec       int
-	wantAutoScope int
-	wantHeading   int
-	wantTrail     int
-	wantHeat      int
+	name              string
+	event             *tcell.EventKey
+	wantAppStops      int
+	wantInc           int
+	wantDec           int
+	wantAutoScope     int
+	wantHeading       int
+	wantTrail         int
+	wantHeat          int
+	wantPositionedTog int
 }
 
 // keyDispatchCases is the HandleKeyInput dispatch table. Hoisted
@@ -120,6 +129,10 @@ var keyDispatchCases = []keyDispatchCase{
 	{name: "h toggles heading", event: tcell.NewEventKey(tcell.KeyRune, 'h', tcell.ModNone), wantHeading: 1},
 	{name: "t toggles trail", event: tcell.NewEventKey(tcell.KeyRune, 't', tcell.ModNone), wantTrail: 1},
 	{name: "m toggles heat", event: tcell.NewEventKey(tcell.KeyRune, 'm', tcell.ModNone), wantHeat: 1},
+	{
+		name: "p toggles positioned-only filter", event: tcell.NewEventKey(tcell.KeyRune, 'p', tcell.ModNone),
+		wantPositionedTog: 1,
+	},
 	{name: "q stops app", event: tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone), wantAppStops: 1},
 	{name: "unrecognised rune is no-op", event: tcell.NewEventKey(tcell.KeyRune, 'z', tcell.ModNone)},
 }
@@ -147,30 +160,33 @@ func assertKeyDispatch(t *testing.T, testCase keyDispatchCase) {
 
 	app := &fakeApp{}
 	rdr := &fakeRadar{}
+	flt := &fakeFilter{}
 
-	returned := ui.HandleKeyInput(testCase.event, app, rdr)
+	returned := ui.HandleKeyInput(testCase.event, app, rdr, flt)
 	if returned != testCase.event {
 		t.Errorf("HandleKeyInput should return event unchanged; got %v want %v", returned, testCase.event)
 	}
 
 	got := keyDispatchCase{
-		wantAppStops:  app.stops,
-		wantInc:       rdr.incrementScope,
-		wantDec:       rdr.decrementScope,
-		wantAutoScope: rdr.autoScope,
-		wantHeading:   rdr.heading,
-		wantTrail:     rdr.trail,
-		wantHeat:      rdr.heat,
+		wantAppStops:      app.stops,
+		wantInc:           rdr.incrementScope,
+		wantDec:           rdr.decrementScope,
+		wantAutoScope:     rdr.autoScope,
+		wantHeading:       rdr.heading,
+		wantTrail:         rdr.trail,
+		wantHeat:          rdr.heat,
+		wantPositionedTog: flt.positionedToggles,
 	}
 
 	if got != (keyDispatchCase{
-		wantAppStops:  testCase.wantAppStops,
-		wantInc:       testCase.wantInc,
-		wantDec:       testCase.wantDec,
-		wantAutoScope: testCase.wantAutoScope,
-		wantHeading:   testCase.wantHeading,
-		wantTrail:     testCase.wantTrail,
-		wantHeat:      testCase.wantHeat,
+		wantAppStops:      testCase.wantAppStops,
+		wantInc:           testCase.wantInc,
+		wantDec:           testCase.wantDec,
+		wantAutoScope:     testCase.wantAutoScope,
+		wantHeading:       testCase.wantHeading,
+		wantTrail:         testCase.wantTrail,
+		wantHeat:          testCase.wantHeat,
+		wantPositionedTog: testCase.wantPositionedTog,
 	}) {
 		t.Errorf("dispatch counts mismatch\n got: %+v\nwant: %+v", got, testCase)
 	}
@@ -315,11 +331,51 @@ func TestUpdatePlaneListWritesEntries(t *testing.T) {
 	panel := tview.NewList()
 	panel.AddItem("stale", "remains until Clear", 0, nil)
 
-	ui.UpdatePlaneList(panel, myLocation, planeList)
+	ui.UpdatePlaneList(panel, myLocation, planeList, true)
 
 	if got := panel.GetItemCount(); got != 2 {
 		t.Errorf("panel.GetItemCount = %d, want 2 (stale entry should be cleared)", got)
 	}
+}
+
+// TestUpdatePlaneListFilter exercises the positioned-only filter:
+// the position-less contact is dropped when on, included when off.
+func TestUpdatePlaneListFilter(t *testing.T) {
+	t.Parallel()
+
+	myLocation := location.New(location.WithLatitude(rxLat), location.WithLongitude(rxLon))
+
+	planeList := airplanes.New()
+	planeList.Ensure("POSITN")
+	planeList.Ensure("NOPOSN")
+
+	positioned, _ := planeList.Get("POSITN")
+	positioned.Update(
+		airplane.WithLatitude(testLat),
+		airplane.WithLongitude(testLon),
+	)
+
+	t.Run("positioned-only drops position-less", func(t *testing.T) {
+		t.Parallel()
+
+		panel := tview.NewList()
+		ui.UpdatePlaneList(panel, myLocation, planeList, true)
+
+		if got := panel.GetItemCount(); got != 1 {
+			t.Errorf("panel.GetItemCount = %d, want 1 (position-less should be filtered)", got)
+		}
+	})
+
+	t.Run("all-mode keeps position-less", func(t *testing.T) {
+		t.Parallel()
+
+		panel := tview.NewList()
+		ui.UpdatePlaneList(panel, myLocation, planeList, false)
+
+		if got := panel.GetItemCount(); got != 2 {
+			t.Errorf("panel.GetItemCount = %d, want 2 (all contacts visible)", got)
+		}
+	})
 }
 
 // TestUpdateFooterReadsRadarState wires a real radar.View into
@@ -336,11 +392,15 @@ func TestUpdateFooterReadsRadarState(t *testing.T) {
 
 	commands := tview.NewTextView()
 
-	ui.UpdateFooter(commands, radarPanel)
+	ui.UpdateFooter(commands, radarPanel, true)
 
 	got := commands.GetText(true)
 	if !strings.Contains(got, "Range (+/-): 25 nm") {
 		t.Errorf("UpdateFooter text = %q, want substring 'Range (+/-): 25 nm'", got)
+	}
+
+	if !strings.Contains(got, "Positioned (p): true") {
+		t.Errorf("UpdateFooter text = %q, want substring 'Positioned (p): true'", got)
 	}
 }
 
@@ -387,10 +447,11 @@ func TestFormatFooter(t *testing.T) {
 		TrailEnabled:     false,
 		HeatEnabled:      true,
 		AutoScopeEnabled: false,
+		PositionedOnly:   true,
 	})
 
 	want := "[::b]Tracking: 7 - [::b]Range (+/-): 50 nm - [::b]Heading (h): true - " +
-		"[::b]Trail (t): false - [::b]Heat (m): true - [::b]Autoscope (a): false"
+		"[::b]Trail (t): false - [::b]Heat (m): true - [::b]Autoscope (a): false - [::b]Positioned (p): true"
 
 	if got != want {
 		t.Errorf("FormatFooter mismatch\ngot:  %q\nwant: %q", got, want)

@@ -45,7 +45,7 @@ func main() {
 
 	// Input capture for global shortcuts.
 	uic.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		return ui.HandleKeyInput(event, uic.app, uic.radarPanel)
+		return ui.HandleKeyInput(event, uic.app, uic.radarPanel, uic.planeFilter)
 	})
 
 	if err := uic.app.SetRoot(grid, true).EnableMouse(true).Run(); err != nil {
@@ -70,6 +70,7 @@ type uiComponents struct {
 	myLocation     *location.Location
 	waitGroup      *sync.WaitGroup
 	planeList      *airplanes.Airplanes
+	planeFilter    *ui.PlaneFilter
 	adsbStream     *adsb.ADSB
 	statsTracker   *ui.StatsTracker
 	batteryStatus  *battery.Status
@@ -104,6 +105,7 @@ func configureUI() *uiComponents {
 		myLocation:     myLocation,
 		waitGroup:      &sync.WaitGroup{},
 		planeList:      planeList,
+		planeFilter:    ui.NewPlaneFilter(),
 		adsbStream:     adsb.New(buildADSBOptions(myLocation)...),
 		statsTracker:   ui.NewStatsTracker(),
 		batteryStatus:  battery.NewStatus(),
@@ -218,10 +220,12 @@ func startUIUpdater(components *uiComponents) {
 						components.statusBar,
 					)
 
-					ui.UpdatePlaneList(components.planeListPanel, components.myLocation, components.planeList)
+					positionedOnly := components.planeFilter.PositionedOnly()
+					ui.UpdatePlaneList(components.planeListPanel, components.myLocation, components.planeList,
+						positionedOnly)
 					ui.UpdateStatsPanel(components.statsPanel, components.adsbStream, components.statsTracker,
 						components.myLocation, components.planeList)
-					ui.UpdateFooter(components.commands, components.radarPanel)
+					ui.UpdateFooter(components.commands, components.radarPanel, positionedOnly)
 					components.gpsStatus.SetText("GPS: " + components.myLocation.String())
 				})
 			}
