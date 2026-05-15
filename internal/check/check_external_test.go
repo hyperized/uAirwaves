@@ -53,6 +53,7 @@ func TestBuildReport_PassesAllThresholds(t *testing.T) {
 			TotalFrames: 42, RecoveredFrames: 1,
 			CallsignsDecoded: 5, CallsignsApplied: 4,
 		},
+		Source:       adsb.SourceInfo{Label: "BEAST host:30005", Connected: true, BytesIn: 4096},
 		Snapshots:    snaps,
 		ReceiverLat:  52.0,
 		ReceiverLon:  4.0,
@@ -84,6 +85,10 @@ func TestBuildReport_PassesAllThresholds(t *testing.T) {
 
 	if report.Highest == nil || report.Highest.Callsign != "DLH9" || report.Highest.AltitudeFt != 38000 {
 		t.Errorf("Highest = %+v, want DLH9 @38000", report.Highest)
+	}
+
+	if report.Source.Label != "BEAST host:30005" || !report.Source.Connected || report.Source.BytesIn != 4096 {
+		t.Errorf("Source = %+v, want BEAST host:30005 connected 4096 B", report.Source)
 	}
 }
 

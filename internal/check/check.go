@@ -67,10 +67,15 @@ func Run(parent context.Context, opts Options) (Report, bool, error) {
 		runErr = err
 	}
 
+	// Sample Source() before cancelling so the report reflects the
+	// connection state at end-of-window, not after the deferred
+	// connected.Store(false) inside the workers has already fired.
+	sourceAtEnd := opts.Stream.Source()
+
 	cancel()
 	waitGroup.Wait()
 
-	report := buildFromLive(opts)
+	report := buildFromLive(opts, sourceAtEnd)
 
 	if err := writeJSON(opts.Output, report); err != nil {
 		return report, report.OK, err
@@ -98,13 +103,14 @@ func launch(waitGroup *sync.WaitGroup, errChan chan<- error, panicSentinel error
 	})
 }
 
-func buildFromLive(opts Options) Report {
+func buildFromLive(opts Options, source adsb.SourceInfo) Report {
 	lat, lon := opts.Location.GetCoordinates()
 	snapshots := opts.Planes.Sorted(lat, lon)
 
 	return BuildReport(Inputs{
 		DurationSeconds: opts.Duration.Seconds(),
 		Stats:           opts.Stream.Stats(),
+		Source:          source,
 		Snapshots:       snapshots,
 		ReceiverLat:     lat,
 		ReceiverLon:     lon,

@@ -45,6 +45,15 @@ type ADSBReport struct {
 	Positioned       int    `json:"positioned"`
 }
 
+// SourceReport names the active ingest source and surfaces the
+// connection state at end-of-window. Separates "never connected"
+// from "connected but produced nothing" in failure analysis.
+type SourceReport struct {
+	Label     string `json:"label"`
+	Connected bool   `json:"connected"`
+	BytesIn   uint64 `json:"bytes_in"`
+}
+
 // PlaneRef names a plane by callsign (or ICAO when no callsign)
 // and a single metric: distance for nearest, altitude for
 // highest. Emitted only when the underlying value exists.
@@ -65,6 +74,7 @@ type ThresholdsReport struct {
 // Report is the JSON document emitted at the end of a check run.
 type Report struct {
 	DurationSeconds float64          `json:"duration_s"`
+	Source          SourceReport     `json:"source"`
 	GPS             GPSReport        `json:"gps"`
 	ADSB            ADSBReport       `json:"adsb"`
 	Nearest         *PlaneRef        `json:"nearest,omitempty"`
@@ -79,6 +89,7 @@ type Report struct {
 type Inputs struct {
 	DurationSeconds float64
 	Stats           adsb.Stats
+	Source          adsb.SourceInfo
 	Snapshots       []airplane.Snapshot
 	ReceiverLat     float64
 	ReceiverLon     float64
@@ -95,6 +106,11 @@ func BuildReport(inputs Inputs) Report {
 
 	report := Report{
 		DurationSeconds: inputs.DurationSeconds,
+		Source: SourceReport{
+			Label:     inputs.Source.Label,
+			Connected: inputs.Source.Connected,
+			BytesIn:   inputs.Source.BytesIn,
+		},
 		GPS: GPSReport{
 			Fix:       inputs.GPSFix,
 			Mode:      inputs.GPSMode,
