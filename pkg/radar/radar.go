@@ -14,7 +14,12 @@ import (
 )
 
 const (
-	yMultiplier            = 1
+	// yMultiplier divides yScale when placing planes, trails and
+	// heat dots so they land on the same ellipse the scope rings
+	// draw. drawScopeRings halves yScale via int(ring*yScale/2);
+	// without the matching divisor, plane offsets are 2× the ring's
+	// vertical radius and most N/S contacts are clipped off-screen.
+	yMultiplier            = 2
 	terminalCharacterRatio = 2.0
 	headingLineLength      = 12
 	degreesToRadiansRatio  = math.Pi / 180

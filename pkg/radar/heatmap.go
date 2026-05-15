@@ -85,8 +85,11 @@ func (h *heatMap) draw(screen tcell.Screen, centerX, centerY int, xScale, yScale
 		nmX := float64(key.x) * heatResolution
 		nmY := float64(key.y) * heatResolution
 
+		// yScale is halved to match drawScopeRings' /2 and the
+		// plane drawing's yMultiplier=2; without it dots sit at 2×
+		// the ring's vertical radius and clip off-screen.
 		px := centerX + int(nmX*xScale)
-		py := centerY - int(nmY*yScale)
+		py := centerY - int(nmY*yScale/2)
 
 		style := tcell.StyleDefault.Foreground(heatColor(heat)).Background(tcell.ColorBlack)
 

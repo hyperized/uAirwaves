@@ -1,6 +1,7 @@
 package radar_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
@@ -399,6 +400,7 @@ func TestView_Draw_EdgeCases(t *testing.T) {
 	testAutoScopeShrinksToFarthest(t, loc, screen)
 	testPlaneWithoutLocationSkipped(t, loc, screen)
 	testPlaneWithCallsign(t, loc, screen)
+	testPlaneRendersInsideBox(t, loc)
 }
 
 func testPlaneOutsideScopeIncreasesRange(t *testing.T, loc *location.Location, screen tcell.Screen) {
@@ -522,6 +524,76 @@ func testPlaneWithoutLocationSkipped(t *testing.T, loc *location.Location, scree
 		// Should not panic or error
 		view.Draw(screen)
 	})
+}
+
+// testPlaneRendersInsideBox proves a positioned plane lands on
+// screen instead of being clipped above/below the inner box. The
+// previous yMultiplier=1 doubled vertical offsets relative to the
+// scope rings; for one plane the autoscope fit just past the
+// plane's distance, so the plane sat off-screen vertically while
+// remaining listed in the sidebar.
+func testPlaneRendersInsideBox(t *testing.T, loc *location.Location) {
+	t.Helper()
+	t.Run("plane renders inside inner box at autoscoped edge", func(t *testing.T) {
+		t.Parallel()
+
+		const (
+			boxWidth  = 80
+			boxHeight = 24
+		)
+
+		planes := airplanes.New()
+		view := radar.New(planes, loc)
+		view.SetRect(0, 0, boxWidth, boxHeight)
+
+		// Plane ~60 nm due north — autoscope fits to ceil(60/20)*20 = 60.
+		planes.Ensure("NORTH1")
+		plane, _ := planes.Get("NORTH1")
+		plane.Update(
+			airplane.WithLatitude(53.0),
+			airplane.WithLongitude(13.0),
+			airplane.WithCallsign("NORTHX"),
+		)
+
+		// Fresh screen for this case so other subtests don't pollute
+		// the cell grid we're about to inspect.
+		isolated := tcell.NewSimulationScreen("")
+		if err := isolated.Init(); err != nil {
+			t.Fatal(err)
+		}
+
+		view.Draw(isolated)
+		isolated.Show()
+
+		if !screenContains(isolated, "NORTHX") {
+			t.Fatal("plane callsign 'NORTHX' not found anywhere on the simulation screen — clipped off the inner box")
+		}
+	})
+}
+
+// screenContains reports whether the cell grid spells out target
+// horizontally anywhere on screen. Cheap helper, used to assert
+// that callsigns landed inside the visible inner box.
+func screenContains(screen tcell.Screen, target string) bool {
+	width, height := screen.Size()
+
+	for row := range height {
+		line := make([]rune, 0, width)
+
+		for col := range width {
+			// tcell.Screen.GetContent is still the cell-by-cell read
+			// API on Screen; the replacement Get() the deprecation
+			// notice hints at is a SimulationScreen-only helper.
+			mainc, _, _, _ := screen.GetContent(col, row) //nolint:staticcheck
+			line = append(line, mainc)
+		}
+
+		if strings.Contains(string(line), target) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func testPlaneWithCallsign(t *testing.T, loc *location.Location, screen tcell.Screen) {
