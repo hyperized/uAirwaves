@@ -34,32 +34,55 @@ const (
 )
 
 func main() {
-	if raw := ui.EnvOr("UAIRWAVES_CHECK", ""); raw != "" {
-		os.Exit(runCheckMode(raw))
+	cfg, err := parseFlags(os.Args[1:], os.Stderr)
+	if err != nil {
+		// flag.ContinueOnError already printed the usage / error
+		// to stderr; just translate to a usage-style exit code.
+		os.Exit(2) //nolint:mnd // 2 = bad usage, conventional shell exit code.
 	}
 
-	uic := configureUI()
+	if cfg.checkDuration > 0 {
+		os.Exit(runCheckMode(cfg))
+	}
+
+	uic := configureUI(cfg)
 	radarPanel := radar.New(uic.planeList, uic.myLocation)
 	uic.radarPanel = radarPanel
 
-	grid := configureGrid(uic)
+	// Replace the default slog handler before any worker
+	// goroutine can emit. From this point on every slog write
+	// lands in the in-app notification queue instead of stderr,
+	// which is what tview owns once Run starts. Without this
+	// swap, a single Info/Warn from a worker corrupts the
+	// terminal layout (the very bug the notification bar was
+	// asked to fix).
+	originalSlog := slog.Default()
 
-	startBatteryWatcher(uic, ui.EnvOr("BATTERY_PATH", ""))
-	startGPSWatcher(uic, ui.EnvOr("GPSD_ADDRESS", ""))
+	slog.SetDefault(slog.New(ui.NewSlogHandler(uic.notifications, slog.LevelInfo)))
+
+	uic.grid = configureGrid(uic)
+
+	startBatteryWatcher(uic, cfg.batteryPath)
+	startGPSWatcher(uic, cfg.gpsdAddress)
 	startADSBStreamer(uic)
 	startUIUpdater(uic)
 
 	// Input capture for global shortcuts.
+	ctrls := ui.NewKeyControllers(uic.app, uic.radarPanel, uic.planeFilter, uic.notifications)
 	uic.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		return ui.HandleKeyInput(event, uic.app, uic.radarPanel, uic.planeFilter)
+		return ui.HandleKeyInput(event, ctrls)
 	})
 
-	if err := uic.app.SetRoot(grid, true).EnableMouse(true).Run(); err != nil {
+	if err := uic.app.SetRoot(uic.grid, true).EnableMouse(true).Run(); err != nil {
 		slog.Error("tview error", slog.Any("error", err))
 	}
 
 	uic.cancel()
 	uic.waitGroup.Wait()
+
+	// Restore the original (stderr-backed) handler so the
+	// shutdown messages below land on the terminal again.
+	slog.SetDefault(originalSlog)
 
 	slog.Info("Well, that was some experience...")
 	slog.Info("Now just let me adjust the spacial controls...")
@@ -69,31 +92,35 @@ func main() {
 }
 
 type uiComponents struct {
-	ctx            context.Context //nolint:containedctx
-	cancel         context.CancelFunc
-	app            *tview.Application
-	errChan        chan error
-	myLocation     *location.Location
-	waitGroup      *sync.WaitGroup
-	planeList      *airplanes.Airplanes
-	planeFilter    *ui.PlaneFilter
-	adsbStream     *adsb.ADSB
-	statsTracker   *ui.StatsTracker
-	batteryStatus  *battery.Status
-	clock          *tview.TextView
-	statusBar      *tview.TextView
-	headerPanel    *tview.Flex
-	radarPanel     *radar.View
-	planeListPanel *tview.List
-	statsPanel     *tview.TextView
-	rightColumn    *tview.Flex
-	commands       *tview.TextView
-	gpsStatus      *tview.TextView
-	sourceStatus   *tview.TextView
-	footer         *tview.Flex
+	ctx             context.Context //nolint:containedctx
+	cancel          context.CancelFunc
+	app             *tview.Application
+	errChan         chan error
+	myLocation      *location.Location
+	waitGroup       *sync.WaitGroup
+	planeList       *airplanes.Airplanes
+	planeFilter     *ui.PlaneFilter
+	adsbStream      *adsb.ADSB
+	statsTracker    *ui.StatsTracker
+	batteryStatus   *battery.Status
+	clock           *tview.TextView
+	statusBar       *tview.TextView
+	headerPanel     *tview.Flex
+	notifications   *ui.Notifications
+	notificationBar *tview.TextView
+	topSection      *tview.Flex
+	grid            *tview.Grid
+	radarPanel      *radar.View
+	planeListPanel  *tview.List
+	statsPanel      *tview.TextView
+	rightColumn     *tview.Flex
+	commands        *tview.TextView
+	gpsStatus       *tview.TextView
+	sourceStatus    *tview.TextView
+	footer          *tview.Flex
 }
 
-func configureUI() *uiComponents {
+func configureUI(cfg cliConfig) *uiComponents {
 	ctx, cancel := context.WithCancel(context.Background())
 	planeList := airplanes.New()
 	myLocation := location.New()
@@ -104,48 +131,58 @@ func configureUI() *uiComponents {
 	sourceStatus := configureSourceStatus()
 	planeListPanel := configurePlaneList()
 	statsPanel := configureStatsPanel()
+	headerPanel := configureHeader(clock, gpsStatus, sourceStatus, statusBar)
+	notifications := ui.NewNotifications()
+	notificationBar := configureNotificationBar()
+	topSection := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(headerPanel, 1, 0, false).
+		AddItem(notificationBar, 0, 0, false)
 
 	return &uiComponents{
-		ctx:            ctx,
-		cancel:         cancel,
-		app:            tview.NewApplication(),
-		errChan:        make(chan error, 3), //nolint:mnd // buffered for the three background workers.
-		myLocation:     myLocation,
-		waitGroup:      &sync.WaitGroup{},
-		planeList:      planeList,
-		planeFilter:    ui.NewPlaneFilter(),
-		adsbStream:     adsb.New(buildADSBOptions(myLocation)...),
-		statsTracker:   ui.NewStatsTracker(),
-		batteryStatus:  battery.NewStatus(),
-		clock:          clock,
-		statusBar:      statusBar,
-		headerPanel:    configureHeader(clock, gpsStatus, sourceStatus, statusBar),
-		planeListPanel: planeListPanel,
-		statsPanel:     statsPanel,
-		rightColumn:    configureRightColumn(planeListPanel, statsPanel),
-		commands:       commands,
-		gpsStatus:      gpsStatus,
-		sourceStatus:   sourceStatus,
-		footer:         configureFooter(commands),
+		ctx:             ctx,
+		cancel:          cancel,
+		app:             tview.NewApplication(),
+		errChan:         make(chan error, 3), //nolint:mnd // buffered for the three background workers.
+		myLocation:      myLocation,
+		waitGroup:       &sync.WaitGroup{},
+		planeList:       planeList,
+		planeFilter:     ui.NewPlaneFilter(),
+		adsbStream:      adsb.New(buildADSBOptions(cfg, myLocation)...),
+		statsTracker:    ui.NewStatsTracker(),
+		batteryStatus:   battery.NewStatus(),
+		clock:           clock,
+		statusBar:       statusBar,
+		headerPanel:     headerPanel,
+		notifications:   notifications,
+		notificationBar: notificationBar,
+		topSection:      topSection,
+		planeListPanel:  planeListPanel,
+		statsPanel:      statsPanel,
+		rightColumn:     configureRightColumn(planeListPanel, statsPanel),
+		commands:        commands,
+		gpsStatus:       gpsStatus,
+		sourceStatus:    sourceStatus,
+		footer:          configureFooter(commands),
 	}
 }
 
-// buildADSBOptions assembles the adsb.New option slice from the
-// runtime environment. Sources, in precedence order:
+// buildADSBOptions assembles the adsb.New option slice from
+// the parsed CLI config. Sources, in precedence order:
 //
-//  1. UAIRWAVES_REPLAY_IQ → file-backed replay (testing).
-//  2. BEAST_ADDRESS       → consume BEAST frames from a remote
+//  1. --replay-iq PATH → file-backed replay (testing).
+//  2. --beast HOST:PORT → consume BEAST frames from a remote
 //     demodulator over TCP (no local SDR).
-//  3. Default             → drive the rtl2832u + demod stack
-//     directly off the on-board SDR.
+//  3. Default         → drive the rtl2832u + demod stack
+//     directly off the on-board SDR. --auto-sweep applies
+//     here.
 //
 // Replay wins over BEAST so a developer can always replay a
-// captured IQ even on a host that also has BEAST_ADDRESS set in
-// its environment.
-func buildADSBOptions(myLocation *location.Location) []adsb.Option {
+// captured IQ even on a host that also sets --beast.
+func buildADSBOptions(cfg cliConfig, myLocation *location.Location) []adsb.Option {
 	opts := []adsb.Option{adsb.WithLocation(myLocation)}
 
-	if path := ui.EnvOr("UAIRWAVES_REPLAY_IQ", ""); path != "" {
+	if cfg.replayIQPath != "" {
+		path := cfg.replayIQPath
 		opts = append(opts, adsb.WithReceiverFactory(func() (adsb.Receiver, error) {
 			rcv, err := adsb.NewFileReceiver(path)
 			if err != nil {
@@ -162,26 +199,44 @@ func buildADSBOptions(myLocation *location.Location) []adsb.Option {
 		return opts
 	}
 
-	if addr := ui.EnvOr("BEAST_ADDRESS", ""); addr != "" {
-		opts = append(opts, adsb.WithBeastAddress(addr), adsb.WithSourceLabel("BEAST "+addr))
-		slog.Info("adsb: consuming BEAST", slog.String("address", addr))
+	if cfg.beastAddress != "" {
+		opts = append(opts, adsb.WithBeastAddress(cfg.beastAddress), adsb.WithSourceLabel("BEAST "+cfg.beastAddress))
+		slog.Info("adsb: consuming BEAST", slog.String("address", cfg.beastAddress))
 
 		return opts
 	}
 
 	opts = append(opts, adsb.WithSourceLabel("SDR"))
 
+	if cfg.autoSweep {
+		opts = append(opts, adsb.WithAutoSweep())
+
+		slog.Info("adsb: auto-sweep enabled (will run before first frame)")
+	}
+
 	return opts
 }
 
 func configureGrid(components *uiComponents) *tview.Grid {
 	grid := tview.NewGrid().SetRows(1, 0, 1).SetColumns(0, 50).SetBorders(false) //nolint:mnd
-	grid.AddItem(components.headerPanel, 0, 0, 1, 2, 0, 0, false)
+	grid.AddItem(components.topSection, 0, 0, 1, 2, 0, 0, false)
 	grid.AddItem(components.radarPanel, 1, 0, 1, 1, 0, 0, false)
 	grid.AddItem(components.rightColumn, 1, 1, 1, 1, 0, 0, true)
 	grid.AddItem(components.footer, 2, 0, 1, 2, 0, 0, false)
 
 	return grid
+}
+
+// configureNotificationBar builds the 1-line bar that surfaces
+// captured slog notifications. Background colour is applied
+// per-record by renderNotification (red for ERROR, yellow for
+// WARN, blue for INFO); the bar's default is transparent so the
+// hidden state (height=0) doesn't leak a colour stripe.
+func configureNotificationBar() *tview.TextView {
+	bar := tview.NewTextView().SetDynamicColors(true).SetTextAlign(tview.AlignLeft)
+	bar.SetTextColor(tcell.ColorWhite)
+
+	return bar
 }
 
 func startBatteryWatcher(components *uiComponents, filePath string) {
@@ -219,17 +274,17 @@ func runGPSWatch(ctx context.Context, loc *location.Location, address string) er
 //	0 — thresholds met, JSON written to stdout
 //	1 — thresholds not met (still emits the JSON; consumer can
 //	    diff which gate failed)
-//	2 — bad input (unparseable duration) or fatal I/O error
-func runCheckMode(rawDuration string) int {
+//	2 — bad input (out-of-range duration) or fatal I/O error
+func runCheckMode(cfg cliConfig) int {
 	const (
 		exitOK       = 0
 		exitFail     = 1
 		exitBadInput = 2
 	)
 
-	duration, err := check.ParseDuration(rawDuration)
+	duration, err := check.ValidateDuration(cfg.checkDuration)
 	if err != nil {
-		slog.Error("check: bad UAIRWAVES_CHECK", slog.Any("error", err))
+		slog.Error("check: bad --check duration", slog.Any("error", err))
 
 		return exitBadInput
 	}
@@ -238,8 +293,7 @@ func runCheckMode(rawDuration string) int {
 
 	myLocation := location.New()
 	planes := airplanes.New()
-	stream := adsb.New(buildADSBOptions(myLocation)...)
-	gpsAddress := ui.EnvOr("GPSD_ADDRESS", "")
+	stream := adsb.New(buildADSBOptions(cfg, myLocation)...)
 
 	report, passed, runErr := check.Run(context.Background(), check.Options{
 		Duration:   duration,
@@ -249,7 +303,7 @@ func runCheckMode(rawDuration string) int {
 		Planes:     planes,
 		Location:   myLocation,
 		StartGPS: func(ctx context.Context) error {
-			return runGPSWatch(ctx, myLocation, gpsAddress)
+			return runGPSWatch(ctx, myLocation, cfg.gpsdAddress)
 		},
 		StartADSB: func(ctx context.Context) error {
 			return stream.Stream(ctx, planes)
@@ -319,6 +373,9 @@ func startUIUpdater(components *uiComponents) {
 					ui.UpdateFooter(components.commands, components.radarPanel, positionedOnly)
 					ui.UpdateSourceStatus(components.sourceStatus, components.adsbStream)
 					components.gpsStatus.SetText("GPS: " + components.myLocation.String())
+					ui.RenderNotificationBar(
+						components.grid, components.topSection, components.notificationBar, components.notifications,
+					)
 				})
 			}
 		}

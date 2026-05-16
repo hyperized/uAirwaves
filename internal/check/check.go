@@ -137,15 +137,23 @@ func writeJSON(out io.Writer, report Report) error {
 // from accidentally requesting useless windows (sub-second) or
 // hanging a CI job indefinitely.
 func ParseDuration(raw string) (time.Duration, error) {
-	const (
-		minDuration = 1 * time.Second
-		maxDuration = 5 * time.Minute
-	)
-
 	dur, err := time.ParseDuration(raw)
 	if err != nil {
 		return 0, fmt.Errorf("%w %q: %w", errParseCheckDuration, raw, err)
 	}
+
+	return ValidateDuration(dur)
+}
+
+// ValidateDuration enforces the same 1 s – 5 min bounds as
+// ParseDuration, but on an already-parsed value. Used when the
+// caller has already obtained a time.Duration (e.g. from the
+// flag.DurationVar binding) and just needs the range check.
+func ValidateDuration(dur time.Duration) (time.Duration, error) {
+	const (
+		minDuration = 1 * time.Second
+		maxDuration = 5 * time.Minute
+	)
 
 	if dur < minDuration {
 		return 0, fmt.Errorf("%w: %s < %s", errDurationBelowMin, dur, minDuration)

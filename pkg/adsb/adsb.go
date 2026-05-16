@@ -18,6 +18,7 @@ import (
 
 	"github.com/hyperized/demod1090/demod"
 	"github.com/hyperized/demod1090/icaofilter"
+	"github.com/hyperized/demod1090/sweep"
 	"github.com/hyperized/modes"
 	"github.com/hyperized/rtl2832u"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
@@ -154,6 +155,15 @@ type ADSB struct {
 	// the header (e.g. "SDR", "BEAST 192.168.1.5:30005", "Replay
 	// capture.iq"). Stamped once at construction via WithSourceLabel.
 	sourceLabel string
+
+	// autoSweep, when true, runs a 3D gain sweep before the SDR
+	// read loop starts. Only takes effect in the local-SDR path
+	// (BEAST mode and replay-IQ have no gain to tune). The
+	// receiver must satisfy sweep.Receiver — the production
+	// *rtl2832u.Receiver does; test fakes that don't expose the
+	// gain setters skip the sweep with a warning and proceed
+	// straight to the stream loop.
+	autoSweep bool
 
 	// connected reflects whether the current source is actively
 	// producing frames: true after a successful SDR open / BEAST
@@ -356,6 +366,25 @@ func WithSourceLabel(label string) Option {
 	return func(a *ADSB) { a.sourceLabel = label }
 }
 
+// WithAutoSweep enables the 3D LNA × Mixer × VGA gain sweep
+// before the SDR read loop starts. Same algorithm as demod1090's
+// --auto-sweep: walks a stride-5 grid (64 cells, ~96 s),
+// scores each cell by decoded DF17/18-valid frames per second,
+// and applies the winning cell before the stream loop begins.
+//
+// Only takes effect in the local-SDR path. BEAST mode (a remote
+// demodulator owns the gain) and replay-IQ (no live signal)
+// silently ignore the option.
+//
+// The receiver returned by the factory must satisfy
+// sweep.Receiver — the production *rtl2832u.Receiver does. Test
+// factories whose receiver lacks the gain setters are
+// gracefully detected; the sweep is skipped with a warn-level
+// log line and the stream proceeds.
+func WithAutoSweep() Option {
+	return func(a *ADSB) { a.autoSweep = true }
+}
+
 // Stream drives the configured ingest source and updates planes
 // as decoded frames arrive. Two paths:
 //
@@ -411,6 +440,11 @@ func (a *ADSB) streamSDR(ctx context.Context, planes *airplanes.Airplanes) error
 	}()
 
 	demodulator := a.demodulatorFactory()
+
+	if a.autoSweep {
+		a.runAutoSweep(ctx, receiver, demodulator)
+	}
+
 	iqBuf := make([]byte, readChunkSize)
 
 	for {
@@ -432,6 +466,62 @@ func (a *ADSB) streamSDR(ctx context.Context, planes *airplanes.Airplanes) error
 			return fmt.Errorf("adsb: read: %w", err)
 		}
 	}
+}
+
+// runAutoSweep delegates the configured receiver + demodulator
+// to the shared sweep package, applies the winning cell, and
+// logs the outcome. Receivers that don't implement the gain
+// setters (test fakes, file-backed replay receivers) skip the
+// sweep gracefully — the production *rtl2832u.Receiver satisfies
+// the interface.
+//
+// Runs synchronously: a ~96 s boot-time pause is acceptable for
+// a daemon meant to run for hours; uAirwaves's TUI shows the
+// "not connected yet" state during that window via connected==true
+// but no frames flowing (the sampler isn't running until the
+// sweep returns).
+//
+// User-facing slog messages are emitted at INFO (start, success)
+// and WARN (failure) so the notification bar surfaces them as
+// blue / yellow strips. The sweep package's own internal logs
+// (per-cell DEBUG, the verbose "sweep starting" / "sweep
+// complete" INFO lines with attribute dumps) are routed to a
+// discard handler — we want one clean user-facing message at
+// each transition, not the internal trace.
+func (*ADSB) runAutoSweep(ctx context.Context, receiver Receiver, demodulator Demodulator) {
+	sweepRcv, ok := receiver.(sweep.Receiver)
+	if !ok {
+		slog.Warn("adsb: auto-sweep requested but receiver does not implement gain controls; skipping",
+			slog.String("type", fmt.Sprintf("%T", receiver)))
+
+		return
+	}
+
+	slog.Info("adsb: auto-sweep starting — finding best gain, ~96 s before frames start arriving")
+
+	silentLogger := slog.New(slog.DiscardHandler)
+
+	result, err := sweep.Run(ctx, sweepRcv, demodulator, sweep.Default(), &sweep.Metrics{}, silentLogger)
+	if err != nil {
+		slog.Warn("adsb: auto-sweep failed; continuing with current gain settings",
+			slog.Any("error", err))
+
+		return
+	}
+
+	if err := result.Apply(sweepRcv); err != nil {
+		slog.Warn("adsb: auto-sweep apply failed; continuing with current gain settings",
+			slog.Any("error", err))
+
+		return
+	}
+
+	slog.Info("adsb: auto-sweep complete",
+		slog.Int("lna", int(result.LNA)),
+		slog.Int("mix", int(result.Mix)),
+		slog.Int("vga", int(result.VGA)),
+		slog.Float64("yield_df17_valid_per_s", result.Yield),
+	)
 }
 
 // prune evicts stale aircraft on a fixed cadence until the

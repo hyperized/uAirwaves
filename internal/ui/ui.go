@@ -79,48 +79,84 @@ type PlaneFilterController interface {
 	TogglePositionedOnly()
 }
 
+// NotificationController abstracts the notification queue's
+// dismiss surface. Used by the key dispatcher to pop the front
+// message on 'x' / clear all on 'X'. The full *Notifications
+// type satisfies this interface; tests can pass a fake recorder.
+type NotificationController interface {
+	DismissFront()
+	DismissAll()
+}
+
+// KeyControllers bundles every dependency HandleKeyInput needs
+// so the function signature stays inside revive's argument-count
+// limit (5 incl. event). Cheap to construct at the call site
+// via NewKeyControllers.
+type KeyControllers struct {
+	App    AppController
+	Radar  RadarController
+	Filter PlaneFilterController
+	Notifs NotificationController
+}
+
 // HandleKeyInput is the global key dispatcher: Esc/q stop the
 // app, +/- adjust scope, a/h/t/m toggle indicators, p toggles
-// the sidebar positioned-only filter. The event is returned
-// unchanged so tview's input chain can pass it on to the focused
-// widget.
+// the sidebar positioned-only filter, x/X dismiss the current /
+// all queued notifications. The event is returned unchanged so
+// tview's input chain can pass it on to the focused widget.
 //
 // Lifted out of main.go behind the AppController /
-// RadarController / PlaneFilterController interfaces so the
-// dispatch table is testable without a tview event loop.
-func HandleKeyInput(
-	event *tcell.EventKey, app AppController, radarPanel RadarController, filter PlaneFilterController,
-) *tcell.EventKey {
+// RadarController / PlaneFilterController /
+// NotificationController interfaces so the dispatch table is
+// testable without a tview event loop.
+func HandleKeyInput(event *tcell.EventKey, ctrls KeyControllers) *tcell.EventKey {
 	if event.Key() == tcell.KeyEsc {
-		app.Stop()
+		ctrls.App.Stop()
 	}
 
-	dispatchRune(event.Rune(), app, radarPanel, filter)
+	dispatchRune(event.Rune(), ctrls)
 
 	return event
+}
+
+// NewKeyControllers bundles the four controllers HandleKeyInput
+// needs into one value. Exists so main.go's SetInputCapture
+// closure reads cleanly and so tests can construct a controller
+// set with their own fakes.
+func NewKeyControllers(
+	app AppController,
+	radarPanel RadarController,
+	filter PlaneFilterController,
+	notifs NotificationController,
+) KeyControllers {
+	return KeyControllers{App: app, Radar: radarPanel, Filter: filter, Notifs: notifs}
 }
 
 // dispatchRune is a strategy-table dispatcher keyed on the
 // pressed rune. Split out of HandleKeyInput so the switch stays
 // small enough for revive's cyclomatic-complexity gate.
-func dispatchRune(pressed rune, app AppController, radarPanel RadarController, filter PlaneFilterController) {
+func dispatchRune(pressed rune, ctrls KeyControllers) {
 	switch pressed {
 	case '+':
-		radarPanel.IncrementScope()
+		ctrls.Radar.IncrementScope()
 	case '-':
-		radarPanel.DecrementScope()
+		ctrls.Radar.DecrementScope()
 	case 'a':
-		radarPanel.ToggleAutoScope()
+		ctrls.Radar.ToggleAutoScope()
 	case 'h':
-		radarPanel.ToggleHeadingIndicator()
+		ctrls.Radar.ToggleHeadingIndicator()
 	case 't':
-		radarPanel.ToggleTrailIndicator()
+		ctrls.Radar.ToggleTrailIndicator()
 	case 'm':
-		radarPanel.ToggleHeatIndicator()
+		ctrls.Radar.ToggleHeatIndicator()
 	case 'p':
-		filter.TogglePositionedOnly()
+		ctrls.Filter.TogglePositionedOnly()
 	case 'q':
-		app.Stop()
+		ctrls.App.Stop()
+	case 'x':
+		ctrls.Notifs.DismissFront()
+	case 'X':
+		ctrls.Notifs.DismissAll()
 	default:
 		// No-op for unrecognised keys; event still bubbles up.
 	}

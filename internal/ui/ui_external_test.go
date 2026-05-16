@@ -96,6 +96,16 @@ type fakeFilter struct {
 
 func (f *fakeFilter) TogglePositionedOnly() { f.positionedToggles++ }
 
+// fakeNotifs implements NotificationController and counts the
+// dismiss-front and dismiss-all calls the dispatcher fires.
+type fakeNotifs struct {
+	dismissFronts int
+	dismissAll    int
+}
+
+func (f *fakeNotifs) DismissFront() { f.dismissFronts++ }
+func (f *fakeNotifs) DismissAll()   { f.dismissAll++ }
+
 // keyDispatchCase pins one row of the HandleKeyInput dispatch
 // table. Each int is the expected per-method call count for the
 // matching fakeRadar field; wantAppStops counts fakeApp.Stop.
@@ -110,6 +120,8 @@ type keyDispatchCase struct {
 	wantTrail         int
 	wantHeat          int
 	wantPositionedTog int
+	wantDismissFront  int
+	wantDismissAll    int
 }
 
 // keyDispatchCases is the HandleKeyInput dispatch table. Hoisted
@@ -134,6 +146,14 @@ var keyDispatchCases = []keyDispatchCase{
 		wantPositionedTog: 1,
 	},
 	{name: "q stops app", event: tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone), wantAppStops: 1},
+	{
+		name: "x dismisses front notification", event: tcell.NewEventKey(tcell.KeyRune, 'x', tcell.ModNone),
+		wantDismissFront: 1,
+	},
+	{
+		name: "X dismisses all notifications", event: tcell.NewEventKey(tcell.KeyRune, 'X', tcell.ModNone),
+		wantDismissAll: 1,
+	},
 	{name: "unrecognised rune is no-op", event: tcell.NewEventKey(tcell.KeyRune, 'z', tcell.ModNone)},
 }
 
@@ -161,8 +181,9 @@ func assertKeyDispatch(t *testing.T, testCase keyDispatchCase) {
 	app := &fakeApp{}
 	rdr := &fakeRadar{}
 	flt := &fakeFilter{}
+	nts := &fakeNotifs{}
 
-	returned := ui.HandleKeyInput(testCase.event, app, rdr, flt)
+	returned := ui.HandleKeyInput(testCase.event, ui.NewKeyControllers(app, rdr, flt, nts))
 	if returned != testCase.event {
 		t.Errorf("HandleKeyInput should return event unchanged; got %v want %v", returned, testCase.event)
 	}
@@ -176,6 +197,8 @@ func assertKeyDispatch(t *testing.T, testCase keyDispatchCase) {
 		wantTrail:         rdr.trail,
 		wantHeat:          rdr.heat,
 		wantPositionedTog: flt.positionedToggles,
+		wantDismissFront:  nts.dismissFronts,
+		wantDismissAll:    nts.dismissAll,
 	}
 
 	if got != (keyDispatchCase{
@@ -187,6 +210,8 @@ func assertKeyDispatch(t *testing.T, testCase keyDispatchCase) {
 		wantTrail:         testCase.wantTrail,
 		wantHeat:          testCase.wantHeat,
 		wantPositionedTog: testCase.wantPositionedTog,
+		wantDismissFront:  testCase.wantDismissFront,
+		wantDismissAll:    testCase.wantDismissAll,
 	}) {
 		t.Errorf("dispatch counts mismatch\n got: %+v\nwant: %+v", got, testCase)
 	}

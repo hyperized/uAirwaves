@@ -166,6 +166,35 @@ func (d *fakeDemodulator) Process(_ []byte) []demod.Frame {
 	return nil
 }
 
+// sweepCapableFakeReceiver is fakeReceiver + the gain setters
+// the auto-sweep path probes for. Used to exercise the
+// WithAutoSweep code path without a real dongle.
+type sweepCapableFakeReceiver struct {
+	fakeReceiver
+
+	lnaCalls int
+	mixCalls int
+	vgaCalls int
+}
+
+func (s *sweepCapableFakeReceiver) SetLNAGain(uint8) error {
+	s.lnaCalls++
+
+	return nil
+}
+
+func (s *sweepCapableFakeReceiver) SetMixerGain(uint8) error {
+	s.mixCalls++
+
+	return nil
+}
+
+func (s *sweepCapableFakeReceiver) SetVGAGain(uint8) error {
+	s.vgaCalls++
+
+	return nil
+}
+
 // errSyntheticReceiverOpen is the static sentinel for the
 // "factory failed to build a receiver" branch.
 var errSyntheticReceiverOpen = errors.New("synthetic receiver open failure")
@@ -1462,4 +1491,46 @@ func TestPruneEvictsStaleAircraft(t *testing.T) {
 	}
 
 	t.Error("plane not evicted within deadline")
+}
+
+func TestStreamAutoSweepSkippedWhenReceiverLacksGainControls(t *testing.T) {
+	t.Parallel()
+
+	// Use the plain fakeReceiver (no Set*Gain methods) → sweep
+	// should detect the missing interface and skip without
+	// failing the stream.
+	rcv := &fakeReceiver{} // empty queue → first Read returns Canceled
+	stream := New(
+		WithAutoSweep(),
+		WithReceiverFactory(func() (Receiver, error) { return rcv, nil }),
+		WithDemodulatorFactory(func() Demodulator { return &fakeDemodulator{} }),
+	)
+
+	if err := stream.Stream(t.Context(), airplanes.New()); err != nil {
+		t.Errorf("Stream returned %v, want nil (sweep should skip, not fail)", err)
+	}
+}
+
+func TestStreamAutoSweepInvokesGainSettersWhenCapable(t *testing.T) {
+	t.Parallel()
+
+	rcv := &sweepCapableFakeReceiver{} // empty reads queue
+	stream := New(
+		WithAutoSweep(),
+		WithReceiverFactory(func() (Receiver, error) { return rcv, nil }),
+		WithDemodulatorFactory(func() Demodulator { return &fakeDemodulator{} }),
+	)
+
+	// Timer-bound ctx: lets the sweep's first probeCell fire its
+	// SetLNA/Mix/VGA writes (the ctx.Err() check inside probeCell
+	// passes at T=0), then cancels during the cell's settleDelay
+	// so we don't sit through the full ~96 s sweep.
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+
+	_ = stream.Stream(ctx, airplanes.New())
+
+	if rcv.lnaCalls == 0 {
+		t.Error("auto-sweep was wired but never called SetLNAGain")
+	}
 }
