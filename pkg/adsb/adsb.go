@@ -66,6 +66,15 @@ const (
 // from fmt.Errorf; static + %w keeps callers branchable.
 var errOpenReceiver = errors.New("adsb: open RTL-SDR receiver")
 
+// ErrBiasTeeUnsupported is returned by SetBiasTee / BiasTeeEnabled
+// when the active source has no bias-tee controllable surface. Two
+// cases: there is no live SDR receiver (BEAST mode, replay mode,
+// or stream not started yet), or the receiver implementation does
+// not satisfy the bias-tee interface (test fakes, file-backed
+// replay receivers). The UI uses errors.Is to suppress key presses
+// in modes where the toggle is meaningless.
+var ErrBiasTeeUnsupported = errors.New("adsb: bias-tee not supported by active source")
+
 // Receiver is the slice of *rtl2832u.Receiver pkg/adsb actually
 // uses. Hoisted to an interface so Stream() can be tested with a
 // fake or driven by a non-USB source (UAIRWAVES_REPLAY_IQ in main).
@@ -86,6 +95,18 @@ type ReceiverFactory func() (Receiver, error)
 // can substitute a fake that returns pre-canned frames.
 type Demodulator interface {
 	Process(samples []byte) []demod.Frame
+}
+
+// biasTeeController is the optional slice of *rtl2832u.Receiver
+// the bias-tee TUI surface needs. Kept as its own interface so
+// only the real SDR path satisfies it — the file-backed replay
+// receiver and the BEAST consumer don't implement it, and the
+// type assertion in streamSDR cleanly drops the controller in
+// those modes. Mirrors the sweep.Receiver pattern in the same
+// package.
+type biasTeeController interface {
+	SetBiasTee(enable bool) error
+	GetBiasTee() (bool, error)
 }
 
 // DemodulatorFactory builds a Demodulator. Same rationale as
@@ -176,6 +197,21 @@ type ADSB struct {
 	// and replay don't surface byte counters because samples are
 	// the wrong unit and the rate is fixed by the demod chain.
 	bytesIn atomic.Uint64
+
+	// sweeping is true while the local-SDR auto-sweep is walking
+	// the LNA × Mix × VGA grid before the read loop starts. The
+	// UI consults this to swap the center crosshair for a spinning
+	// "loading" glyph so the operator knows boot is making
+	// progress (the sweep takes ~96 s with no frames flowing).
+	sweeping atomic.Bool
+
+	// biasMu guards biasTee. The slot is populated by streamSDR
+	// after a successful receiver open (if the receiver implements
+	// biasTeeController) and cleared on stream exit. The UI
+	// goroutine takes biasMu while invoking the controller so the
+	// receiver can't be closed mid-call.
+	biasMu  sync.RWMutex
+	biasTee biasTeeController
 }
 
 // Stats reports the ingest counters since process start.
@@ -207,6 +243,15 @@ type SourceInfo struct {
 	BytesIn   uint64
 }
 
+// Sweeping reports whether the auto-sweep is currently walking
+// the gain grid. True only inside runAutoSweep; the UI uses this
+// to swap the radar's center crosshair for an animated loading
+// indicator while no frames are flowing yet. Safe to call from
+// any goroutine.
+func (a *ADSB) Sweeping() bool {
+	return a.sweeping.Load()
+}
+
 // Source returns a snapshot of the ingest source state. Safe to
 // call from any goroutine.
 func (a *ADSB) Source() SourceInfo {
@@ -215,6 +260,58 @@ func (a *ADSB) Source() SourceInfo {
 		Connected: a.connected.Load(),
 		BytesIn:   a.bytesIn.Load(),
 	}
+}
+
+// BiasTeeSupported reports whether the active source exposes a
+// bias-tee surface. True only on the local-SDR path with a
+// receiver that implements the optional interface. Safe to call
+// before Stream starts (returns false) and after it exits
+// (returns false again).
+func (a *ADSB) BiasTeeSupported() bool {
+	a.biasMu.RLock()
+	defer a.biasMu.RUnlock()
+
+	return a.biasTee != nil
+}
+
+// BiasTeeEnabled polls the chip for the live bias-tee bit state.
+// Returns ErrBiasTeeUnsupported when no controller is installed
+// (BEAST, replay, or stream not running). One USB control transfer
+// per call; safe to invoke at UI-tick cadence while sample
+// streaming is in progress.
+func (a *ADSB) BiasTeeEnabled() (bool, error) {
+	a.biasMu.RLock()
+	defer a.biasMu.RUnlock()
+
+	if a.biasTee == nil {
+		return false, ErrBiasTeeUnsupported
+	}
+
+	enabled, err := a.biasTee.GetBiasTee()
+	if err != nil {
+		return false, fmt.Errorf("adsb: read bias-tee: %w", err)
+	}
+
+	return enabled, nil
+}
+
+// SetBiasTee drives the dongle's bias-tee GPIO. Returns
+// ErrBiasTeeUnsupported when no controller is installed. Safe to
+// call while sample streaming is in progress — the underlying
+// rtl2832u writes go through a separate control endpoint.
+func (a *ADSB) SetBiasTee(enable bool) error {
+	a.biasMu.RLock()
+	defer a.biasMu.RUnlock()
+
+	if a.biasTee == nil {
+		return ErrBiasTeeUnsupported
+	}
+
+	if err := a.biasTee.SetBiasTee(enable); err != nil {
+		return fmt.Errorf("adsb: set bias-tee: %w", err)
+	}
+
+	return nil
 }
 
 // Option configures the ADSB stream.
@@ -431,7 +528,17 @@ func (a *ADSB) streamSDR(ctx context.Context, planes *airplanes.Airplanes) error
 
 	a.connected.Store(true)
 
+	if controller, ok := receiver.(biasTeeController); ok {
+		a.biasMu.Lock()
+		a.biasTee = controller
+		a.biasMu.Unlock()
+	}
+
 	defer func() {
+		a.biasMu.Lock()
+		a.biasTee = nil
+		a.biasMu.Unlock()
+
 		a.connected.Store(false)
 
 		if cerr := receiver.Close(); cerr != nil {
@@ -488,7 +595,7 @@ func (a *ADSB) streamSDR(ctx context.Context, planes *airplanes.Airplanes) error
 // complete" INFO lines with attribute dumps) are routed to a
 // discard handler — we want one clean user-facing message at
 // each transition, not the internal trace.
-func (*ADSB) runAutoSweep(ctx context.Context, receiver Receiver, demodulator Demodulator) {
+func (a *ADSB) runAutoSweep(ctx context.Context, receiver Receiver, demodulator Demodulator) {
 	sweepRcv, ok := receiver.(sweep.Receiver)
 	if !ok {
 		slog.Warn("adsb: auto-sweep requested but receiver does not implement gain controls; skipping",
@@ -496,6 +603,9 @@ func (*ADSB) runAutoSweep(ctx context.Context, receiver Receiver, demodulator De
 
 		return
 	}
+
+	a.sweeping.Store(true)
+	defer a.sweeping.Store(false)
 
 	slog.Info("adsb: auto-sweep starting — finding best gain, ~96 s before frames start arriving")
 

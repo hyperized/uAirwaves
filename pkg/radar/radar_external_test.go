@@ -16,7 +16,7 @@ func TestNew(t *testing.T) {
 
 	planes := airplanes.New()
 	loc := location.New()
-	view := radar.New(planes, loc)
+	view := radar.New(planes, loc, nil)
 
 	if view == nil {
 		t.Fatal("expected New() to return a non-nil View")
@@ -46,7 +46,7 @@ func TestNew(t *testing.T) {
 func TestView_SetScopeRange(t *testing.T) {
 	t.Parallel()
 
-	view := radar.New(airplanes.New(), location.New())
+	view := radar.New(airplanes.New(), location.New(), nil)
 	view.SetScopeRange(100)
 
 	if view.GetScopeRange() != 100 {
@@ -57,7 +57,7 @@ func TestView_SetScopeRange(t *testing.T) {
 func TestView_IncrementDecrementScope(t *testing.T) {
 	t.Parallel()
 
-	view := radar.New(airplanes.New(), location.New())
+	view := radar.New(airplanes.New(), location.New(), nil)
 	initialRange := view.GetScopeRange()
 
 	view.IncrementScope()
@@ -77,7 +77,7 @@ func TestView_IncrementDecrementScope(t *testing.T) {
 func TestView_Toggles(t *testing.T) {
 	t.Parallel()
 
-	view := radar.New(airplanes.New(), location.New())
+	view := radar.New(airplanes.New(), location.New(), nil)
 
 	initialHeading := view.GetHeadingIndicatorEnabled()
 	view.ToggleHeadingIndicator()
@@ -137,7 +137,7 @@ func TestView_GetAircraftCount(t *testing.T) {
 	t.Parallel()
 
 	planes := airplanes.New()
-	view := radar.New(planes, location.New())
+	view := radar.New(planes, location.New(), nil)
 
 	if got := view.GetAircraftCount(); got != 0 {
 		t.Errorf("initial GetAircraftCount() = %d, want 0", got)
@@ -168,7 +168,7 @@ func TestView_Draw_TrailRendersHistory(t *testing.T) {
 
 	loc := location.New(location.WithLatitude(52.0), location.WithLongitude(13.0))
 	planes := airplanes.New()
-	view := radar.New(planes, loc)
+	view := radar.New(planes, loc, nil)
 	view.SetRect(0, 0, 80, 24)
 
 	// Disable auto-scope so the scope range stays at the default
@@ -242,7 +242,7 @@ func TestView_Draw_HeatRenders(t *testing.T) {
 
 	loc := location.New(location.WithLatitude(52.0), location.WithLongitude(13.0))
 	planes := airplanes.New()
-	view := radar.New(planes, loc)
+	view := radar.New(planes, loc, nil)
 	view.SetRect(0, 0, 80, 24)
 	view.ToggleAutoScope()        // pin scope at 20nm
 	view.ToggleHeadingIndicator() // keep the screen clear of heading dots
@@ -302,7 +302,7 @@ func TestView_Draw_TrailSkipsZeroPositionEntries(t *testing.T) {
 
 	loc := location.New(location.WithLatitude(52.0), location.WithLongitude(13.0))
 	planes := airplanes.New()
-	view := radar.New(planes, loc)
+	view := radar.New(planes, loc, nil)
 	view.SetRect(0, 0, 80, 24)
 	view.ToggleAutoScope()
 	view.ToggleHeadingIndicator() // -1 clamps to 0 in WithHeading; kill the line explicitly.
@@ -364,7 +364,7 @@ func TestView_Draw_HeadingLineRenders(t *testing.T) {
 
 	loc := location.New(location.WithLatitude(52.0), location.WithLongitude(13.0))
 	planes := airplanes.New()
-	view := radar.New(planes, loc)
+	view := radar.New(planes, loc, nil)
 	view.SetRect(0, 0, 80, 24)
 	view.ToggleAutoScope()      // pin scope at 20nm
 	view.ToggleTrailIndicator() // off, so '·' is heading-only (heading defaults on)
@@ -410,7 +410,7 @@ func TestView_Draw(t *testing.T) {
 
 	planes := airplanes.New()
 	loc := location.New(location.WithLatitude(52.0), location.WithLongitude(13.0))
-	view := radar.New(planes, loc)
+	view := radar.New(planes, loc, nil)
 
 	// Add a plane within scope
 	planes.Ensure("PLANE1")
@@ -465,7 +465,7 @@ func testPlaneOutsideScopeIncreasesRange(t *testing.T, loc *location.Location, s
 		t.Parallel()
 
 		planes := airplanes.New()
-		view := radar.New(planes, loc)
+		view := radar.New(planes, loc, nil)
 		view.SetRect(0, 0, 80, 24)
 
 		planes.Ensure("OUTSIDE")
@@ -490,7 +490,7 @@ func testAutoScopeDisabled(t *testing.T, loc *location.Location, screen tcell.Sc
 		t.Parallel()
 
 		planes := airplanes.New()
-		view := radar.New(planes, loc)
+		view := radar.New(planes, loc, nil)
 		view.SetRect(0, 0, 80, 24)
 
 		view.ToggleAutoScope() // Disable autoScope
@@ -516,7 +516,7 @@ func testNoPlanesLeavesScope(t *testing.T, loc *location.Location, screen tcell.
 		t.Parallel()
 
 		newPlanes := airplanes.New()
-		newView := radar.New(newPlanes, loc)
+		newView := radar.New(newPlanes, loc, nil)
 		newView.SetScopeRange(100)
 		newView.SetRect(0, 0, 80, 24)
 
@@ -542,7 +542,7 @@ func testAutoScopeShrinksToFarthest(t *testing.T, loc *location.Location, screen
 		t.Parallel()
 
 		planes := airplanes.New()
-		view := radar.New(planes, loc)
+		view := radar.New(planes, loc, nil)
 		view.SetScopeRange(500) // start pinned at max as if previously far traffic
 		view.SetRect(0, 0, 80, 24)
 
@@ -570,7 +570,7 @@ func testPlaneWithoutLocationSkipped(t *testing.T, loc *location.Location, scree
 		t.Parallel()
 
 		planes := airplanes.New()
-		view := radar.New(planes, loc)
+		view := radar.New(planes, loc, nil)
 		view.SetRect(0, 0, 80, 24)
 
 		planes.Ensure("NOLOC")
@@ -599,7 +599,7 @@ func testPlaneRendersInsideBox(t *testing.T, loc *location.Location) {
 		)
 
 		planes := airplanes.New()
-		view := radar.New(planes, loc)
+		view := radar.New(planes, loc, nil)
 		view.SetRect(0, 0, boxWidth, boxHeight)
 
 		// Plane ~60 nm due north — autoscope fits to ceil(60/20)*20 = 60.
@@ -658,7 +658,7 @@ func testPlaneWithCallsign(t *testing.T, loc *location.Location, screen tcell.Sc
 		t.Parallel()
 
 		testPlanes := airplanes.New()
-		testView := radar.New(testPlanes, loc)
+		testView := radar.New(testPlanes, loc, nil)
 		testView.SetRect(0, 0, 80, 24)
 
 		testPlanes.Ensure("ICAO456")

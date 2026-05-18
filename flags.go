@@ -21,6 +21,7 @@ type cliConfig struct {
 	beastAddress  string
 	replayIQPath  string
 	autoSweep     bool
+	biasTee       bool
 	gpsdAddress   string
 	batteryPath   string
 	checkDuration time.Duration
@@ -49,6 +50,10 @@ func parseFlags(args []string, stderr io.Writer) (cliConfig, error) {
 	flagSet.BoolVar(&cfg.autoSweep, "auto-sweep", false,
 		"run a 3D LNA×Mix×VGA gain sweep (64 cells, ~96 s) before the first frame and apply "+
 			"the winning cell. Local-SDR mode only; ignored under --beast or --replay-iq.")
+	flagSet.BoolVar(&cfg.biasTee, "bias-t", false,
+		"enable the dongle's bias-tee (powers an external active LNA / SAW filter from the antenna coax). "+
+			"Applied at Open time so --auto-sweep runs with the LNA powered. Local-SDR mode only; "+
+			"the TUI's 'b' key toggles it live at runtime.")
 	flagSet.StringVar(&cfg.gpsdAddress, "gpsd", "",
 		"gpsd address as host:port (empty = use gps library default, currently 127.0.0.1:2947)")
 	flagSet.StringVar(&cfg.batteryPath, "battery", "",

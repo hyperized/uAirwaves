@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/hyperized/rtl2832u"
 	"github.com/rivo/tview"
 	"lab.hyperized.net/hyperized/uAirwaves/internal/check"
 	"lab.hyperized.net/hyperized/uAirwaves/internal/ui"
@@ -29,7 +30,13 @@ var (
 )
 
 const (
-	uiUpdateInterval    = 1 * time.Second
+	uiUpdateInterval = 1 * time.Second
+	// sweepUpdateInterval is the faster UI cadence used while the
+	// SDR gain auto-sweep is in progress. It matches the radar
+	// spinner's per-frame step so the rotating dot advances one
+	// position per tick (a full rotation in ~2 s) instead of
+	// jumping multiple steps per redraw.
+	sweepUpdateInterval = 250 * time.Millisecond
 	batteryPollInterval = 30 * time.Second
 )
 
@@ -46,7 +53,7 @@ func main() {
 	}
 
 	uic := configureUI(cfg)
-	radarPanel := radar.New(uic.planeList, uic.myLocation)
+	radarPanel := radar.New(uic.planeList, uic.myLocation, uic.adsbStream)
 	uic.radarPanel = radarPanel
 
 	// Replace the default slog handler before any worker
@@ -68,7 +75,9 @@ func main() {
 	startUIUpdater(uic)
 
 	// Input capture for global shortcuts.
-	ctrls := ui.NewKeyControllers(uic.app, uic.radarPanel, uic.planeFilter, uic.notifications)
+	biasTee := &biasTeeAdapter{stream: uic.adsbStream}
+	ctrls := ui.NewKeyControllers(uic.app, uic.radarPanel, uic.planeFilter, uic.notifications, biasTee)
+
 	uic.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		return ui.HandleKeyInput(event, ctrls)
 	})
@@ -208,6 +217,12 @@ func buildADSBOptions(cfg cliConfig, myLocation *location.Location) []adsb.Optio
 
 	opts = append(opts, adsb.WithSourceLabel("SDR"))
 
+	if cfg.biasTee {
+		opts = append(opts, adsb.WithReceiverFactory(biasTeeReceiverFactory))
+
+		slog.Info("adsb: bias-tee enabled at boot")
+	}
+
 	if cfg.autoSweep {
 		opts = append(opts, adsb.WithAutoSweep())
 
@@ -215,6 +230,23 @@ func buildADSBOptions(cfg cliConfig, myLocation *location.Location) []adsb.Optio
 	}
 
 	return opts
+}
+
+// biasTeeReceiverFactory opens the RTL-SDR with the bias-tee
+// pulled high at chip-config time. Identical to pkg/adsb's
+// defaultReceiverFactory except it threads rtl2832u.WithBiasTee
+// through Open so the external LNA / SAW filter is powered
+// before --auto-sweep starts measuring (a sweep without LNA
+// power picks the wrong gain cell).
+//
+//nolint:ireturn // factory: returning the interface is the seam pkg/adsb relies on.
+func biasTeeReceiverFactory() (adsb.Receiver, error) {
+	rcv, err := rtl2832u.Open(rtl2832u.WithBiasTee(true))
+	if err != nil {
+		return nil, fmt.Errorf("adsb: open RTL-SDR receiver with bias-tee: %w", err)
+	}
+
+	return rcv, nil
 }
 
 func configureGrid(components *uiComponents) *tview.Grid {
@@ -343,6 +375,8 @@ func startUIUpdater(components *uiComponents) {
 		ticker := time.NewTicker(uiUpdateInterval)
 		defer ticker.Stop()
 
+		currentInterval := uiUpdateInterval
+
 		for {
 			select {
 			case appErr := <-components.errChan:
@@ -354,6 +388,23 @@ func startUIUpdater(components *uiComponents) {
 			case <-components.ctx.Done():
 				return
 			case <-ticker.C:
+				// Adapt the redraw cadence to the SDR state: a
+				// running gain sweep needs ~4 Hz to animate the
+				// radar's loading spinner one cell per tick, but
+				// the idle UI is plenty at 1 Hz. Reset only fires
+				// when the desired cadence changes so a Reset call
+				// every tick is avoided.
+				desired := uiUpdateInterval
+				if components.adsbStream.Sweeping() {
+					desired = sweepUpdateInterval
+				}
+
+				if desired != currentInterval {
+					ticker.Reset(desired)
+
+					currentInterval = desired
+				}
+
 				components.app.QueueUpdateDraw(func() {
 					components.clock.SetText("Local: " + time.Now().Format(time.TimeOnly) + " UTC: " +
 						time.Now().UTC().Format(time.TimeOnly))
@@ -370,7 +421,7 @@ func startUIUpdater(components *uiComponents) {
 						positionedOnly)
 					ui.UpdateStatsPanel(components.statsPanel, components.adsbStream, components.statsTracker,
 						components.myLocation, components.planeList)
-					ui.UpdateFooter(components.commands, components.radarPanel, positionedOnly)
+					ui.UpdateFooter(components.commands, components.radarPanel, components.adsbStream, positionedOnly)
 					ui.UpdateSourceStatus(components.sourceStatus, components.adsbStream)
 					components.gpsStatus.SetText("GPS: " + components.myLocation.String())
 					ui.RenderNotificationBar(
@@ -484,4 +535,49 @@ func configureClock() *tview.TextView {
 	clock.SetTextColor(tcell.ColorBlack)
 
 	return clock
+}
+
+// biasTeeStream is the slice of *adsb.ADSB the bias-tee adapter
+// drives. Hoisted to an interface so newBiasTeeAdapter is testable
+// against a fake without spinning up a real Stream.
+type biasTeeStream interface {
+	BiasTeeSupported() bool
+	BiasTeeEnabled() (bool, error)
+	SetBiasTee(enable bool) error
+}
+
+// biasTeeAdapter bridges the 'b' keybind dispatch to the ADSB
+// stream. Read-then-toggle: poll the chip, flip the bit, log the
+// outcome through slog so the notification bar surfaces it. The
+// UI footer's own poll renders the new state on the next tick —
+// no in-adapter cache is kept so a third-party flipping the bit
+// (rtl_biast, another process) stays visible.
+type biasTeeAdapter struct {
+	stream biasTeeStream
+}
+
+// ToggleBiasTee implements ui.BiasTeeController. Reads the chip,
+// flips the bit, and slog-logs the outcome. Unsupported sources
+// surface a one-line warn; the key press is otherwise inert.
+func (a *biasTeeAdapter) ToggleBiasTee() {
+	if !a.stream.BiasTeeSupported() {
+		slog.Warn("bias-tee: not available on the active source (BEAST / replay mode)")
+
+		return
+	}
+
+	enabled, err := a.stream.BiasTeeEnabled()
+	if err != nil {
+		slog.Warn("bias-tee: read failed", slog.Any("error", err))
+
+		return
+	}
+
+	if err := a.stream.SetBiasTee(!enabled); err != nil {
+		slog.Warn("bias-tee: set failed", slog.Any("error", err))
+
+		return
+	}
+
+	slog.Info("bias-tee toggled", slog.Bool("enabled", !enabled))
 }

@@ -295,3 +295,168 @@ func TestGetFlightLevelColor(t *testing.T) {
 		})
 	}
 }
+
+// TestSpinnerOffsetWalksEightPositions pins the clockwise sweep
+// order N → NE → E → SE → S → SW → W → NW. Each row picks a wall
+// clock instant that lands at a known frame index so the test
+// asserts the (dx, dy) pair the radar will draw at that moment.
+//
+// The radar's drawCenterPoint feeds time.Now() into spinnerOffset
+// at draw time; this test pins the time → offset mapping so a
+// future tweak to sweepSpinnerStep or sweepSpinnerFrames trips a
+// table failure rather than a silent visual drift.
+func TestSpinnerOffsetWalksEightPositions(t *testing.T) {
+	t.Parallel()
+
+	base := time.Unix(0, 0)
+
+	tests := []struct {
+		name   string
+		frame  int
+		wantDX int
+		wantDY int
+	}{
+		{name: "N", frame: 0, wantDX: 0, wantDY: -1},
+		{name: "NE", frame: 1, wantDX: 1, wantDY: -1},
+		{name: "E", frame: 2, wantDX: 1, wantDY: 0},
+		{name: "SE", frame: 3, wantDX: 1, wantDY: 1},
+		{name: "S", frame: 4, wantDX: 0, wantDY: 1},
+		{name: "SW", frame: 5, wantDX: -1, wantDY: 1},
+		{name: "W", frame: 6, wantDX: -1, wantDY: 0},
+		{name: "NW", frame: 7, wantDX: -1, wantDY: -1},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			// time at frame N = base + frame * step + tiny offset so
+			// floor lands on N (avoids exactly-on-boundary aliasing).
+			instant := base.Add(time.Duration(testCase.frame)*sweepSpinnerStep + sweepSpinnerStep/2)
+
+			gotDX, gotDY := spinnerOffset(instant)
+			if gotDX != testCase.wantDX || gotDY != testCase.wantDY {
+				t.Errorf("spinnerOffset = (%d, %d), want (%d, %d)",
+					gotDX, gotDY, testCase.wantDX, testCase.wantDY)
+			}
+		})
+	}
+}
+
+// TestSpinnerOffsetWrapsAround verifies the modulo behaviour: the
+// 9th frame should land back at the 1st position (N), proving the
+// rotation is endless rather than off-by-one.
+func TestSpinnerOffsetWrapsAround(t *testing.T) {
+	t.Parallel()
+
+	base := time.Unix(0, 0).Add(sweepSpinnerStep / 2)
+	frame0DX, frame0DY := spinnerOffset(base)
+	wrappedDX, wrappedDY := spinnerOffset(base.Add(sweepSpinnerFrames * sweepSpinnerStep))
+
+	if frame0DX != wrappedDX || frame0DY != wrappedDY {
+		t.Errorf("wrap-around mismatch: frame 0 = (%d, %d), frame 8 = (%d, %d)",
+			frame0DX, frame0DY, wrappedDX, wrappedDY)
+	}
+}
+
+// stubSweep satisfies SweepIndicator for tests.
+type stubSweep struct{ sweeping bool }
+
+func (s stubSweep) Sweeping() bool { return s.sweeping }
+
+// cellMainRune returns the first rune of the cell at (x, y) from
+// the simulation screen's row-major buffer. drawCenterPoint
+// writes one-rune cells via SetContent, so the leading rune is
+// sufficient to assert what the renderer drew. Uses the public
+// SimulationScreen.GetContents() instead of the deprecated
+// Screen.GetContent (which trips staticcheck SA1019 and dogsled).
+func cellMainRune(screen tcell.SimulationScreen, x, y int) rune {
+	cells, width, _ := screen.GetContents()
+
+	cell := cells[y*width+x]
+	if len(cell.Runes) == 0 {
+		return 0
+	}
+
+	return cell.Runes[0]
+}
+
+// TestDrawCenterPointStaticWhenIdle pins the default behaviour:
+// no sweep indicator (or one reporting false) draws the static X
+// in dark magenta at the centre. The X is what an operator sees
+// during normal runtime, so a regression here surfaces as visual
+// drift on the radar.
+func TestDrawCenterPointStaticWhenIdle(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		sweep SweepIndicator
+	}{
+		{name: "nil indicator", sweep: nil},
+		{name: "indicator reports false", sweep: stubSweep{sweeping: false}},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			screen := tcell.NewSimulationScreen("UTF-8")
+			if err := screen.Init(); err != nil {
+				t.Fatalf("screen.Init: %v", err)
+			}
+
+			view := &View{sweep: testCase.sweep}
+			view.drawCenterPoint(screen, 10, 5)
+			screen.Show()
+
+			if got := cellMainRune(screen, 10, 5); got != 'X' {
+				t.Errorf("centre = %q, want 'X' (idle state)", got)
+			}
+		})
+	}
+}
+
+// TestDrawCenterPointAnimatesWhenSweeping locks the sweep-branch:
+// while the indicator reports true, the X is hidden and a '*' is
+// drawn at one of the 8 spinner positions around the centre. The
+// exact position depends on the clock; this test sweeps every
+// adjacent cell and asserts exactly one of them holds the '*' and
+// none of them holds an 'X'. Independent of the per-frame
+// position mapping covered by TestSpinnerOffsetWalksEightPositions.
+func TestDrawCenterPointAnimatesWhenSweeping(t *testing.T) {
+	t.Parallel()
+
+	screen := tcell.NewSimulationScreen("UTF-8")
+	if err := screen.Init(); err != nil {
+		t.Fatalf("screen.Init: %v", err)
+	}
+
+	const centerCol, centerRow = 10, 5
+
+	view := &View{sweep: stubSweep{sweeping: true}}
+	view.drawCenterPoint(screen, centerCol, centerRow)
+	screen.Show()
+
+	if got := cellMainRune(screen, centerCol, centerRow); got == 'X' {
+		t.Error("centre = 'X' while sweeping, want hidden")
+	}
+
+	stars := 0
+
+	for offsetY := -1; offsetY <= 1; offsetY++ {
+		for offsetX := -1; offsetX <= 1; offsetX++ {
+			if offsetX == 0 && offsetY == 0 {
+				continue
+			}
+
+			if cellMainRune(screen, centerCol+offsetX, centerRow+offsetY) == '*' {
+				stars++
+			}
+		}
+	}
+
+	if stars != 1 {
+		t.Errorf("spinner '*' count around centre = %d, want exactly 1", stars)
+	}
+}

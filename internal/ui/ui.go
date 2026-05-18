@@ -88,15 +88,26 @@ type NotificationController interface {
 	DismissAll()
 }
 
+// BiasTeeController abstracts the bias-tee toggle the key
+// dispatcher fires on 'b'. The implementation in main.go reads
+// the live chip state via adsb.BiasTeeEnabled, flips it via
+// adsb.SetBiasTee, and surfaces failures as slog.Warn so the
+// notification bar renders them. Unsupported sources (BEAST,
+// replay) should log a one-line warn and otherwise no-op.
+type BiasTeeController interface {
+	ToggleBiasTee()
+}
+
 // KeyControllers bundles every dependency HandleKeyInput needs
 // so the function signature stays inside revive's argument-count
-// limit (5 incl. event). Cheap to construct at the call site
-// via NewKeyControllers.
+// limit. Cheap to construct at the call site via
+// NewKeyControllers.
 type KeyControllers struct {
-	App    AppController
-	Radar  RadarController
-	Filter PlaneFilterController
-	Notifs NotificationController
+	App     AppController
+	Radar   RadarController
+	Filter  PlaneFilterController
+	Notifs  NotificationController
+	BiasTee BiasTeeController
 }
 
 // HandleKeyInput is the global key dispatcher: Esc/q stop the
@@ -119,17 +130,18 @@ func HandleKeyInput(event *tcell.EventKey, ctrls KeyControllers) *tcell.EventKey
 	return event
 }
 
-// NewKeyControllers bundles the four controllers HandleKeyInput
-// needs into one value. Exists so main.go's SetInputCapture
-// closure reads cleanly and so tests can construct a controller
-// set with their own fakes.
+// NewKeyControllers bundles the controllers HandleKeyInput needs
+// into one value. Exists so main.go's SetInputCapture closure
+// reads cleanly and so tests can construct a controller set with
+// their own fakes.
 func NewKeyControllers(
 	app AppController,
 	radarPanel RadarController,
 	filter PlaneFilterController,
 	notifs NotificationController,
+	biasTee BiasTeeController,
 ) KeyControllers {
-	return KeyControllers{App: app, Radar: radarPanel, Filter: filter, Notifs: notifs}
+	return KeyControllers{App: app, Radar: radarPanel, Filter: filter, Notifs: notifs, BiasTee: biasTee}
 }
 
 // dispatchRune is a strategy-table dispatcher keyed on the
@@ -157,6 +169,8 @@ func dispatchRune(pressed rune, ctrls KeyControllers) {
 		ctrls.Notifs.DismissFront()
 	case 'X':
 		ctrls.Notifs.DismissAll()
+	case 'b':
+		ctrls.BiasTee.ToggleBiasTee()
 	default:
 		// No-op for unrecognised keys; event still bubbles up.
 	}
@@ -292,11 +306,20 @@ func UpdateStatsPanel(
 	statsPanel.SetText(FormatStatsText(AggregateStats(stream, tracker, myLocation, planeList)))
 }
 
+// BiasTeeReader is the read-only slice of *adsb.ADSB the footer
+// needs: whether the active source supports bias-tee, and the
+// live chip state when it does. Hoisted so UpdateFooter is
+// testable with a stub.
+type BiasTeeReader interface {
+	BiasTeeSupported() bool
+	BiasTeeEnabled() (bool, error)
+}
+
 // UpdateFooter rewrites the footer command/status line. Pulled
 // out to internal/ui so the footer string format is testable
 // against a fake radar source.
-func UpdateFooter(commands *tview.TextView, radarPanel *radar.View, positionedOnly bool) {
-	commands.SetText(FormatFooter(footerStateFromRadar(radarPanel, positionedOnly)))
+func UpdateFooter(commands *tview.TextView, radarPanel *radar.View, biasTee BiasTeeReader, positionedOnly bool) {
+	commands.SetText(FormatFooter(footerStateFromRadar(radarPanel, biasTee, positionedOnly)))
 }
 
 // FooterState is the snapshot of UI settings the footer line
@@ -310,6 +333,8 @@ type FooterState struct {
 	HeatEnabled      bool
 	AutoScopeEnabled bool
 	PositionedOnly   bool
+	BiasTeeSupported bool
+	BiasTeeEnabled   bool
 }
 
 // FormatFooter renders a FooterState into the tview-coloured
@@ -317,7 +342,8 @@ type FooterState struct {
 func FormatFooter(state FooterState) string {
 	return fmt.Sprintf(
 		"[::b]Tracking: %d - [::b]Range (+/-): %0.0f nm - [::b]Heading (h): %t - "+
-			"[::b]Trail (t): %t - [::b]Heat (m): %t - [::b]Autoscope (a): %t - [::b]Positioned (p): %t",
+			"[::b]Trail (t): %t - [::b]Heat (m): %t - [::b]Autoscope (a): %t - "+
+			"[::b]Positioned (p): %t - [::b]Bias-T (b): %s",
 		state.AircraftCount,
 		state.ScopeRange,
 		state.HeadingEnabled,
@@ -325,10 +351,48 @@ func FormatFooter(state FooterState) string {
 		state.HeatEnabled,
 		state.AutoScopeEnabled,
 		state.PositionedOnly,
+		formatBiasTee(state),
 	)
 }
 
-func footerStateFromRadar(radarPanel *radar.View, positionedOnly bool) FooterState {
+// formatBiasTee renders the bias-tee footer cell. Sources without
+// a controllable bias-tee (BEAST, replay) show n/a so the operator
+// knows the toggle is inert; the local-SDR path shows the live
+// on/off bit read from the chip.
+func formatBiasTee(state FooterState) string {
+	switch {
+	case !state.BiasTeeSupported:
+		return "n/a"
+	case state.BiasTeeEnabled:
+		return "on"
+	default:
+		return "off"
+	}
+}
+
+// readBiasTeeState polls the BiasTeeReader for the live chip state.
+// A read error while supported=true is suppressed (footer falls
+// back to "off") — the next tick will either recover or the stream
+// will exit and flip supported=false on its own.
+//
+//nolint:nonamedreturns // (supported, enabled) reads clearer named at this signature.
+func readBiasTeeState(biasTee BiasTeeReader) (supported, enabled bool) {
+	supported = biasTee.BiasTeeSupported()
+	if !supported {
+		return false, false
+	}
+
+	got, err := biasTee.BiasTeeEnabled()
+	if err != nil {
+		return true, false
+	}
+
+	return true, got
+}
+
+func footerStateFromRadar(radarPanel *radar.View, biasTee BiasTeeReader, positionedOnly bool) FooterState {
+	supported, enabled := readBiasTeeState(biasTee)
+
 	return FooterState{
 		AircraftCount:    radarPanel.GetAircraftCount(),
 		ScopeRange:       radarPanel.GetScopeRange(),
@@ -337,5 +401,7 @@ func footerStateFromRadar(radarPanel *radar.View, positionedOnly bool) FooterSta
 		HeatEnabled:      radarPanel.GetHeatIndicatorEnabled(),
 		AutoScopeEnabled: radarPanel.GetAutoScopeEnabled(),
 		PositionedOnly:   positionedOnly,
+		BiasTeeSupported: supported,
+		BiasTeeEnabled:   enabled,
 	}
 }

@@ -29,6 +29,7 @@ func TestParseFlagsEveryFlagSetsTarget(t *testing.T) {
 		"--beast", "radio:30005",
 		"--replay-iq", "/tmp/cap.iq",
 		"--auto-sweep",
+		"--bias-t",
 		"--gpsd", "10.0.0.1:2947",
 		"--battery", "/sys/class/power_supply/foo/uevent",
 		"--check", "30s",
@@ -49,6 +50,10 @@ func TestParseFlagsEveryFlagSetsTarget(t *testing.T) {
 
 	if !cfg.autoSweep {
 		t.Error("autoSweep = false, want true")
+	}
+
+	if !cfg.biasTee {
+		t.Error("biasTee = false, want true")
 	}
 
 	if cfg.gpsdAddress != "10.0.0.1:2947" {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -36,6 +37,21 @@ const (
 	trailColor2 = 0x808080
 	trailColor3 = 0xa0a0a0
 
+	// sweepSpinnerFrames is the number of positions in the
+	// "loading" ring drawn around the radar centre while the
+	// gain sweep is in progress. Eight matches a compass rose
+	// (N, NE, E, SE, S, SW, W, NW), which is the historical
+	// radar-style layout.
+	sweepSpinnerFrames = 8
+
+	// sweepSpinnerStep is how long each spinner frame stays
+	// visible. With sweepSpinnerFrames=8, a full rotation takes
+	// 2 s — fast enough to feel alive at the operator console,
+	// slow enough that single-cell movement reads cleanly on a
+	// 60-Hz terminal. The main UI ticker also drops to this
+	// cadence while sweeping so the redraw rate matches.
+	sweepSpinnerStep = 250 * time.Millisecond
+
 	// Flight-level bucket boundaries (in feet) used by
 	// getFlightLevelColor. Each constant is the exclusive upper
 	// bound of a colour band; altitudes at or above the highest
@@ -51,6 +67,16 @@ const (
 	flightLevelSub600 = 60000
 )
 
+// SweepIndicator reports whether a long-running boot operation
+// (typically the SDR gain auto-sweep) is in progress. The radar
+// uses this to swap its centre crosshair for a circling spinner
+// so the operator sees that the system is making progress even
+// before any frames flow. The full *adsb.ADSB satisfies this
+// interface; tests can pass a small stub.
+type SweepIndicator interface {
+	Sweeping() bool
+}
+
 // View is a custom tview component.
 type View struct {
 	*tview.Box
@@ -63,11 +89,14 @@ type View struct {
 	myLocation       *location.Location
 	myScope          *scope.Scope
 	heat             *heatMap
+	sweep            SweepIndicator
 	mu               sync.RWMutex
 }
 
-// New initializes a new radar scope view.
-func New(planes *airplanes.Airplanes, myLocation *location.Location) *View {
+// New initializes a new radar scope view. sweep may be nil for
+// callers (tests, replay-mode) that don't have a real sweep
+// source — the centre crosshair stays static in that case.
+func New(planes *airplanes.Airplanes, myLocation *location.Location, sweep SweepIndicator) *View {
 	return &View{
 		Box:              tview.NewBox().SetBorder(false).SetBorderPadding(1, 1, 1, 1),
 		headingIndicator: true,
@@ -78,6 +107,7 @@ func New(planes *airplanes.Airplanes, myLocation *location.Location) *View {
 		planes:           planes,
 		myLocation:       myLocation,
 		heat:             newHeatMap(),
+		sweep:            sweep,
 	}
 }
 
@@ -279,8 +309,56 @@ func (r *View) calculateScales(width, height int) (float64, float64) {
 	return xScale, yScale
 }
 
-func (*View) drawCenterPoint(screen tcell.Screen, centerX, centerY int) {
-	screen.SetContent(centerX, centerY, 'X', nil, tcell.StyleDefault.Foreground(tcell.ColorDarkMagenta))
+// drawCenterPoint draws the receiver marker at the radar's centre.
+// Default: a static 'X' in dark magenta. While the supplied sweep
+// indicator reports true the X is hidden and a single bright dot
+// circles the centre cell at the 8 cardinal/intercardinal
+// positions, advancing one step per sweepSpinnerStep — the
+// operator gets a clear "boot still in progress" cue while the
+// auto-sweep walks the gain grid and no frames are flowing yet.
+func (r *View) drawCenterPoint(screen tcell.Screen, centerX, centerY int) {
+	if r.sweep == nil || !r.sweep.Sweeping() {
+		screen.SetContent(centerX, centerY, 'X', nil, tcell.StyleDefault.Foreground(tcell.ColorDarkMagenta))
+
+		return
+	}
+
+	dx, dy := spinnerOffset(time.Now())
+	screen.SetContent(centerX+dx, centerY+dy, '*', nil,
+		tcell.StyleDefault.Foreground(tcell.ColorYellow))
+}
+
+// spinnerPositions is the clockwise sequence of (dx, dy) offsets
+// the radar's centre spinner cycles through during a sweep.
+// Indexed by frame number: 0 = N, 1 = NE, 2 = E, 3 = SE, 4 = S,
+// 5 = SW, 6 = W, 7 = NW. Layout matches the radar.go compass
+// indicators so a viewer reads the rotation direction
+// intuitively (clockwise like a real radar's PPI sweep).
+//
+//nolint:gochecknoglobals // read-only lookup table, scoped to the spinner animation.
+var spinnerPositions = [sweepSpinnerFrames][2]int{
+	{0, -1},  // N
+	{1, -1},  // NE
+	{1, 0},   // E
+	{1, 1},   // SE
+	{0, 1},   // S
+	{-1, 1},  // SW
+	{-1, 0},  // W
+	{-1, -1}, // NW
+}
+
+// spinnerOffset maps the supplied wall-clock instant onto one of
+// the eight (dx, dy) positions around the radar centre. The
+// rotation is purely a function of time, so a new Draw call (even
+// out-of-band from the UI ticker) always lands on the position
+// the clock dictates — no frame-counter state to keep in sync.
+//
+//nolint:nonamedreturns // (dx, dy) reads clearer named at this signature.
+func spinnerOffset(now time.Time) (dx, dy int) {
+	frame := int(now.UnixNano()/sweepSpinnerStep.Nanoseconds()) % sweepSpinnerFrames
+	pos := spinnerPositions[frame]
+
+	return pos[0], pos[1]
 }
 
 func (*View) drawCompassIndicators(

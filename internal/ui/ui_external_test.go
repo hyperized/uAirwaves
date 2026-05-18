@@ -1,6 +1,7 @@
 package ui_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -13,6 +14,12 @@ import (
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/radar"
 )
+
+// errSyntheticBiasRead is the static sentinel for the
+// "BiasTeeReader.BiasTeeEnabled errored" branch in
+// footerStateFromRadar; err113 forbids ad-hoc errors.New in test
+// bodies because identity-based assertions are fragile.
+var errSyntheticBiasRead = errors.New("synthetic bias-tee read failure")
 
 // Repeated test fixtures: kept package-private so the goconst
 // linter doesn't keep flagging the same literals across cases.
@@ -106,6 +113,31 @@ type fakeNotifs struct {
 func (f *fakeNotifs) DismissFront() { f.dismissFronts++ }
 func (f *fakeNotifs) DismissAll()   { f.dismissAll++ }
 
+// fakeBias implements BiasTeeController and counts ToggleBiasTee
+// invocations so the dispatcher table can assert the right key
+// fired.
+type fakeBias struct {
+	toggles int
+}
+
+func (f *fakeBias) ToggleBiasTee() { f.toggles++ }
+
+// fakeBiasReader implements ui.BiasTeeReader for footer tests.
+// supportedVal toggles the n/a branch; enabledVal drives the
+// on/off render; readErr exercises the "supported but read
+// failed" fallback (footer should treat it as off).
+type fakeBiasReader struct {
+	supportedVal bool
+	enabledVal   bool
+	readErr      error
+}
+
+func (f fakeBiasReader) BiasTeeSupported() bool { return f.supportedVal }
+
+func (f fakeBiasReader) BiasTeeEnabled() (bool, error) {
+	return f.enabledVal, f.readErr
+}
+
 // keyDispatchCase pins one row of the HandleKeyInput dispatch
 // table. Each int is the expected per-method call count for the
 // matching fakeRadar field; wantAppStops counts fakeApp.Stop.
@@ -122,6 +154,7 @@ type keyDispatchCase struct {
 	wantPositionedTog int
 	wantDismissFront  int
 	wantDismissAll    int
+	wantBiasToggles   int
 }
 
 // keyDispatchCases is the HandleKeyInput dispatch table. Hoisted
@@ -154,6 +187,10 @@ var keyDispatchCases = []keyDispatchCase{
 		name: "X dismisses all notifications", event: tcell.NewEventKey(tcell.KeyRune, 'X', tcell.ModNone),
 		wantDismissAll: 1,
 	},
+	{
+		name: "b toggles bias-tee", event: tcell.NewEventKey(tcell.KeyRune, 'b', tcell.ModNone),
+		wantBiasToggles: 1,
+	},
 	{name: "unrecognised rune is no-op", event: tcell.NewEventKey(tcell.KeyRune, 'z', tcell.ModNone)},
 }
 
@@ -182,8 +219,9 @@ func assertKeyDispatch(t *testing.T, testCase keyDispatchCase) {
 	rdr := &fakeRadar{}
 	flt := &fakeFilter{}
 	nts := &fakeNotifs{}
+	bia := &fakeBias{}
 
-	returned := ui.HandleKeyInput(testCase.event, ui.NewKeyControllers(app, rdr, flt, nts))
+	returned := ui.HandleKeyInput(testCase.event, ui.NewKeyControllers(app, rdr, flt, nts, bia))
 	if returned != testCase.event {
 		t.Errorf("HandleKeyInput should return event unchanged; got %v want %v", returned, testCase.event)
 	}
@@ -199,6 +237,7 @@ func assertKeyDispatch(t *testing.T, testCase keyDispatchCase) {
 		wantPositionedTog: flt.positionedToggles,
 		wantDismissFront:  nts.dismissFronts,
 		wantDismissAll:    nts.dismissAll,
+		wantBiasToggles:   bia.toggles,
 	}
 
 	if got != (keyDispatchCase{
@@ -212,6 +251,7 @@ func assertKeyDispatch(t *testing.T, testCase keyDispatchCase) {
 		wantPositionedTog: testCase.wantPositionedTog,
 		wantDismissFront:  testCase.wantDismissFront,
 		wantDismissAll:    testCase.wantDismissAll,
+		wantBiasToggles:   testCase.wantBiasToggles,
 	}) {
 		t.Errorf("dispatch counts mismatch\n got: %+v\nwant: %+v", got, testCase)
 	}
@@ -412,12 +452,12 @@ func TestUpdateFooterReadsRadarState(t *testing.T) {
 
 	planeList := airplanes.New()
 	myLocation := location.New()
-	radarPanel := radar.New(planeList, myLocation)
+	radarPanel := radar.New(planeList, myLocation, nil)
 	radarPanel.SetScopeRange(25)
 
 	commands := tview.NewTextView()
 
-	ui.UpdateFooter(commands, radarPanel, true)
+	ui.UpdateFooter(commands, radarPanel, fakeBiasReader{}, true)
 
 	got := commands.GetText(true)
 	if !strings.Contains(got, "Range (+/-): 25 nm") {
@@ -426,6 +466,53 @@ func TestUpdateFooterReadsRadarState(t *testing.T) {
 
 	if !strings.Contains(got, "Positioned (p): true") {
 		t.Errorf("UpdateFooter text = %q, want substring 'Positioned (p): true'", got)
+	}
+
+	if !strings.Contains(got, "Bias-T (b): n/a") {
+		t.Errorf("UpdateFooter text = %q, want substring 'Bias-T (b): n/a' (unsupported reader)", got)
+	}
+}
+
+// TestUpdateFooterReadsBiasTeeState exercises the supported
+// branches of footerStateFromRadar — both on and off. The reader's
+// readErr path drives the "supported but read failed" fallback,
+// which footerStateFromRadar treats as off.
+func TestUpdateFooterReadsBiasTeeState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		reader fakeBiasReader
+		want   string
+	}{
+		{name: "supported on", reader: fakeBiasReader{supportedVal: true, enabledVal: true}, want: "Bias-T (b): on"},
+		{name: "supported off", reader: fakeBiasReader{supportedVal: true, enabledVal: false}, want: "Bias-T (b): off"},
+		{
+			name: "supported but read failed",
+			reader: fakeBiasReader{
+				supportedVal: true,
+				enabledVal:   true, // ignored when readErr != nil
+				readErr:      errSyntheticBiasRead,
+			},
+			want: "Bias-T (b): off",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			planeList := airplanes.New()
+			myLocation := location.New()
+			radarPanel := radar.New(planeList, myLocation, nil)
+
+			commands := tview.NewTextView()
+			ui.UpdateFooter(commands, radarPanel, testCase.reader, false)
+
+			if got := commands.GetText(true); !strings.Contains(got, testCase.want) {
+				t.Errorf("UpdateFooter text = %q, want substring %q", got, testCase.want)
+			}
+		})
 	}
 }
 
@@ -549,23 +636,59 @@ func TestUpdateStatsPanelWritesText(t *testing.T) {
 // TestFormatFooter pins the exact rendered footer string for a
 // fully-populated FooterState — this is the single line shown
 // across the bottom of the UI, so any format drift is visible.
+// Three rows so every bias-tee branch (on / off / n/a) is pinned.
 func TestFormatFooter(t *testing.T) {
 	t.Parallel()
 
-	got := ui.FormatFooter(ui.FooterState{
-		AircraftCount:    7,
-		ScopeRange:       50,
-		HeadingEnabled:   true,
-		TrailEnabled:     false,
-		HeatEnabled:      true,
-		AutoScopeEnabled: false,
-		PositionedOnly:   true,
-	})
+	tests := []struct {
+		name  string
+		state ui.FooterState
+		want  string
+	}{
+		{
+			name: "bias-tee unsupported",
+			state: ui.FooterState{
+				AircraftCount:    7,
+				ScopeRange:       50,
+				HeadingEnabled:   true,
+				TrailEnabled:     false,
+				HeatEnabled:      true,
+				AutoScopeEnabled: false,
+				PositionedOnly:   true,
+			},
+			want: "[::b]Tracking: 7 - [::b]Range (+/-): 50 nm - [::b]Heading (h): true - " +
+				"[::b]Trail (t): false - [::b]Heat (m): true - [::b]Autoscope (a): false - " +
+				"[::b]Positioned (p): true - [::b]Bias-T (b): n/a",
+		},
+		{
+			name: "bias-tee on",
+			state: ui.FooterState{
+				BiasTeeSupported: true,
+				BiasTeeEnabled:   true,
+			},
+			want: "[::b]Tracking: 0 - [::b]Range (+/-): 0 nm - [::b]Heading (h): false - " +
+				"[::b]Trail (t): false - [::b]Heat (m): false - [::b]Autoscope (a): false - " +
+				"[::b]Positioned (p): false - [::b]Bias-T (b): on",
+		},
+		{
+			name: "bias-tee off",
+			state: ui.FooterState{
+				BiasTeeSupported: true,
+				BiasTeeEnabled:   false,
+			},
+			want: "[::b]Tracking: 0 - [::b]Range (+/-): 0 nm - [::b]Heading (h): false - " +
+				"[::b]Trail (t): false - [::b]Heat (m): false - [::b]Autoscope (a): false - " +
+				"[::b]Positioned (p): false - [::b]Bias-T (b): off",
+		},
+	}
 
-	want := "[::b]Tracking: 7 - [::b]Range (+/-): 50 nm - [::b]Heading (h): true - " +
-		"[::b]Trail (t): false - [::b]Heat (m): true - [::b]Autoscope (a): false - [::b]Positioned (p): true"
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 
-	if got != want {
-		t.Errorf("FormatFooter mismatch\ngot:  %q\nwant: %q", got, want)
+			if got := ui.FormatFooter(testCase.state); got != testCase.want {
+				t.Errorf("FormatFooter mismatch\ngot:  %q\nwant: %q", got, testCase.want)
+			}
+		})
 	}
 }
