@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/stratoberry/go-gpsd"
@@ -19,6 +20,13 @@ var (
 	// trigger so the outer loop does not silently exit on a
 	// remote disconnect.
 	errSessionClosed = errors.New("gpsd session closed by server")
+	// errTPVTimeout is returned by watchOnce when the watchdog
+	// notices no TPV report has been delivered for tpvTimeout.
+	// gpsd normally streams TPV at 1 Hz regardless of fix state,
+	// so a 30 s gap means either gpsd died quietly or the TCP
+	// socket stalled (no FIN, no data). Both call for a fresh
+	// connect, which the outer reconnect loop handles.
+	errTPVTimeout = errors.New("no TPV report received within watchdog window")
 )
 
 // Session defines the interface for a gpsd session.
@@ -93,12 +101,26 @@ func WithReconnect(reconnect bool) Option {
 const (
 	reconnectBaseDelay = 1 * time.Second
 	reconnectMaxDelay  = 30 * time.Second
+	// tpvTimeout is the watchdog window. gpsd streams TPV at 1 Hz
+	// even when the receiver has no fix (mode=1), so a 30 s gap
+	// is well outside normal operation and almost certainly a
+	// stalled connection. The watchdog returns errTPVTimeout to
+	// force a reconnect; without it the outer loop would block
+	// forever on a silently-broken socket. 30 s also matches the
+	// reconnect backoff cap so a flapping link doesn't busy-loop.
+	tpvTimeout = 30 * time.Second
+	// tpvWatchdogTick is how often the watchdog checks the
+	// last-TPV timestamp. A 1 Hz tick is well below tpvTimeout
+	// so the timeout fires within ~1 s of the gap exceeding the
+	// threshold.
+	tpvWatchdogTick = 1 * time.Second
 )
 
 // Watch starts the GPS monitoring process.
 // When reconnect is enabled, it retries with exponential backoff on errors,
-// including the case where gpsd hangs up server-side (errSessionClosed).
-// Without that distinction, a remote disconnect looked identical to ctx
+// including the case where gpsd hangs up server-side (errSessionClosed) and
+// the case where the connection is silently stalled (errTPVTimeout).
+// Without those distinctions, a remote disconnect looked identical to ctx
 // cancellation and the outer loop exited silently.
 func (g *GPS) Watch(ctx context.Context, myLocation *location.Location) error {
 	backoff := reconnectBaseDelay
@@ -131,27 +153,85 @@ func (g *GPS) watchOnce(ctx context.Context, myLocation *location.Location) erro
 
 	defer g.disconnect()
 
-	g.session.AddFilter("TPV", func(t any) {
-		if tpvReport, ok := t.(*gpsd.TPVReport); ok {
-			myLocation.Update(
-				location.WithMode(int(tpvReport.Mode)),
-				location.WithLatitude(tpvReport.Lat),
-				location.WithLongitude(tpvReport.Lon),
-				location.WithAltitude(tpvReport.Alt),
-			)
-		}
-	})
+	// lastTPV stores time.Now().UnixNano() of the most recent
+	// TPV delivery so the watchdog can spot a stalled socket.
+	// Initialised to "now" so the first watchdog tick doesn't
+	// fire immediately on a freshly-opened session.
+	var lastTPV atomic.Int64
+	lastTPV.Store(time.Now().UnixNano())
+
+	// prevMode tracks the last delivered TPV mode so we can
+	// emit a one-shot info-level log on every transition —
+	// "GPS mode change from=1 to=3" tells the operator the
+	// receiver acquired a fix even if the rest of the UI is
+	// idle. -1 marks the pre-first-TPV sentinel.
+	var prevMode atomic.Int32
+	prevMode.Store(-1)
+
+	g.session.AddFilter("TPV", buildTPVHandler(myLocation, &lastTPV, &prevMode))
 
 	done := g.session.Watch()
 
-	select {
-	case <-done:
-		// gpsd's done channel fired without ctx being cancelled —
-		// the server hung up. Surface a sentinel so Watch can
-		// distinguish this from a clean shutdown and reconnect.
-		return errSessionClosed
-	case <-ctx.Done():
-		return nil
+	return waitForSession(ctx, done, &lastTPV, tpvWatchdogTick, tpvTimeout)
+}
+
+// buildTPVHandler returns the gpsd Filter callback bound to the
+// shared lastTPV / prevMode watchdog state. Pulled out of
+// watchOnce so the closure body stays inside revive's
+// cognitive-complexity gate.
+func buildTPVHandler(myLocation *location.Location, lastTPV *atomic.Int64, prevMode *atomic.Int32) gpsd.Filter {
+	return func(t any) {
+		tpvReport, ok := t.(*gpsd.TPVReport)
+		if !ok {
+			return
+		}
+
+		lastTPV.Store(time.Now().UnixNano())
+
+		newMode := int32(tpvReport.Mode)
+		if oldMode := prevMode.Swap(newMode); oldMode != newMode && oldMode != -1 {
+			slog.Info("GPS mode change",
+				slog.Int("from", int(oldMode)),
+				slog.Int("to", int(newMode)),
+			)
+		}
+
+		myLocation.Update(
+			location.WithMode(int(tpvReport.Mode)),
+			location.WithLatitude(tpvReport.Lat),
+			location.WithLongitude(tpvReport.Lon),
+			location.WithAltitude(tpvReport.Alt),
+		)
+	}
+}
+
+// waitForSession blocks until the session's done channel fires,
+// the context is cancelled, or the watchdog notices a stalled
+// connection. tick controls how often the watchdog polls; timeout
+// is the maximum gap between TPV reports before the watchdog
+// forces a reconnect. Pulled out (and parameterised) so watchOnce
+// stays small and so internal tests can drive a fast watchdog.
+func waitForSession(
+	ctx context.Context, done <-chan bool, lastTPV *atomic.Int64, tick, timeout time.Duration,
+) error {
+	watchdog := time.NewTicker(tick)
+	defer watchdog.Stop()
+
+	for {
+		select {
+		case <-done:
+			// gpsd's done channel fired without ctx being cancelled —
+			// the server hung up. Surface a sentinel so Watch can
+			// distinguish this from a clean shutdown and reconnect.
+			return errSessionClosed
+		case <-ctx.Done():
+			return nil
+		case <-watchdog.C:
+			elapsed := time.Since(time.Unix(0, lastTPV.Load()))
+			if elapsed > timeout {
+				return errTPVTimeout
+			}
+		}
 	}
 }
 

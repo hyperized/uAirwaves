@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -529,5 +530,72 @@ func TestWatchCtxCancelDuringBackoff(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second): //nolint:mnd // would-fail-anyway deadline; passes well under 100ms in practice.
 		t.Fatal("Watch did not return after ctx cancel during backoff")
+	}
+}
+
+// TestWaitForSessionWatchdogFiresOnStall pins the contract that
+// waitForSession returns errTPVTimeout when no TPV has been seen
+// within the configured window — the defensive path against a
+// silently-stalled gpsd socket where Done would never fire.
+func TestWaitForSessionWatchdogFiresOnStall(t *testing.T) {
+	t.Parallel()
+
+	var lastTPV atomic.Int64
+	// Park lastTPV well in the past so the watchdog sees the
+	// gap on the very next tick.
+	lastTPV.Store(time.Now().Add(-1 * time.Second).UnixNano())
+
+	done := make(chan bool)
+
+	const (
+		tick    = 5 * time.Millisecond
+		timeout = 10 * time.Millisecond
+	)
+
+	err := waitForSession(t.Context(), done, &lastTPV, tick, timeout)
+	if !errors.Is(err, errTPVTimeout) {
+		t.Errorf("expected errTPVTimeout when no TPV in window, got %v", err)
+	}
+}
+
+// TestWaitForSessionTPVKeepsAlive pins the converse: a TPV
+// callback that bumps lastTPV inside the window keeps the
+// watchdog quiet. We simulate the callback by writing the
+// timestamp ourselves at half the timeout interval.
+func TestWaitForSessionTPVKeepsAlive(t *testing.T) {
+	t.Parallel()
+
+	var lastTPV atomic.Int64
+	lastTPV.Store(time.Now().UnixNano())
+
+	done := make(chan bool)
+
+	const (
+		tick      = 5 * time.Millisecond
+		timeout   = 50 * time.Millisecond
+		runFor    = 120 * time.Millisecond
+		bumpEvery = 20 * time.Millisecond
+	)
+
+	ctx, cancel := context.WithTimeout(t.Context(), runFor)
+	defer cancel()
+
+	go func() {
+		ticker := time.NewTicker(bumpEvery)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				lastTPV.Store(time.Now().UnixNano())
+			}
+		}
+	}()
+
+	err := waitForSession(ctx, done, &lastTPV, tick, timeout)
+	if err != nil {
+		t.Errorf("watchdog should stay quiet while TPVs arrive, got %v", err)
 	}
 }
