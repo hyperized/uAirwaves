@@ -5,6 +5,50 @@ import (
 	"time"
 )
 
+// TestWithPositionCapturesCurrentAltitude pins the contract that
+// each appended PositionEntry remembers the plane's altitude at
+// the moment the fix was sampled. The trail render uses that
+// snapshot to colour the dot by flight level flown; if the entry
+// carried no altitude, every trail dot would render at FL000.
+func TestWithPositionCapturesCurrentAltitude(t *testing.T) {
+	t.Parallel()
+
+	plane := New("ALT001")
+
+	plane.Update(WithAltitude(35000), WithPosition(52.0, 13.0))
+
+	history := plane.GetSnapshot().PositionHistory
+	if len(history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(history))
+	}
+
+	if got := history[0].Altitude; got != 35000 {
+		t.Errorf("entry.Altitude = %v, want 35000 (current plane altitude at append time)", got)
+	}
+
+	// Backdate to drop past the rate gate, then sample at a new altitude.
+	plane.mu.Lock()
+	plane.lastPositionTime = time.Now().Add(-2 * positionHistoryInterval)
+	plane.mu.Unlock()
+
+	plane.Update(WithAltitude(38000), WithPosition(52.1, 13.1))
+
+	history = plane.GetSnapshot().PositionHistory
+	if len(history) != 2 {
+		t.Fatalf("expected 2 history entries, got %d", len(history))
+	}
+
+	if got := history[1].Altitude; got != 38000 {
+		t.Errorf("second entry.Altitude = %v, want 38000 (snapshot at append time)", got)
+	}
+
+	// First entry must still carry the original altitude — the
+	// per-entry altitude is not a back-reference.
+	if got := history[0].Altitude; got != 35000 {
+		t.Errorf("first entry.Altitude was rewritten to %v; expected 35000 preserved", got)
+	}
+}
+
 // TestWithPositionAppendsAndRateLimits exercises WithPosition's
 // three observable behaviours:
 //

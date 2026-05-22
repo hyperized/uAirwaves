@@ -27,9 +27,12 @@ const (
 	squawkGeneralEmergency = "7700"
 )
 
-// PositionEntry holds a single historical lat/lon fix.
+// PositionEntry holds a single historical lat/lon fix. Altitude
+// captures the barometric altitude (feet) the plane was at when
+// the fix was sampled so the radar's trail render can colour each
+// dot by the flight level flown at that point.
 type PositionEntry struct {
-	Latitude, Longitude float64
+	Latitude, Longitude, Altitude float64
 }
 
 // Option is a function that modifies an Airplane.
@@ -234,8 +237,15 @@ func WithVertRate(vertRate float64) Option {
 	}
 }
 
-// WithPosition updates both latitude and longitude and appends the fix to position history
-// at most once per positionHistoryInterval to avoid filling history with near-identical entries.
+// WithPosition updates both latitude and longitude and appends
+// the fix to position history at most once per
+// positionHistoryInterval to avoid filling history with
+// near-identical entries. The current plane.altitude is captured
+// into the entry so trail rendering can colour each dot by the
+// flight level flown at that fix. WithAltitude is conventionally
+// applied earlier in the same Update call (see pkg/adsb/handle.go),
+// so the captured altitude is the one that arrived in the same
+// ADSB frame as the position.
 func WithPosition(latitude, longitude float64) Option {
 	return func(plane *Airplane) {
 		plane.latitude = max(min(latitude, maxLatitude), minLatitude)
@@ -247,7 +257,11 @@ func WithPosition(latitude, longitude float64) Option {
 
 		plane.lastPositionTime = time.Now()
 
-		entry := PositionEntry{Latitude: plane.latitude, Longitude: plane.longitude}
+		entry := PositionEntry{
+			Latitude:  plane.latitude,
+			Longitude: plane.longitude,
+			Altitude:  plane.altitude,
+		}
 		plane.positionHistory = append(plane.positionHistory, entry)
 
 		if len(plane.positionHistory) > maxPositionHistory {
