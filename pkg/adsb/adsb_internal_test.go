@@ -681,7 +681,7 @@ func TestApplyAirbornePositionRoutes(t *testing.T) {
 
 	// DF 17 with TC 11 (Airborne Position, barometric). Pair with
 	// a location set so resolveCPR returns ok=true and the apply
-	// branch reaches WithLatitude/WithLongitude.
+	// branch reaches WithPosition.
 	bytes := make([]byte, modes.LongFrameBytes)
 	bytes[0] = byte(modes.DFExtendedSquitter) << 3
 	bytes[1] = 0xBB
@@ -1219,10 +1219,10 @@ func TestApplyCommBIdentityRejectsMalformed(t *testing.T) {
 }
 
 // TestApplyAirbornePositionWithLocationAppliesLatLon reaches the
-// WithLatitude / WithLongitude branch in applyAirbornePosition.
-// With WithLocation set, resolveCPR always returns ok=true (local
-// reference), so a valid TC 11 frame plumbs both altitude and
-// position into the airplane snapshot.
+// WithPosition branch in applyAirbornePosition. With WithLocation
+// set, resolveCPR always returns ok=true (local reference), so a
+// valid TC 11 frame plumbs both altitude and position into the
+// airplane snapshot (and seeds PositionHistory for trail render).
 func TestApplyAirbornePositionWithLocationAppliesLatLon(t *testing.T) {
 	t.Parallel()
 
@@ -1252,7 +1252,11 @@ func TestApplyAirbornePositionWithLocationAppliesLatLon(t *testing.T) {
 	// rounding produces some lat/lon near the reference. We just
 	// assert the snapshot moved off (0, 0).
 	if snap.Latitude == 0 && snap.Longitude == 0 {
-		t.Error("position not applied via WithLatitude/WithLongitude")
+		t.Error("position not applied via WithPosition")
+	}
+
+	if len(snap.PositionHistory) == 0 {
+		t.Error("WithPosition did not seed PositionHistory; trail render will be empty")
 	}
 
 	if snap.Altitude == 0 {

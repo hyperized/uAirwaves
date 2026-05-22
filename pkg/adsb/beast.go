@@ -88,6 +88,17 @@ func (a *ADSB) streamBeast(ctx context.Context, planes *airplanes.Airplanes) err
 // until either the context cancels (returns nil) or the stream
 // errors (returns the wrapped error for streamBeast to log).
 //
+// Read and handle run in separate goroutines connected by a
+// buffered channel: the reader only does BEAST parsing and
+// publishes onto the channel, while this function drains the
+// channel into handleBeastFrame. Decoupling matters because the
+// remote demod1090 publisher drops frames on its own per-client
+// ring (default 256) when conn.Write backpressures — which it
+// does whenever the handler stalls (UI lock contention, GC,
+// burst of expensive plane.Update calls). Keeping the TCP socket
+// continuously drained at parse speed is what prevents the
+// server's "slow client" warning.
+//
 // A small watcher goroutine closes the connection on ctx.Done so
 // a blocked Read unblocks immediately — no need to set a periodic
 // SetReadDeadline on the conn.
@@ -107,23 +118,66 @@ func (a *ADSB) streamBeastOnce(ctx context.Context, planes *airplanes.Airplanes)
 
 	reader := beast.NewReader(&countingReader{inner: conn, counter: &a.bytesIn})
 
+	frames := make(chan beast.Frame, beastFrameQueueDepth)
+	errCh := make(chan error, 1)
+
+	go readBeastFrames(ctx, reader, frames, errCh)
+
+	for frame := range frames {
+		a.handleBeastFrame(frame, planes)
+	}
+
+	if ctx.Err() != nil {
+		return nil
+	}
+
+	// frames closed without a ctx cancel: the reader exited on a
+	// read error. errCh is buffered (depth 1) and the reader sends
+	// before closing frames, so the receive cannot block here.
+	readErr := <-errCh
+	if errors.Is(readErr, io.EOF) {
+		return errBeastServerHangup
+	}
+
+	return fmt.Errorf("adsb: beast read: %w", readErr)
+}
+
+// readBeastFrames is the reader-side goroutine spawned by
+// streamBeastOnce. It pulls frames off the BEAST reader as fast
+// as the parse path can produce them and hands them to the
+// handler over the buffered frames channel. Two exit paths:
+//
+//   - reader.Frame() returns an error: the error is published on
+//     errCh and frames is closed so the handler's range loop
+//     terminates cleanly. The caller distinguishes io.EOF (clean
+//     server hangup) from any other error.
+//   - ctx fires while the channel send is blocked (handler too
+//     slow AND the local buffer is full): the goroutine returns
+//     without writing errCh. frames is still closed via the
+//     deferred close, and the caller treats ctx.Err() != nil as
+//     the canonical "we cancelled" signal.
+//
+// The function is package-level (not a method) because it does
+// not touch ADSB state — it's a pure read-pump for the configured
+// reader and channels.
+func readBeastFrames(
+	ctx context.Context, reader *beast.Reader, frames chan<- beast.Frame, errCh chan<- error,
+) {
+	defer close(frames)
+
 	for {
 		frame, err := reader.Frame()
-		if err == nil {
-			a.handleBeastFrame(frame, planes)
+		if err != nil {
+			errCh <- err
 
-			continue
+			return
 		}
 
-		if ctx.Err() != nil {
-			return nil
+		select {
+		case frames <- frame:
+		case <-ctx.Done():
+			return
 		}
-
-		if errors.Is(err, io.EOF) {
-			return errBeastServerHangup
-		}
-
-		return fmt.Errorf("adsb: beast read: %w", err)
 	}
 }
 

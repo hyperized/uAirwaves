@@ -156,6 +156,14 @@ func TestBiasTeeStreamLifecycle(t *testing.T) {
 		t.Fatalf("Stream returned: %v", err)
 	}
 
+	// Stream exit must leave the chip with bias-tee off. We
+	// enabled it mid-stream above; without the shutdown defer
+	// disabling it, the fake's state would remain true and an
+	// external LNA would stay powered after the app exits.
+	if rcv.state {
+		t.Error("bias-tee state after Stream exit = true, want false (shutdown defer must disable)")
+	}
+
 	if stream.BiasTeeSupported() {
 		t.Error("BiasTeeSupported = true after Stream exit, want false")
 	}

@@ -59,6 +59,15 @@ const (
 	// single behavioural envelope covers every TCP-backed source.
 	beastReconnectBaseDelay = 1 * time.Second
 	beastReconnectMaxDelay  = 30 * time.Second
+
+	// beastFrameQueueDepth is the buffer between the BEAST reader
+	// goroutine and the handler goroutine. Sized to 4× the
+	// demod1090 beastsrv default per-client ring (256) so a burst
+	// big enough to fill the server's outbound queue is still
+	// absorbed locally without the parse loop stalling — which
+	// would otherwise backpressure into the TCP socket and trigger
+	// the server's "slow client" drops.
+	beastFrameQueueDepth = 1024
 )
 
 // errOpenReceiver is the static sentinel for the "couldn't open
@@ -517,6 +526,39 @@ func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
 	return a.streamSDR(ctx, planes)
 }
 
+// cleanupReceiver is streamSDR's defer body. Responsible for:
+//
+//  1. Powering down the bias-tee on every exit path (clean
+//     shutdown, error return, panic-recover). The RTL2832U holds
+//     its register state across Close(), so without this an
+//     external LNA / SAW filter stays powered after the app
+//     exits — the symptom users hit when running with --bias-t.
+//  2. Clearing the cached controller so post-exit UI calls
+//     return ErrBiasTeeUnsupported instead of dereferencing a
+//     closed receiver.
+//  3. Flipping connected → false.
+//  4. Closing the receiver.
+//
+// Extracted out of streamSDR so the read-loop function's
+// cognitive complexity stays inside revive's gate.
+func (a *ADSB) cleanupReceiver(receiver Receiver, controller biasTeeController) {
+	if controller != nil {
+		if err := controller.SetBiasTee(false); err != nil {
+			slog.Warn("adsb: power down bias-tee on shutdown", slog.Any("error", err))
+		}
+	}
+
+	a.biasMu.Lock()
+	a.biasTee = nil
+	a.biasMu.Unlock()
+
+	a.connected.Store(false)
+
+	if cerr := receiver.Close(); cerr != nil {
+		slog.Warn("adsb: receiver close", slog.Any("error", cerr))
+	}
+}
+
 // streamSDR runs the historical receiver+demodulator loop. Held
 // in its own method so Stream can pick between SDR and BEAST
 // without an inline branch obscuring the read-loop shape.
@@ -528,23 +570,16 @@ func (a *ADSB) streamSDR(ctx context.Context, planes *airplanes.Airplanes) error
 
 	a.connected.Store(true)
 
-	if controller, ok := receiver.(biasTeeController); ok {
+	var controller biasTeeController
+	if c, ok := receiver.(biasTeeController); ok {
+		controller = c
+
 		a.biasMu.Lock()
 		a.biasTee = controller
 		a.biasMu.Unlock()
 	}
 
-	defer func() {
-		a.biasMu.Lock()
-		a.biasTee = nil
-		a.biasMu.Unlock()
-
-		a.connected.Store(false)
-
-		if cerr := receiver.Close(); cerr != nil {
-			slog.Warn("adsb: receiver close", "error", cerr)
-		}
-	}()
+	defer a.cleanupReceiver(receiver, controller)
 
 	demodulator := a.demodulatorFactory()
 

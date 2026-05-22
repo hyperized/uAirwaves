@@ -203,14 +203,14 @@ func (a *ADSB) applyESMessage(plane *airplane.Airplane, icao modes.ICAO, msg mod
 func applyAirbornePosition(
 	stream *ADSB, plane *airplane.Airplane, icao modes.ICAO, msg modes.AirbornePositionMessage,
 ) []airplane.Option {
-	opts := make([]airplane.Option, 0, 3) //nolint:mnd // up to three options: altitude + lat + lon.
+	opts := make([]airplane.Option, 0, 2) //nolint:mnd // up to two options: altitude + position.
 
 	if msg.AltitudeError == nil {
 		opts = append(opts, airplane.WithAltitude(float64(msg.AltitudeFeet)))
 	}
 
 	if lat, lon, ok := stream.resolveCPR(icao, msg.CPR, plane.GetLastUpdate()); ok {
-		opts = append(opts, airplane.WithLatitude(lat), airplane.WithLongitude(lon))
+		opts = append(opts, airplane.WithPosition(lat, lon))
 	}
 
 	return opts
@@ -219,7 +219,7 @@ func applyAirbornePosition(
 func applySurfacePosition(
 	stream *ADSB, plane *airplane.Airplane, icao modes.ICAO, msg modes.SurfacePositionMessage,
 ) []airplane.Option {
-	opts := make([]airplane.Option, 0, 4) //nolint:mnd // up to four options: velocity + heading + lat + lon.
+	opts := make([]airplane.Option, 0, 3) //nolint:mnd // up to three options: velocity + heading + position.
 
 	if msg.GroundSpeedAvailable {
 		opts = append(opts, airplane.WithVelocity(msg.GroundSpeedKnots))
@@ -230,7 +230,7 @@ func applySurfacePosition(
 	}
 
 	if lat, lon, ok := stream.resolveCPR(icao, msg.CPR, plane.GetLastUpdate()); ok {
-		opts = append(opts, airplane.WithLatitude(lat), airplane.WithLongitude(lon))
+		opts = append(opts, airplane.WithPosition(lat, lon))
 	}
 
 	return opts
