@@ -46,6 +46,19 @@ linters:
       ignored-numbers: [ "0", "1", "2", "3" ] # quoted per v2.12 schema; these are often used as defaults, not magic numbers
     funlen:
       lines: 120
+  exclusions:
+    rules:
+      # pkg/airports/data.go is a generated table of airport
+      # coordinates (decimal-degree literals, long Name strings).
+      # mnd flags the lat/lon floats and revive's line-length-limit
+      # flags any entry whose Name pushes the row over 120 chars;
+      # both are noise on a generated data file. The regen workflow
+      # lives at pkg/airports/internal/gen/README.md.
+      - path: pkg/airports/data\.go
+        linters:
+          - mnd
+          - revive
+          - lll
 
 formatters:
   enable:

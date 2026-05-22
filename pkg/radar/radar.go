@@ -10,6 +10,7 @@ import (
 	"github.com/rivo/tview"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
+	"lab.hyperized.net/hyperized/uAirwaves/pkg/airports"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/scope"
 )
@@ -32,10 +33,15 @@ const (
 	circleMaxWidth         = 5
 	callsignMaxWidth       = 7
 
-	// Trail dot colours, from darkest (oldest entry) to lightest (most recent).
-	trailColor1 = 0x606060
-	trailColor2 = 0x808080
-	trailColor3 = 0xa0a0a0
+	// airportLabelPad is the pixel offset from the airport
+	// symbol to the start of its ICAO label. 2 columns leaves
+	// room for the symbol (1 col) plus a one-space gutter so
+	// labels don't collide with the marker glyph.
+	airportLabelPad = 2
+	// airportLabelWidth caps the label width so an unusually
+	// long ICAO can't bleed onto another airport's row. ICAO
+	// codes are 4 chars; the cap leaves a one-char safety margin.
+	airportLabelWidth = 5
 
 	// sweepSpinnerFrames is the number of positions in the
 	// "loading" ring drawn around the radar centre while the
@@ -85,6 +91,7 @@ type View struct {
 	trailIndicator   bool
 	heatIndicator    bool
 	autoScope        bool
+	airportIndicator bool
 	planes           *airplanes.Airplanes
 	myLocation       *location.Location
 	myScope          *scope.Scope
@@ -102,6 +109,7 @@ func New(planes *airplanes.Airplanes, myLocation *location.Location, sweep Sweep
 		headingIndicator: true,
 		trailIndicator:   true,
 		heatIndicator:    false,
+		airportIndicator: true,
 		myScope:          scope.New(),
 		autoScope:        true,
 		planes:           planes,
@@ -158,6 +166,25 @@ func (r *View) ToggleHeatIndicator() {
 	r.heatIndicator = !r.heatIndicator
 }
 
+// ToggleAirportIndicator toggles the static airport overlay
+// (curated set drawn beneath the live plane layer).
+func (r *View) ToggleAirportIndicator() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.airportIndicator = !r.airportIndicator
+}
+
+// GetAirportIndicatorEnabled returns whether the airport overlay
+// is currently visible. Used by the footer renderer so the
+// operator can see the toggle's state at a glance.
+func (r *View) GetAirportIndicatorEnabled() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.airportIndicator
+}
+
 // GetHeatIndicatorEnabled returns whether the heat map is enabled.
 func (r *View) GetHeatIndicatorEnabled() bool {
 	r.mu.RLock()
@@ -200,13 +227,13 @@ func (r *View) GetAircraftCount() int {
 	return r.planes.Count()
 }
 
-// drawToggles is a point-in-time copy of the four boolean
+// drawToggles is a point-in-time copy of the five boolean
 // indicators Draw consults. Bundled into a struct so the lock
 // window in snapshotToggles is a single statement and so the
 // downstream rendering helpers receive one read-only argument
 // instead of a fan of control-flag bools.
 type drawToggles struct {
-	heading, autoScope, heat, trail bool
+	heading, autoScope, heat, trail, airport bool
 }
 
 // Draw draws the radar scope view on the screen.
@@ -241,10 +268,21 @@ func (r *View) Draw(screen tcell.Screen) {
 	r.drawCenterPoint(screen, centerX, centerY)
 	r.drawCompassIndicators(screen, innerX, innerY, centerX, centerY, width, height)
 
-	// 3. Draw Planes (also accumulates heat as a side effect)
+	// 3. Draw Airports (static overlay, beneath the live plane
+	//    layer so plane markers always win on overlap).
+	if toggles.airport {
+		drawAirports(screen, airports.All(), airportFrame{
+			centerX: centerX, centerY: centerY,
+			xScale: xScale, yScale: yScale,
+			centerLat: centerLatitude, centerLon: centerLongitude,
+			scopeRange: r.myScope.GetCurrent(),
+		})
+	}
+
+	// 4. Draw Planes (also accumulates heat as a side effect)
 	r.drawPlanes(screen, planeList, centerX, centerY, xScale, yScale, centerLatitude, centerLongitude, toggles)
 
-	// 4. Decay and draw heat map last so nothing overwrites it
+	// 5. Decay and draw heat map last so nothing overwrites it
 	r.heat.decay()
 
 	if toggles.heat {
@@ -265,6 +303,7 @@ func (r *View) snapshotToggles() drawToggles {
 		autoScope: r.autoScope,
 		heat:      r.heatIndicator,
 		trail:     r.trailIndicator,
+		airport:   r.airportIndicator,
 	}
 }
 
@@ -414,25 +453,28 @@ func (r *View) drawPlanes(
 		r.heat.add(nmX, nmY)
 
 		if toggles.trail {
-			r.drawTrail(
+			drawTrail(
 				screen, plane.PositionHistory,
 				centerX, centerY, xScale, yScale,
 				centerLatitude, centerLongitude,
 			)
 		}
 
-		r.drawPlane(screen, plane, planeX, planeY, planeStyle, toggles)
+		drawPlane(screen, plane, planeX, planeY, planeStyle, toggles)
 	}
 }
 
-func (*View) drawPlane(
+func drawPlane(
 	screen tcell.Screen, plane airplane.Snapshot, planeX, planeY int, style tcell.Style, toggles drawToggles,
 ) {
 	altColor := getFlightLevelColor(plane.Altitude)
 
-	// Draw heading indicator line if heading is valid
+	// Draw heading indicator line if heading is valid. The heading
+	// line is a projection (where the plane *will* be), not a flown
+	// path, so it renders white — altitude colour is reserved for
+	// the trail, which represents actual flight levels flown.
 	if plane.Heading != -1 && toggles.heading {
-		headingStyle := tcell.StyleDefault.Foreground(altColor).Background(tcell.ColorBlack)
+		headingStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
 		drawHeadingLine(screen, planeX, planeY, plane.Heading, headingStyle)
 	}
 
@@ -455,22 +497,18 @@ func (*View) drawPlane(
 }
 
 // drawTrail renders historical position dots behind a plane.
-// Older entries are drawn in darker grey; the most recent in lighter grey.
-func (*View) drawTrail(
+// Each dot is coloured by the flight level the plane was at when
+// the fix was sampled (entry.Altitude) using the same palette the
+// plane symbol uses, so the operator reads the altitude profile
+// of the flight directly off the scope. Entries with unresolved
+// positions (lat/lon both zero) are skipped.
+func drawTrail(
 	screen tcell.Screen,
 	history []airplane.PositionEntry,
 	centerX, centerY int,
 	xScale, yScale, centerLatitude, centerLongitude float64,
 ) {
-	trailColors := []tcell.Color{
-		tcell.ColorGray,
-		tcell.NewHexColor(trailColor1),
-		tcell.NewHexColor(trailColor2),
-		tcell.NewHexColor(trailColor3),
-	}
-
-	historyLen := len(history)
-	for idx, entry := range history {
+	for _, entry := range history {
 		if entry.Latitude == 0 || entry.Longitude == 0 {
 			continue
 		}
@@ -483,13 +521,51 @@ func (*View) drawTrail(
 		screenX := centerX + int(nmX*xScale)
 		screenY := centerY - int(nmY*yScale/yMultiplier)
 
-		// Map entry index to a color bucket: older entries use darker colors.
-		// (idx * len) / historyLen with idx ∈ [0, historyLen-1] is always < len,
-		// so no clamp is needed.
-		colorIdx := (idx * len(trailColors)) / historyLen
-
-		style := tcell.StyleDefault.Foreground(trailColors[colorIdx]).Background(tcell.ColorBlack)
+		style := tcell.StyleDefault.
+			Foreground(getFlightLevelColor(entry.Altitude)).
+			Background(tcell.ColorBlack)
 		screen.SetContent(screenX, screenY, '·', nil, style)
+	}
+}
+
+// airportFrame is the projection context drawAirports needs:
+// screen-space centre, per-axis scales, receiver lat/lon, and
+// the active scope range. Bundled so drawAirports stays inside
+// revive's argument-count gate (and so future projection tweaks
+// touch one struct, not a fan of positional floats).
+type airportFrame struct {
+	centerX, centerY     int
+	xScale, yScale       float64
+	centerLat, centerLon float64
+	scopeRange           float64
+}
+
+// drawAirports renders the static airport overlay. Each entry
+// is projected with the same flat-earth math the planes use,
+// filtered to those within the current scope, and drawn as a
+// dim cyan ⊕ symbol followed by the ICAO label. The marker glyph
+// sits exactly on the airport's coordinate and the label trails
+// to the east — matching the plane convention.
+func drawAirports(screen tcell.Screen, list []airports.Airport, frame airportFrame) {
+	symbolStyle := tcell.StyleDefault.Foreground(tcell.ColorDarkCyan).Background(tcell.ColorBlack)
+
+	for _, airport := range list {
+		dLat := airport.Latitude - frame.centerLat
+		dLon := (airport.Longitude - frame.centerLon) * math.Cos(frame.centerLat*degreesToRadiansRatio)
+		nmY := dLat * nauticalMilePerDegree
+		nmX := dLon * nauticalMilePerDegree
+
+		if math.Sqrt(nmX*nmX+nmY*nmY) > frame.scopeRange {
+			continue
+		}
+
+		screenX := frame.centerX + int(nmX*frame.xScale)
+		screenY := frame.centerY - int(nmY*frame.yScale/yMultiplier)
+
+		screen.SetContent(screenX, screenY, '⊕', nil, symbolStyle)
+		tview.Print(screen, airport.ICAO,
+			screenX+airportLabelPad, screenY,
+			airportLabelWidth, tview.AlignLeft, tcell.ColorDarkCyan)
 	}
 }
 
