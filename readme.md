@@ -10,9 +10,11 @@ A single-binary TUI for the uConsole with a HackerGadgets Antenna board (GPS / S
 
   Both paths fold per-ICAO state into a live aircraft list with callsign / altitude / squawk / speed / heading / position / vertical rate.
 
-- **GPS** — talks to `gpsd` and pins a "you-are-here" reference. The ADS-B side reads it on every position frame so locally-unambiguous CPR resolves to lat/lon from a single airborne-position broadcast (no even/odd pairing wait).
+- **GPS** — talks to `gpsd` and pins a "you-are-here" reference. The ADS-B side reads it on every position frame so locally-unambiguous CPR resolves to lat/lon from a single airborne-position broadcast (no even/odd pairing wait). A watchdog forces a reconnect if no TPV report arrives in 30 s (silent socket stall), and every mode change (e.g. `no fix → 3D fix`) is surfaced in the in-app notification bar.
 - **Phantom-ICAO suppression** — address-parity Mode S frames (DF 0/4/5/16/20/21) only register a contact once the ICAO has been seen in a CRC-verified DF 11/17/18 frame; random noise stops minting ghosts. Backed by [`demod1090/icaofilter`](https://github.com/hyperized/demod1090/tree/main/icaofilter).
-- **Plotting** — radar / scope panels rendered in [`tview`](https://github.com/rivo/tview), heading vectors + position-history trails on by default, optional heatmap overlay.
+- **Plotting** — radar / scope panels rendered in [`tview`](https://github.com/rivo/tview). Trails are coloured by the altitude flown at each fix (so the climb/descent profile is readable straight off the scope); heading lines are white (a projection, not a flown path). An optional heatmap overlay tracks contact density.
+- **Airport overlay** — ~310 major civil airports (sourced from the OurAirports public-domain dataset) render as dim cyan `⊕ ICAO` markers on the scope, filtered to those inside the current range. Toggle with `l`.
+- **Flight details** — press `Enter` on the right-column plane list to open a detail panel for the highlighted contact: identity, altitude (with FL), heading, velocity (kt + km/h), vertical rate, position, distance + great-circle bearing from the receiver, age, message count, plus a single-flight mini-scope inset showing only that plane and its trail. `Esc` returns to the radar.
 - **Battery + system status** — secondary panels.
 
 ## Architecture
@@ -71,13 +73,20 @@ make build-macos      # local build for development
 
 | Key      | Action |
 |----------|--------|
-| `Esc` / `q` | Quit |
+| `q` | Quit |
+| `Esc` | Close flight-details panel if open; otherwise quit |
+| `Enter` | Open the flight-details panel for the highlighted plane in the right-column list |
+| `↑` / `↓` | Navigate the plane list (cursor index stays put across the per-tick rebuild; no wrap at the ends) |
 | `+` / `-` | Increase / decrease scope range |
 | `a` | Toggle auto-scope (fits scope to the farthest plane, rounded up to the next 20 nm; on by default) |
 | `h` | Toggle heading indicator (on by default) |
 | `t` | Toggle trail / position history (on by default) |
 | `m` | Toggle heatmap overlay (off by default) |
-| `p` | Toggle positioned-only sidebar filter (on by default — hides contacts without a CPR-resolved lat/lon) |
+| `l` | Toggle airport overlay (on by default) |
+| `b` | Toggle bias-tee on the SDR (powered off automatically on app shutdown) |
+| `x` / `X` | Dismiss the current / all queued notification-bar messages |
+
+The right-column list always shows only contacts with a resolved CPR position — position-less shadow planes never appear (this used to be the `p` toggle, now hard-wired on).
 
 Current state of every toggle is shown along the footer line.
 
@@ -125,23 +134,30 @@ Exit codes:
 ## Repository layout
 
 ```
-main.go                 — wiring only (workers, ticker, panic recovery, env precedence)
-internal/ui/            — pure UI helpers extracted out of main for testability (100% covered)
-   ui.go                  — header colours, key dispatch, plane list / footer / stats panel
-   filter.go              — sidebar PlaneFilter (positioned-only toggle)
+main.go                 — wiring only (workers, ticker, panic recovery, flag precedence)
+internal/ui/            — pure UI helpers extracted out of main for testability
+   ui.go                  — header colours, key dispatch, plane list / footer
+   flight_details.go      — per-plane detail panel renderer (identity, geometry, bearing)
+   selection.go           — picked-plane state for the details panel (index → ICAO mapping)
+   notifications.go       — in-app notification queue + slog handler + bar renderer
    stats.go               — stats panel aggregation
    worker.go              — LaunchWorker (panic recovery + WaitGroup wiring)
 pkg/adsb/               — Receiver/Demodulator factories, frame dispatch, CPR resolution
-   adsb.go                — Stream() branches between SDR and BEAST paths
+   adsb.go                — Stream() branches between SDR and BEAST paths; bias-tee
+                            powered off in the shutdown defer so external LNAs aren't left hot
    beast.go               — BEAST-over-TCP consumer (dial, reconnect, handleFrame bridge)
    handle.go              — per-DF dispatch into airplane state via icaofilter.Admit
-   replay.go              — UAIRWAVES_REPLAY_IQ file-backed receiver
-pkg/airplane/           — single-plane state + Snapshot (lock-free read path)
+   replay.go              — --replay-iq file-backed receiver
+pkg/airplane/           — single-plane state + Snapshot (lock-free read path). PositionEntry
+                          captures altitude at append time so trails can colour by flight level.
 pkg/airplanes/          — thread-safe map; Sorted() returns []Snapshot
+pkg/airports/           — embedded ~310-airport overlay set (CC0 OurAirports data, hand-picked
+                          ICAO list). Regen workflow + scripts live in internal/gen/.
 pkg/battery/            — power_supply uevent watcher (resilient to transient read errors)
-pkg/gps/                — gpsd client with reconnect-on-hangup (errSessionClosed sentinel)
+pkg/gps/                — gpsd client with reconnect-on-hangup + 30 s TPV watchdog
 pkg/location/           — receiver lat/lon
-pkg/radar/              — scope, plane rendering, heatmap, trails, auto-scope fit-to-farthest
+pkg/radar/              — scope, plane rendering, heatmap, altitude-coloured trails,
+                          auto-scope fit-to-farthest, single-flight MiniView, airport overlay
 pkg/scope/              — scope range arithmetic
 ```
 
