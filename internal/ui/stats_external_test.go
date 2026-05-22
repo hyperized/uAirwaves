@@ -12,6 +12,16 @@ import (
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
 )
 
+// Callsign fixtures reused across the stats-record subtests.
+// Hoisted out of the per-case struct literals so goconst stops
+// flagging the same six-byte literals across test files.
+const (
+	csFarthest       = "BAW123"
+	csHighest        = "DLH456"
+	csFarthestRecord = "KLM999"
+	csHighestRecord  = "QFA8"
+)
+
 // TestNewStatsTrackerSeedsSampleTime locks in the contract that
 // NewStatsTracker initialises the last-sample timestamp so the
 // first Sample call has a positive elapsed window.
@@ -137,9 +147,9 @@ func TestFormatStatsTextWithAggregates(t *testing.T) {
 		NearestDist:      1.5,
 		NearestCallsign:  "KLM1023",
 		FarthestDist:     42.0,
-		FarthestCallsign: "BAW123",
+		FarthestCallsign: csFarthest,
 		HighestAlt:       38000,
-		HighestCallsign:  "DLH456",
+		HighestCallsign:  csHighest,
 		FramesPerSec:     12.3,
 		RecoveredPerSec:  0.45,
 		TotalFrames:      999,
@@ -177,6 +187,125 @@ func newAirplaneAt(t *testing.T, icao, callsign string, lat, lon, alt float64) *
 	)
 
 	return plane
+}
+
+// TestFormatStatsTextWithRecords covers the session-record
+// appendix branches in FormatStatsText: when FarthestRecordDist
+// strictly exceeds the current FarthestDist (and likewise for
+// altitude), the line gains a dimmed "(<record> <callsign>)"
+// tail; when record == current the appendix is suppressed to
+// avoid showing the same value twice.
+func TestFormatStatsTextWithRecords(t *testing.T) {
+	t.Parallel()
+
+	got := ui.FormatStatsText(ui.StatsRender{
+		Tracked:                2,
+		Positioned:             2,
+		NearestDist:            5.0,
+		NearestCallsign:        "NEAR1",
+		FarthestDist:           42.0,
+		FarthestCallsign:       csFarthest,
+		HighestAlt:             38000,
+		HighestCallsign:        csHighest,
+		FarthestRecordDist:     186.9,
+		FarthestRecordCallsign: csFarthestRecord,
+		HighestRecordAlt:       45000,
+		HighestRecordCallsign:  csHighestRecord,
+	})
+
+	for _, want := range []string{
+		"42.0 nm  [gray]BAW123[white]  [gray](186.9 nm KLM999)[white]",
+		"38000 ft  [gray]DLH456[white]  [gray](45000 ft QFA8)[white]",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q; full:\n%s", want, got)
+		}
+	}
+}
+
+// TestFormatStatsTextRecordAlwaysShownWhenSet pins the
+// "record always visible" contract: once a record is set, the
+// dimmed (value callsign) appendix appears on every render —
+// even when the current value equals the record. Earlier code
+// suppressed the duplicate case, which produced a UX where the
+// record appeared to "vanish" the moment a new plane matched
+// or exceeded the prior peak; users reported this as a bug.
+func TestFormatStatsTextRecordAlwaysShownWhenSet(t *testing.T) {
+	t.Parallel()
+
+	got := ui.FormatStatsText(ui.StatsRender{
+		Tracked:                1,
+		Positioned:             1,
+		FarthestDist:           42.0,
+		FarthestCallsign:       csFarthest,
+		HighestAlt:             38000,
+		HighestCallsign:        csHighest,
+		FarthestRecordDist:     42.0,
+		FarthestRecordCallsign: csFarthest,
+		HighestRecordAlt:       38000,
+		HighestRecordCallsign:  csHighest,
+	})
+
+	if !strings.Contains(got, "(42.0 nm BAW123)") {
+		t.Errorf("farthest record appendix must show even when record == current; got:\n%s", got)
+	}
+
+	if !strings.Contains(got, "(38000 ft DLH456)") {
+		t.Errorf("highest record appendix must show even when record == current; got:\n%s", got)
+	}
+}
+
+// TestStatsTrackerRecordsMonotonic locks in the contract that
+// UpdateRecords only promotes; a lower observation must not pull
+// the record back down, and an empty callsign must not poison the
+// stored record (the typical "no positioned plane this tick"
+// case).
+func TestStatsTrackerRecordsMonotonic(t *testing.T) {
+	t.Parallel()
+
+	tracker := ui.NewStatsTracker()
+
+	tracker.UpdateRecords(150.0, csFarthestRecord, 40000, csHighestRecord)
+
+	// Lower observation — must not regress.
+	tracker.UpdateRecords(50.0, "BAW1", 10000, "DLH2")
+
+	dist, callsign := tracker.FarthestRecord()
+	if dist != 150.0 || callsign != csFarthestRecord {
+		t.Errorf("FarthestRecord = (%v, %q), want (150.0, KLM999)", dist, callsign)
+	}
+
+	alt, hcallsign := tracker.HighestRecord()
+	if alt != 40000 || hcallsign != csHighestRecord {
+		t.Errorf("HighestRecord = (%v, %q), want (40000, QFA8)", alt, hcallsign)
+	}
+
+	// Higher observation but no callsign — must not poison the record.
+	tracker.UpdateRecords(999.0, "", 99999, "")
+
+	dist, callsign = tracker.FarthestRecord()
+	if dist != 150.0 || callsign != csFarthestRecord {
+		t.Errorf("after empty-callsign update FarthestRecord = (%v, %q), want unchanged (150.0, KLM999)",
+			dist, callsign)
+	}
+
+	alt, hcallsign = tracker.HighestRecord()
+	if alt != 40000 || hcallsign != csHighestRecord {
+		t.Errorf("after empty-callsign update HighestRecord = (%v, %q), want unchanged (40000, QFA8)", alt, hcallsign)
+	}
+
+	// Higher observation with callsign — promotes.
+	tracker.UpdateRecords(200.0, "AFR42", 42000, "UAE11")
+
+	dist, callsign = tracker.FarthestRecord()
+	if dist != 200.0 || callsign != "AFR42" {
+		t.Errorf("FarthestRecord = (%v, %q), want (200.0, AFR42)", dist, callsign)
+	}
+
+	alt, hcallsign = tracker.HighestRecord()
+	if alt != 42000 || hcallsign != "UAE11" {
+		t.Errorf("HighestRecord = (%v, %q), want (42000, UAE11)", alt, hcallsign)
+	}
 }
 
 // TestAggregateStatsReducesPlanes drives the walking helper
@@ -250,6 +379,81 @@ func TestAggregateStatsReducesPlanes(t *testing.T) {
 
 	if render.HighestCallsign != "HIGH3" {
 		t.Errorf("HighestCallsign = %q, want HIGH3", render.HighestCallsign)
+	}
+}
+
+// TestAggregateStatsRecordPersistsAfterPrune reproduces the
+// exact user-reported bug: two planes are tracked; the farther
+// one sets the session record; then the record-holder is pruned
+// out of the plane list. The record must keep showing in the
+// next AggregateStats call.
+func TestAggregateStatsRecordPersistsAfterPrune(t *testing.T) {
+	t.Parallel()
+
+	myLocation := location.New(location.WithLatitude(52.0), location.WithLongitude(4.0))
+
+	planeList := airplanes.New()
+	planeList.Ensure("KLM123")
+	planeList.Ensure("BAW042")
+
+	klm, _ := planeList.Get("KLM123")
+	klm.Update(
+		airplane.WithCallsign("KLM123"),
+		airplane.WithLatitude(54.0),
+		airplane.WithLongitude(5.0),
+		airplane.WithAltitude(30000),
+	)
+
+	baw, _ := planeList.Get("BAW042")
+	baw.Update(
+		airplane.WithCallsign("BAW042"),
+		airplane.WithLatitude(56.0),
+		airplane.WithLongitude(8.0),
+		airplane.WithAltitude(38000),
+	)
+
+	tracker := ui.NewStatsTracker()
+	stream := adsb.New()
+
+	// Tick 1: both planes present. BAW042 is the farthest, so the
+	// record gets set to BAW042's distance.
+	render1 := ui.AggregateStats(stream, tracker, myLocation, planeList)
+
+	if render1.FarthestRecordCallsign != "BAW042" {
+		t.Fatalf("tick 1: FarthestRecordCallsign = %q, want BAW042 (record should be the farthest plane)",
+			render1.FarthestRecordCallsign)
+	}
+
+	recordedDist := render1.FarthestRecordDist
+
+	// Prune BAW042 with an immediate-cutoff threshold: any plane
+	// whose lastUpdate is before "now plus 1h" is removed, which
+	// covers both planes. Re-add only KLM123 to mimic "BAW042 is
+	// no longer in the list above".
+	planeList.Prune(-time.Hour) // negative threshold => cutoff in the future => prunes everything
+	planeList.Ensure("KLM123")
+
+	klm2, _ := planeList.Get("KLM123")
+	klm2.Update(
+		airplane.WithCallsign("KLM123"),
+		airplane.WithLatitude(54.0),
+		airplane.WithLongitude(5.0),
+		airplane.WithAltitude(30000),
+	)
+
+	// Tick 2: only KLM123 is tracked. The record must still point
+	// at BAW042 because StatsTracker holds it independently of
+	// the plane list.
+	render2 := ui.AggregateStats(stream, tracker, myLocation, planeList)
+
+	if render2.FarthestRecordDist != recordedDist {
+		t.Errorf("tick 2: FarthestRecordDist = %v, want %v (record must survive prune)",
+			render2.FarthestRecordDist, recordedDist)
+	}
+
+	if render2.FarthestRecordCallsign != "BAW042" {
+		t.Errorf("tick 2: FarthestRecordCallsign = %q, want BAW042 (record callsign must survive prune)",
+			render2.FarthestRecordCallsign)
 	}
 }
 

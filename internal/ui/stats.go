@@ -13,11 +13,18 @@ import (
 
 // StatsTracker keeps the prior tick's frame counters so the
 // stats panel can derive a per-second rate without each call to
-// adsb.Stats() mutating shared state.
+// adsb.Stats() mutating shared state. It also remembers the
+// session-peak farthest distance and highest altitude so the
+// panel can show a record alongside the current value.
 type StatsTracker struct {
 	lastTotal     uint64
 	lastRecovered uint64
 	lastSampledAt time.Time
+
+	farthestRecordDist     float64
+	farthestRecordCallsign string
+	highestRecordAlt       float64
+	highestRecordCallsign  string
 }
 
 // NewStatsTracker returns a tracker seeded with the construction
@@ -50,6 +57,43 @@ func (t *StatsTracker) Sample(stats adsb.Stats) (framesPerSec, recoveredPerSec f
 	return framesPerSec, recoveredPerSec
 }
 
+// UpdateRecords promotes the current observation to a new
+// session record when it exceeds the prior peak. Records are
+// monotonic: once set they only grow within a session and never
+// reset back to zero.
+func (t *StatsTracker) UpdateRecords(
+	farthestDist float64, farthestCallsign string,
+	highestAlt float64, highestCallsign string,
+) {
+	if farthestDist > t.farthestRecordDist && farthestCallsign != "" {
+		t.farthestRecordDist = farthestDist
+		t.farthestRecordCallsign = farthestCallsign
+	}
+
+	if highestAlt > t.highestRecordAlt && highestCallsign != "" {
+		t.highestRecordAlt = highestAlt
+		t.highestRecordCallsign = highestCallsign
+	}
+}
+
+// FarthestRecord returns the session-peak distance and the
+// callsign that set it. Both zero when no positioned plane has
+// been observed yet.
+//
+//nolint:nonamedreturns // dist/callsign are clearer named here.
+func (t *StatsTracker) FarthestRecord() (dist float64, callsign string) {
+	return t.farthestRecordDist, t.farthestRecordCallsign
+}
+
+// HighestRecord returns the session-peak altitude and the
+// callsign that set it. Both zero when no altitude-bearing plane
+// has been observed yet.
+//
+//nolint:nonamedreturns // alt/callsign are clearer named here.
+func (t *StatsTracker) HighestRecord() (alt float64, callsign string) {
+	return t.highestRecordAlt, t.highestRecordCallsign
+}
+
 // DisplayIdent picks the callsign when present, falling back to
 // the bare ICAO so the stats panel always names something.
 func DisplayIdent(snap airplane.Snapshot) string {
@@ -69,6 +113,10 @@ type StatsRender struct {
 	NearestCallsign, FarthestCallsign  string
 	HighestAlt                         float64
 	HighestCallsign                    string
+	FarthestRecordDist                 float64
+	FarthestRecordCallsign             string
+	HighestRecordAlt                   float64
+	HighestRecordCallsign              string
 	FramesPerSec, RecoveredPerSec      float64
 	TotalFrames, RecoveredFrames       uint64
 	CallsignsDecoded, CallsignsApplied uint64
@@ -89,9 +137,23 @@ func FormatStatsText(render StatsRender) string {
 		farthest = fmt.Sprintf("%.1f nm  [gray]%s[white]", render.FarthestDist, render.FarthestCallsign)
 	}
 
+	if render.FarthestRecordDist > 0 && render.FarthestRecordCallsign != "" {
+		farthest += fmt.Sprintf(
+			"  [gray](%.1f nm %s)[white]",
+			render.FarthestRecordDist, render.FarthestRecordCallsign,
+		)
+	}
+
 	highest := "—"
 	if render.HighestAlt > 0 {
 		highest = fmt.Sprintf("%.0f ft  [gray]%s[white]", render.HighestAlt, render.HighestCallsign)
+	}
+
+	if render.HighestRecordAlt > 0 && render.HighestRecordCallsign != "" {
+		highest += fmt.Sprintf(
+			"  [gray](%.0f ft %s)[white]",
+			render.HighestRecordAlt, render.HighestRecordCallsign,
+		)
 	}
 
 	return fmt.Sprintf(
@@ -134,21 +196,29 @@ func AggregateStats(
 
 	agg := walkPlanes(planeList.Sorted(receiverLat, receiverLon), receiverLat, receiverLon)
 
+	tracker.UpdateRecords(agg.farthestDist, agg.farthestCallsign, agg.highestAlt, agg.highestCallsign)
+	farthestRecordDist, farthestRecordCallsign := tracker.FarthestRecord()
+	highestRecordAlt, highestRecordCallsign := tracker.HighestRecord()
+
 	return StatsRender{
-		Tracked:          tracked,
-		Positioned:       agg.positioned,
-		NearestDist:      agg.nearestDist,
-		NearestCallsign:  agg.nearestCallsign,
-		FarthestDist:     agg.farthestDist,
-		FarthestCallsign: agg.farthestCallsign,
-		HighestAlt:       agg.highestAlt,
-		HighestCallsign:  agg.highestCallsign,
-		FramesPerSec:     framesPerSec,
-		RecoveredPerSec:  recoveredPerSec,
-		TotalFrames:      frameStats.TotalFrames,
-		RecoveredFrames:  frameStats.RecoveredFrames,
-		CallsignsDecoded: frameStats.CallsignsDecoded,
-		CallsignsApplied: frameStats.CallsignsApplied,
+		Tracked:                tracked,
+		Positioned:             agg.positioned,
+		NearestDist:            agg.nearestDist,
+		NearestCallsign:        agg.nearestCallsign,
+		FarthestDist:           agg.farthestDist,
+		FarthestCallsign:       agg.farthestCallsign,
+		HighestAlt:             agg.highestAlt,
+		HighestCallsign:        agg.highestCallsign,
+		FarthestRecordDist:     farthestRecordDist,
+		FarthestRecordCallsign: farthestRecordCallsign,
+		HighestRecordAlt:       highestRecordAlt,
+		HighestRecordCallsign:  highestRecordCallsign,
+		FramesPerSec:           framesPerSec,
+		RecoveredPerSec:        recoveredPerSec,
+		TotalFrames:            frameStats.TotalFrames,
+		RecoveredFrames:        frameStats.RecoveredFrames,
+		CallsignsDecoded:       frameStats.CallsignsDecoded,
+		CallsignsApplied:       frameStats.CallsignsApplied,
 	}
 }
 
