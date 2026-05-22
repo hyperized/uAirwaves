@@ -69,14 +69,7 @@ type RadarController interface {
 	ToggleHeadingIndicator()
 	ToggleTrailIndicator()
 	ToggleHeatIndicator()
-}
-
-// PlaneFilterController abstracts the sidebar-filter toggle.
-// Separate from RadarController because the sidebar list is not
-// radar state — the filter only affects the right-column plane
-// list, not the radar render.
-type PlaneFilterController interface {
-	TogglePositionedOnly()
+	ToggleAirportIndicator()
 }
 
 // NotificationController abstracts the notification queue's
@@ -98,22 +91,44 @@ type BiasTeeController interface {
 	ToggleBiasTee()
 }
 
+// SelectionController abstracts the flight-details selection
+// state HandleKeyInput consults on Esc (to dismiss the details
+// panel instead of quitting the app) and on Enter (to open the
+// currently-highlighted plane). The full *Selection satisfies
+// this interface; tests can pass a fake recorder.
+type SelectionController interface {
+	IsOpen() bool
+	Close()
+	OpenAt(index int)
+}
+
+// PlaneListController abstracts the read of the plane list's
+// "currently highlighted row" so HandleKeyInput can resolve
+// Enter to a Selection.OpenAt call without depending on the full
+// tview.List.
+type PlaneListController interface {
+	GetCurrentItem() int
+}
+
 // KeyControllers bundles every dependency HandleKeyInput needs
 // so the function signature stays inside revive's argument-count
 // limit. Cheap to construct at the call site via
 // NewKeyControllers.
 type KeyControllers struct {
-	App     AppController
-	Radar   RadarController
-	Filter  PlaneFilterController
-	Notifs  NotificationController
-	BiasTee BiasTeeController
+	App       AppController
+	Radar     RadarController
+	Notifs    NotificationController
+	BiasTee   BiasTeeController
+	Selection SelectionController
+	PlaneList PlaneListController
 }
 
 // HandleKeyInput is the global key dispatcher: Esc/q stop the
 // app, +/- adjust scope, a/h/t/m toggle indicators, p toggles
 // the sidebar positioned-only filter, x/X dismiss the current /
-// all queued notifications. The event is returned unchanged so
+// all queued notifications. Enter opens the flight-details panel
+// for the highlighted plane; Esc closes it without quitting the
+// app when it is open. The event is returned unchanged so
 // tview's input chain can pass it on to the focused widget.
 //
 // Lifted out of main.go behind the AppController /
@@ -122,7 +137,17 @@ type KeyControllers struct {
 // testable without a tview event loop.
 func HandleKeyInput(event *tcell.EventKey, ctrls KeyControllers) *tcell.EventKey {
 	if event.Key() == tcell.KeyEsc {
+		if ctrls.Selection != nil && ctrls.Selection.IsOpen() {
+			ctrls.Selection.Close()
+
+			return event
+		}
+
 		ctrls.App.Stop()
+	}
+
+	if event.Key() == tcell.KeyEnter && ctrls.Selection != nil && ctrls.PlaneList != nil {
+		ctrls.Selection.OpenAt(ctrls.PlaneList.GetCurrentItem())
 	}
 
 	dispatchRune(event.Rune(), ctrls)
@@ -137,11 +162,19 @@ func HandleKeyInput(event *tcell.EventKey, ctrls KeyControllers) *tcell.EventKey
 func NewKeyControllers(
 	app AppController,
 	radarPanel RadarController,
-	filter PlaneFilterController,
 	notifs NotificationController,
 	biasTee BiasTeeController,
+	selection SelectionController,
+	planeList PlaneListController,
 ) KeyControllers {
-	return KeyControllers{App: app, Radar: radarPanel, Filter: filter, Notifs: notifs, BiasTee: biasTee}
+	return KeyControllers{
+		App:       app,
+		Radar:     radarPanel,
+		Notifs:    notifs,
+		BiasTee:   biasTee,
+		Selection: selection,
+		PlaneList: planeList,
+	}
 }
 
 // dispatchRune is a strategy-table dispatcher keyed on the
@@ -161,8 +194,8 @@ func dispatchRune(pressed rune, ctrls KeyControllers) {
 		ctrls.Radar.ToggleTrailIndicator()
 	case 'm':
 		ctrls.Radar.ToggleHeatIndicator()
-	case 'p':
-		ctrls.Filter.TogglePositionedOnly()
+	case 'l':
+		ctrls.Radar.ToggleAirportIndicator()
 	case 'q':
 		ctrls.App.Stop()
 	case 'x':
@@ -179,27 +212,73 @@ func dispatchRune(pressed rune, ctrls KeyControllers) {
 // UpdatePlaneList rewrites the right-column plane list panel
 // from the current airplanes list, sorted by distance from
 // myLocation. Emergency squawks are red-highlighted; planes
-// without a resolved position get a distance-less secondary
-// line. When positionedOnly is true, position-less contacts are
-// skipped entirely — the default sidebar mode.
+// without a resolved position are always skipped — the
+// position-less shadow contacts are noise the operator never
+// wants to see in this view.
 //
-//nolint:revive // flag-parameter: positionedOnly selects the sidebar's filter mode, not a behaviour switch.
+// selection (may be nil) is fed the parallel index→ICAO slice so
+// the global key dispatcher (Enter) can resolve the currently
+// highlighted row back to a plane.
+//
+// Cursor stability: the tview.List.Clear() call resets the
+// current-item index to 0, which loses the operator's arrow-key
+// progress every tick. We snapshot the cursor index *before*
+// Clear() and restore it after rebuild (clamped to the new
+// length). This keeps the cursor at the same visual position
+// even when the underlying plane order churns — the alternative
+// (track the plane's ICAO and follow it) caused the cursor to
+// jump up and down the list as planes re-sorted by distance.
 func UpdatePlaneList(
-	planeListPanel *tview.List, myLocation *location.Location, planeList *airplanes.Airplanes, positionedOnly bool,
+	planeListPanel *tview.List, myLocation *location.Location, planeList *airplanes.Airplanes,
+	selection *Selection,
 ) {
+	prevCursor := planeListPanel.GetCurrentItem()
+
 	planeListPanel.Clear()
 
 	latitude, longitude := myLocation.GetCoordinates()
 
-	for _, snap := range planeList.Sorted(latitude, longitude) {
-		if positionedOnly && (snap.Latitude == 0 || snap.Longitude == 0) {
+	sorted := planeList.Sorted(latitude, longitude)
+	icaos := make([]string, 0, len(sorted))
+
+	for _, snap := range sorted {
+		if snap.Latitude == 0 || snap.Longitude == 0 {
 			continue
 		}
 
-		mainText, secondaryText := FormatPlaneListEntry(snap, snap.Summary(), latitude, longitude)
+		icaos = append(icaos, snap.ICAO)
 
+		mainText, secondaryText := FormatPlaneListEntry(snap, snap.Summary(), latitude, longitude)
 		planeListPanel.AddItem(mainText, secondaryText, 0, nil)
 	}
+
+	if selection != nil {
+		selection.SetICAOs(icaos)
+	}
+
+	restorePlaneListCursor(planeListPanel, prevCursor)
+}
+
+// restorePlaneListCursor re-anchors the tview.List's current
+// item to the same index it was on before the rebuild, clamped
+// to the new length so a shrinking list doesn't park the cursor
+// past the last row. An empty list is a no-op.
+func restorePlaneListCursor(planeListPanel *tview.List, prevCursor int) {
+	count := planeListPanel.GetItemCount()
+	if count == 0 {
+		return
+	}
+
+	target := prevCursor
+	if target >= count {
+		target = count - 1
+	}
+
+	if target < 0 {
+		target = 0
+	}
+
+	planeListPanel.SetCurrentItem(target)
 }
 
 // FormatPlaneListEntry formats a single plane row. Exposed so
@@ -251,15 +330,20 @@ func UpdateSourceStatus(sourceStatus *tview.TextView, stream *adsb.ADSB) {
 // "Replay file"); a coloured dot signals connection state; the
 // running byte count is shown only when bytes have actually been
 // pulled (so SDR and replay stay terse).
+//
+// Colour spans close with [-] (tview's reset-to-default sentinel)
+// rather than [white] so the byte suffix inherits the TextView's
+// configured text colour — the source pill sits on a dark-green
+// background where white text is unreadable.
 func FormatSourceText(info adsb.SourceInfo) string {
 	label := info.Label
 	if label == "" {
 		label = "unknown"
 	}
 
-	state := "[red]●[white]"
+	state := "[red]●[-]"
 	if info.Connected {
-		state = "[green]●[white]"
+		state = "[green]●[-]"
 	}
 
 	if info.BytesIn > 0 {
@@ -318,21 +402,23 @@ type BiasTeeReader interface {
 // UpdateFooter rewrites the footer command/status line. Pulled
 // out to internal/ui so the footer string format is testable
 // against a fake radar source.
-func UpdateFooter(commands *tview.TextView, radarPanel *radar.View, biasTee BiasTeeReader, positionedOnly bool) {
-	commands.SetText(FormatFooter(footerStateFromRadar(radarPanel, biasTee, positionedOnly)))
+func UpdateFooter(commands *tview.TextView, radarPanel *radar.View, biasTee BiasTeeReader) {
+	commands.SetText(FormatFooter(footerStateFromRadar(radarPanel, biasTee)))
 }
 
 // FooterState is the snapshot of UI settings the footer line
 // summarises. The pure formatter takes this struct so test code
 // can render every combination without driving a real radar.
+// AircraftCount is intentionally absent — the Stats panel
+// already shows a richer "Tracked / Positioned" pair, so a
+// duplicate count in the footer was just noise.
 type FooterState struct {
-	AircraftCount    int
 	ScopeRange       float64
 	HeadingEnabled   bool
 	TrailEnabled     bool
 	HeatEnabled      bool
 	AutoScopeEnabled bool
-	PositionedOnly   bool
+	AirportsEnabled  bool
 	BiasTeeSupported bool
 	BiasTeeEnabled   bool
 }
@@ -341,16 +427,15 @@ type FooterState struct {
 // command line shown across the bottom of the UI.
 func FormatFooter(state FooterState) string {
 	return fmt.Sprintf(
-		"[::b]Tracking: %d - [::b]Range (+/-): %0.0f nm - [::b]Heading (h): %t - "+
+		"[::b]Range (+/-): %0.0f nm - [::b]Heading (h): %t - "+
 			"[::b]Trail (t): %t - [::b]Heat (m): %t - [::b]Autoscope (a): %t - "+
-			"[::b]Positioned (p): %t - [::b]Bias-T (b): %s",
-		state.AircraftCount,
+			"[::b]Airports (l): %t - [::b]Bias-T (b): %s",
 		state.ScopeRange,
 		state.HeadingEnabled,
 		state.TrailEnabled,
 		state.HeatEnabled,
 		state.AutoScopeEnabled,
-		state.PositionedOnly,
+		state.AirportsEnabled,
 		formatBiasTee(state),
 	)
 }
@@ -390,17 +475,16 @@ func readBiasTeeState(biasTee BiasTeeReader) (supported, enabled bool) {
 	return true, got
 }
 
-func footerStateFromRadar(radarPanel *radar.View, biasTee BiasTeeReader, positionedOnly bool) FooterState {
+func footerStateFromRadar(radarPanel *radar.View, biasTee BiasTeeReader) FooterState {
 	supported, enabled := readBiasTeeState(biasTee)
 
 	return FooterState{
-		AircraftCount:    radarPanel.GetAircraftCount(),
 		ScopeRange:       radarPanel.GetScopeRange(),
 		HeadingEnabled:   radarPanel.GetHeadingIndicatorEnabled(),
 		TrailEnabled:     radarPanel.GetTrailIndicatorEnabled(),
 		HeatEnabled:      radarPanel.GetHeatIndicatorEnabled(),
 		AutoScopeEnabled: radarPanel.GetAutoScopeEnabled(),
-		PositionedOnly:   positionedOnly,
+		AirportsEnabled:  radarPanel.GetAirportIndicatorEnabled(),
 		BiasTeeSupported: supported,
 		BiasTeeEnabled:   enabled,
 	}

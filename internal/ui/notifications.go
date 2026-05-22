@@ -183,17 +183,17 @@ func (h *SlogHandler) WithGroup(_ string) slog.Handler {
 // RenderNotificationBar wires the queue's current front to the
 // bar's text + background, toggles the bar's visibility on the
 // parent Flex (height 0 when empty, height 1 when there's a
-// message), AND adjusts the outer Grid's row 0 height so the
+// message), AND adjusts the outer Grid's row 2 height so the
 // bar isn't clipped by an under-sized row. Call this from the
 // UI update tick.
 //
-// Why the Grid SetRows call: the parent Flex lives inside Grid
-// row 0, which is fixed at 1 row by default. When the
-// notification bar wants its own row, the Flex needs 2 rows
-// (header + bar), but the Grid clips it to 1 — invisible bar.
-// We dynamically grow row 0 to 2 when a notification is queued
-// and shrink back to 1 when the queue empties, so the layout
-// doesn't waste a row in the common (quiet) case.
+// Why the Grid SetRows call: the parent Flex (footer + bar)
+// lives inside Grid row 2, which is fixed at 1 row by default.
+// When the notification bar wants its own row, the Flex needs
+// 2 rows (footer + bar), but the Grid clips it to 1 — invisible
+// bar. We dynamically grow row 2 to 2 when a notification is
+// queued and shrink back to 1 when the queue empties, so the
+// layout doesn't waste a row in the common (quiet) case.
 //
 // Severity → background:
 //   - slog.LevelError → red
@@ -211,13 +211,13 @@ func RenderNotificationBar(
 ) {
 	front, ok := notifs.Front()
 	if !ok {
-		grid.SetRows(1, 0, 1) //nolint:mnd // matches the original SetRows call in main.go.
+		grid.SetRows(1, 0, 1) //nolint:mnd // header (1) + content (flex) + footer (1).
 		parent.ResizeItem(bar, 0, 0)
 
 		return
 	}
 
-	grid.SetRows(2, 0, 1) //nolint:mnd // header (1) + notification (1) = 2 rows for the top section.
+	grid.SetRows(1, 0, 2) //nolint:mnd // footer (1) + notification (1) = 2 rows in the bottom section.
 	parent.ResizeItem(bar, 1, 0)
 	bar.SetBackgroundColor(notificationBackground(front.Level))
 	bar.SetText(formatNotification(front, notifs.Len()))

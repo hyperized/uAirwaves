@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -76,7 +77,10 @@ func main() {
 
 	// Input capture for global shortcuts.
 	biasTee := &biasTeeAdapter{stream: uic.adsbStream}
-	ctrls := ui.NewKeyControllers(uic.app, uic.radarPanel, uic.planeFilter, uic.notifications, biasTee)
+	ctrls := ui.NewKeyControllers(
+		uic.app, uic.radarPanel, uic.notifications, biasTee,
+		uic.selection, uic.planeListPanel,
+	)
 
 	uic.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		return ui.HandleKeyInput(event, ctrls)
@@ -100,33 +104,45 @@ func main() {
 	os.Exit(0)
 }
 
+// Left-column page names — used by the Pages widget that swaps
+// the radar and the flight-details view when the operator opens
+// a plane from the right-column list.
+const (
+	leftPageRadar   = "radar"
+	leftPageDetails = "details"
+)
+
 type uiComponents struct {
-	ctx             context.Context //nolint:containedctx
-	cancel          context.CancelFunc
-	app             *tview.Application
-	errChan         chan error
-	myLocation      *location.Location
-	waitGroup       *sync.WaitGroup
-	planeList       *airplanes.Airplanes
-	planeFilter     *ui.PlaneFilter
-	adsbStream      *adsb.ADSB
-	statsTracker    *ui.StatsTracker
-	batteryStatus   *battery.Status
-	clock           *tview.TextView
-	statusBar       *tview.TextView
-	headerPanel     *tview.Flex
-	notifications   *ui.Notifications
-	notificationBar *tview.TextView
-	topSection      *tview.Flex
-	grid            *tview.Grid
-	radarPanel      *radar.View
-	planeListPanel  *tview.List
-	statsPanel      *tview.TextView
-	rightColumn     *tview.Flex
-	commands        *tview.TextView
-	gpsStatus       *tview.TextView
-	sourceStatus    *tview.TextView
-	footer          *tview.Flex
+	ctx                context.Context //nolint:containedctx
+	cancel             context.CancelFunc
+	app                *tview.Application
+	errChan            chan error
+	myLocation         *location.Location
+	waitGroup          *sync.WaitGroup
+	planeList          *airplanes.Airplanes
+	adsbStream         *adsb.ADSB
+	statsTracker       *ui.StatsTracker
+	batteryStatus      *battery.Status
+	clock              *tview.TextView
+	statusBar          *tview.TextView
+	headerPanel        *tview.Flex
+	notifications      *ui.Notifications
+	notificationBar    *tview.TextView
+	bottomSection      *tview.Flex
+	grid               *tview.Grid
+	radarPanel         *radar.View
+	planeListPanel     *tview.List
+	statsPanel         *tview.TextView
+	rightColumn        *tview.Flex
+	commands           *tview.TextView
+	gpsStatus          *tview.TextView
+	sourceStatus       *tview.TextView
+	footer             *tview.Flex
+	selection          *ui.Selection
+	flightDetailsText  *tview.TextView
+	flightDetailsMini  *radar.MiniView
+	flightDetailsPanel *tview.Flex
+	leftPages          *tview.Pages
 }
 
 func configureUI(cfg cliConfig) *uiComponents {
@@ -143,35 +159,40 @@ func configureUI(cfg cliConfig) *uiComponents {
 	headerPanel := configureHeader(clock, gpsStatus, sourceStatus, statusBar)
 	notifications := ui.NewNotifications()
 	notificationBar := configureNotificationBar()
-	topSection := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(headerPanel, 1, 0, false).
+	footer := configureFooter(commands)
+	bottomSection := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(footer, 1, 0, false).
 		AddItem(notificationBar, 0, 0, false)
+	detailsText, detailsMini, detailsPanel := configureFlightDetailsPanel(myLocation)
 
 	return &uiComponents{
-		ctx:             ctx,
-		cancel:          cancel,
-		app:             tview.NewApplication(),
-		errChan:         make(chan error, 3), //nolint:mnd // buffered for the three background workers.
-		myLocation:      myLocation,
-		waitGroup:       &sync.WaitGroup{},
-		planeList:       planeList,
-		planeFilter:     ui.NewPlaneFilter(),
-		adsbStream:      adsb.New(buildADSBOptions(cfg, myLocation)...),
-		statsTracker:    ui.NewStatsTracker(),
-		batteryStatus:   battery.NewStatus(),
-		clock:           clock,
-		statusBar:       statusBar,
-		headerPanel:     headerPanel,
-		notifications:   notifications,
-		notificationBar: notificationBar,
-		topSection:      topSection,
-		planeListPanel:  planeListPanel,
-		statsPanel:      statsPanel,
-		rightColumn:     configureRightColumn(planeListPanel, statsPanel),
-		commands:        commands,
-		gpsStatus:       gpsStatus,
-		sourceStatus:    sourceStatus,
-		footer:          configureFooter(commands),
+		ctx:                ctx,
+		cancel:             cancel,
+		app:                tview.NewApplication(),
+		errChan:            make(chan error, 3), //nolint:mnd // buffered for the three background workers.
+		myLocation:         myLocation,
+		waitGroup:          &sync.WaitGroup{},
+		planeList:          planeList,
+		adsbStream:         adsb.New(buildADSBOptions(cfg, myLocation)...),
+		statsTracker:       ui.NewStatsTracker(),
+		batteryStatus:      battery.NewStatus(),
+		clock:              clock,
+		statusBar:          statusBar,
+		headerPanel:        headerPanel,
+		notifications:      notifications,
+		notificationBar:    notificationBar,
+		bottomSection:      bottomSection,
+		planeListPanel:     planeListPanel,
+		statsPanel:         statsPanel,
+		rightColumn:        configureRightColumn(planeListPanel, statsPanel),
+		commands:           commands,
+		gpsStatus:          gpsStatus,
+		sourceStatus:       sourceStatus,
+		footer:             footer,
+		selection:          ui.NewSelection(),
+		flightDetailsText:  detailsText,
+		flightDetailsMini:  detailsMini,
+		flightDetailsPanel: detailsPanel,
 	}
 }
 
@@ -250,13 +271,48 @@ func biasTeeReceiverFactory() (adsb.Receiver, error) {
 }
 
 func configureGrid(components *uiComponents) *tview.Grid {
+	components.leftPages = tview.NewPages().
+		AddPage(leftPageRadar, components.radarPanel, true, true).
+		AddPage(leftPageDetails, components.flightDetailsPanel, true, false)
+
 	grid := tview.NewGrid().SetRows(1, 0, 1).SetColumns(0, 50).SetBorders(false) //nolint:mnd
-	grid.AddItem(components.topSection, 0, 0, 1, 2, 0, 0, false)
-	grid.AddItem(components.radarPanel, 1, 0, 1, 1, 0, 0, false)
+	grid.AddItem(components.headerPanel, 0, 0, 1, 2, 0, 0, false)
+	grid.AddItem(components.leftPages, 1, 0, 1, 1, 0, 0, false)
 	grid.AddItem(components.rightColumn, 1, 1, 1, 1, 0, 0, true)
-	grid.AddItem(components.footer, 2, 0, 1, 2, 0, 0, false)
+	grid.AddItem(components.bottomSection, 2, 0, 1, 2, 0, 0, false)
 
 	return grid
+}
+
+// Flight-details Flex weights — text takes the top half (read at
+// a glance), the mini-scope inset the bottom half (read for
+// spatial context). Equal-ish weights keep both useful on small
+// terminals without one starving the other.
+const (
+	flightDetailsTextWeight = 3
+	flightDetailsMiniWeight = 2
+)
+
+// configureFlightDetailsPanel builds the bordered Flex that hosts
+// the textual details (top) and the single-flight scope inset
+// (bottom). Returns the parts separately so the UI ticker can
+// push snapshots into each without re-walking the Flex tree.
+//
+//nolint:nonamedreturns // (text, mini, panel) reads clearer named at this signature.
+func configureFlightDetailsPanel(
+	loc *location.Location,
+) (text *tview.TextView, mini *radar.MiniView, panel *tview.Flex) {
+	text = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
+	mini = radar.NewMiniView(loc)
+
+	panel = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(text, 0, flightDetailsTextWeight, false).
+		AddItem(mini, 0, flightDetailsMiniWeight, false)
+	panel.SetBorder(true).SetTitle("Flight details").
+		SetTitleColor(tcell.ColorGreen).
+		SetBorderPadding(1, 1, 2, 2) //nolint:mnd // padding for header chrome inside the panel.
+
+	return text, mini, panel
 }
 
 // configureNotificationBar builds the 1-line bar that surfaces
@@ -416,21 +472,85 @@ func startUIUpdater(components *uiComponents) {
 						components.statusBar,
 					)
 
-					positionedOnly := components.planeFilter.PositionedOnly()
 					ui.UpdatePlaneList(components.planeListPanel, components.myLocation, components.planeList,
-						positionedOnly)
+						components.selection)
 					ui.UpdateStatsPanel(components.statsPanel, components.adsbStream, components.statsTracker,
 						components.myLocation, components.planeList)
-					ui.UpdateFooter(components.commands, components.radarPanel, components.adsbStream, positionedOnly)
+					ui.UpdateFooter(components.commands, components.radarPanel, components.adsbStream)
 					ui.UpdateSourceStatus(components.sourceStatus, components.adsbStream)
 					components.gpsStatus.SetText("GPS: " + components.myLocation.String())
+					renderFlightDetails(components)
 					ui.RenderNotificationBar(
-						components.grid, components.topSection, components.notificationBar, components.notifications,
+						components.grid, components.bottomSection, components.notificationBar, components.notifications,
 					)
 				})
 			}
 		}
 	})
+}
+
+// renderFlightDetails reconciles the left-column page (radar vs.
+// flight-details) with the selection state and feeds the details
+// panel a fresh snapshot of the picked plane. Pulled out of the
+// UI ticker so the ticker body stays under the line-length gate
+// and so the swap logic reads in one place.
+//
+// Resolution flow:
+//  1. Selection closed → switch to radar page, leave details
+//     content alone so reopening the same plane shows the prior
+//     state for one tick (negligible UX, simpler code).
+//  2. Selection open with a known ICAO → look it up in the live
+//     plane list; if found, snapshot and render; if pruned, show
+//     a "no longer tracked" placeholder so the operator sees the
+//     plane went away rather than a stale freeze.
+//  3. Selection open but no plane has been picked yet → fall
+//     through to the renderer's nil-snapshot hint.
+func renderFlightDetails(components *uiComponents) {
+	if !components.selection.IsOpen() {
+		components.leftPages.SwitchToPage(leftPageRadar)
+		components.flightDetailsMini.Clear()
+
+		return
+	}
+
+	components.leftPages.SwitchToPage(leftPageDetails)
+
+	icao := components.selection.ICAO()
+	if icao == "" {
+		ui.UpdateFlightDetails(components.flightDetailsText, nil, 0, 0)
+		components.flightDetailsMini.Clear()
+		fitFlightDetailsText(components)
+
+		return
+	}
+
+	plane, ok := components.planeList.Get(icao)
+	if !ok {
+		components.flightDetailsText.SetText(
+			"[gray]Plane " + icao + " is no longer tracked (pruned). Press Esc to return to the radar.[white]",
+		)
+		components.flightDetailsMini.Clear()
+		fitFlightDetailsText(components)
+
+		return
+	}
+
+	snap := plane.GetSnapshot()
+	rxLat, rxLon := components.myLocation.GetCoordinates()
+	ui.UpdateFlightDetails(components.flightDetailsText, &snap, rxLat, rxLon)
+	components.flightDetailsMini.SetSnapshot(snap)
+	fitFlightDetailsText(components)
+}
+
+// fitFlightDetailsText resizes the text Flex item to exactly its
+// current line count so the mini-scope below it gets the rest of
+// the panel's vertical space — no dead gap between the last text
+// row and the mini-scope. The Flex's mini-scope item carries the
+// only proportional weight, so it absorbs the remainder.
+func fitFlightDetailsText(components *uiComponents) {
+	body := components.flightDetailsText.GetText(false)
+	lines := strings.Count(body, "\n") + 1
+	components.flightDetailsPanel.ResizeItem(components.flightDetailsText, lines, 0)
 }
 
 // configureFooter configures the footer panel.
@@ -459,8 +579,12 @@ func configureCommands() *tview.TextView {
 }
 
 // configurePlaneList configures the plane list panel.
+// Wrap-around is disabled: pressing Down at the bottom row (or
+// Up at the top) should be inert, not jump to the opposite end —
+// the operator's eye loses the cursor when the list "teleports".
 func configurePlaneList() *tview.List {
 	planeListPanel := tview.NewList().ShowSecondaryText(true)
+	planeListPanel.SetWrapAround(false)
 	planeListPanel.SetBorder(false).SetTitle("Airplanes").
 		SetTitleColor(tcell.ColorGreen).
 		SetBorderPadding(1, 1, 1, 1)
@@ -494,15 +618,27 @@ func configureRightColumn(planeListPanel *tview.List, statsPanel *tview.TextView
 		AddItem(statsPanel, 0, statsWeight, false)
 }
 
+// Header flex weights. The source pill carries the widest content
+// ("Source: BEAST 192.168.1.159:30005 ● 1.2 KiB") and was truncating
+// the byte-unit suffix at the default 1/4-of-width slot. Doubling
+// the source slot lets the units render without making the rest of
+// the header crowded.
+const (
+	headerWeightClock  = 1
+	headerWeightGPS    = 1
+	headerWeightSource = 2
+	headerWeightStatus = 1
+)
+
 // configureHeader configures the header panel.
 func configureHeader(
 	clock *tview.TextView, gpsStatus *tview.TextView, sourceStatus *tview.TextView, statusBar *tview.TextView,
 ) *tview.Flex {
 	return tview.NewFlex().SetDirection(tview.FlexColumn).
-		AddItem(clock, 0, 1, false).
-		AddItem(gpsStatus, 0, 1, false).
-		AddItem(sourceStatus, 0, 1, false).
-		AddItem(statusBar, 0, 1, false)
+		AddItem(clock, 0, headerWeightClock, false).
+		AddItem(gpsStatus, 0, headerWeightGPS, false).
+		AddItem(sourceStatus, 0, headerWeightSource, false).
+		AddItem(statusBar, 0, headerWeightStatus, false)
 }
 
 // configureSourceStatus configures the data-source status text

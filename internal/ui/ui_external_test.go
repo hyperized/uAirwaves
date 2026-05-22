@@ -30,6 +30,8 @@ const (
 	testLon      = 4.1
 	rxLat        = 52.0
 	rxLon        = 4.0
+	icaoFixtureA = "AAA001"
+	icaoFixtureB = "BBB002"
 )
 
 // TestUpdateHeaderColorBatteryThresholds drives every branch of
@@ -85,7 +87,7 @@ func (a *fakeApp) Stop() { a.stops++ }
 // call. The boolean flags let tests assert that the right
 // dispatch path fired for each key.
 type fakeRadar struct {
-	incrementScope, decrementScope, autoScope, heading, trail, heat int
+	incrementScope, decrementScope, autoScope, heading, trail, heat, airport int
 }
 
 func (r *fakeRadar) IncrementScope()         { r.incrementScope++ }
@@ -94,14 +96,7 @@ func (r *fakeRadar) ToggleAutoScope()        { r.autoScope++ }
 func (r *fakeRadar) ToggleHeadingIndicator() { r.heading++ }
 func (r *fakeRadar) ToggleTrailIndicator()   { r.trail++ }
 func (r *fakeRadar) ToggleHeatIndicator()    { r.heat++ }
-
-// fakeFilter implements PlaneFilterController and records every
-// toggle so the dispatch table can assert the right key fired.
-type fakeFilter struct {
-	positionedToggles int
-}
-
-func (f *fakeFilter) TogglePositionedOnly() { f.positionedToggles++ }
+func (r *fakeRadar) ToggleAirportIndicator() { r.airport++ }
 
 // fakeNotifs implements NotificationController and counts the
 // dismiss-front and dismiss-all calls the dispatcher fires.
@@ -142,19 +137,19 @@ func (f fakeBiasReader) BiasTeeEnabled() (bool, error) {
 // table. Each int is the expected per-method call count for the
 // matching fakeRadar field; wantAppStops counts fakeApp.Stop.
 type keyDispatchCase struct {
-	name              string
-	event             *tcell.EventKey
-	wantAppStops      int
-	wantInc           int
-	wantDec           int
-	wantAutoScope     int
-	wantHeading       int
-	wantTrail         int
-	wantHeat          int
-	wantPositionedTog int
-	wantDismissFront  int
-	wantDismissAll    int
-	wantBiasToggles   int
+	name             string
+	event            *tcell.EventKey
+	wantAppStops     int
+	wantInc          int
+	wantDec          int
+	wantAutoScope    int
+	wantHeading      int
+	wantTrail        int
+	wantHeat         int
+	wantAirport      int
+	wantDismissFront int
+	wantDismissAll   int
+	wantBiasToggles  int
 }
 
 // keyDispatchCases is the HandleKeyInput dispatch table. Hoisted
@@ -175,8 +170,8 @@ var keyDispatchCases = []keyDispatchCase{
 	{name: "t toggles trail", event: tcell.NewEventKey(tcell.KeyRune, 't', tcell.ModNone), wantTrail: 1},
 	{name: "m toggles heat", event: tcell.NewEventKey(tcell.KeyRune, 'm', tcell.ModNone), wantHeat: 1},
 	{
-		name: "p toggles positioned-only filter", event: tcell.NewEventKey(tcell.KeyRune, 'p', tcell.ModNone),
-		wantPositionedTog: 1,
+		name: "l toggles airport overlay", event: tcell.NewEventKey(tcell.KeyRune, 'l', tcell.ModNone),
+		wantAirport: 1,
 	},
 	{name: "q stops app", event: tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone), wantAppStops: 1},
 	{
@@ -217,41 +212,43 @@ func assertKeyDispatch(t *testing.T, testCase keyDispatchCase) {
 
 	app := &fakeApp{}
 	rdr := &fakeRadar{}
-	flt := &fakeFilter{}
 	nts := &fakeNotifs{}
 	bia := &fakeBias{}
 
-	returned := ui.HandleKeyInput(testCase.event, ui.NewKeyControllers(app, rdr, flt, nts, bia))
+	returned := ui.HandleKeyInput(
+		testCase.event,
+		ui.NewKeyControllers(app, rdr, nts, bia, nil, nil),
+	)
 	if returned != testCase.event {
 		t.Errorf("HandleKeyInput should return event unchanged; got %v want %v", returned, testCase.event)
 	}
 
 	got := keyDispatchCase{
-		wantAppStops:      app.stops,
-		wantInc:           rdr.incrementScope,
-		wantDec:           rdr.decrementScope,
-		wantAutoScope:     rdr.autoScope,
-		wantHeading:       rdr.heading,
-		wantTrail:         rdr.trail,
-		wantHeat:          rdr.heat,
-		wantPositionedTog: flt.positionedToggles,
-		wantDismissFront:  nts.dismissFronts,
-		wantDismissAll:    nts.dismissAll,
-		wantBiasToggles:   bia.toggles,
+		wantAppStops:     app.stops,
+		wantInc:          rdr.incrementScope,
+		wantDec:          rdr.decrementScope,
+		wantAutoScope:    rdr.autoScope,
+		wantHeading:      rdr.heading,
+		wantTrail:        rdr.trail,
+		wantHeat:         rdr.heat,
+		wantAirport:      rdr.airport,
+		wantDismissFront: nts.dismissFronts,
+		wantDismissAll:   nts.dismissAll,
+		wantBiasToggles:  bia.toggles,
 	}
 
 	if got != (keyDispatchCase{
-		wantAppStops:      testCase.wantAppStops,
-		wantInc:           testCase.wantInc,
-		wantDec:           testCase.wantDec,
-		wantAutoScope:     testCase.wantAutoScope,
-		wantHeading:       testCase.wantHeading,
-		wantTrail:         testCase.wantTrail,
-		wantHeat:          testCase.wantHeat,
-		wantPositionedTog: testCase.wantPositionedTog,
-		wantDismissFront:  testCase.wantDismissFront,
-		wantDismissAll:    testCase.wantDismissAll,
-		wantBiasToggles:   testCase.wantBiasToggles,
+		wantAppStops:     testCase.wantAppStops,
+		wantInc:          testCase.wantInc,
+		wantDec:          testCase.wantDec,
+		wantAutoScope:    testCase.wantAutoScope,
+		wantHeading:      testCase.wantHeading,
+		wantTrail:        testCase.wantTrail,
+		wantHeat:         testCase.wantHeat,
+		wantAirport:      testCase.wantAirport,
+		wantDismissFront: testCase.wantDismissFront,
+		wantDismissAll:   testCase.wantDismissAll,
+		wantBiasToggles:  testCase.wantBiasToggles,
 	}) {
 		t.Errorf("dispatch counts mismatch\n got: %+v\nwant: %+v", got, testCase)
 	}
@@ -382,10 +379,10 @@ func TestUpdatePlaneListWritesEntries(t *testing.T) {
 	myLocation := location.New(location.WithLatitude(52.0), location.WithLongitude(4.0))
 
 	planeList := airplanes.New()
-	planeList.Ensure("AAA001")
-	planeList.Ensure("BBB002")
+	planeList.Ensure(icaoFixtureA)
+	planeList.Ensure(icaoFixtureB)
 
-	for _, icao := range []string{"AAA001", "BBB002"} {
+	for _, icao := range []string{icaoFixtureA, icaoFixtureB} {
 		plane, _ := planeList.Get(icao)
 		plane.Update(
 			airplane.WithLatitude(52.1),
@@ -396,16 +393,28 @@ func TestUpdatePlaneListWritesEntries(t *testing.T) {
 	panel := tview.NewList()
 	panel.AddItem("stale", "remains until Clear", 0, nil)
 
-	ui.UpdatePlaneList(panel, myLocation, planeList, true)
+	selection := ui.NewSelection()
+	ui.UpdatePlaneList(panel, myLocation, planeList, selection)
 
 	if got := panel.GetItemCount(); got != 2 {
 		t.Errorf("panel.GetItemCount = %d, want 2 (stale entry should be cleared)", got)
 	}
+
+	// Selection should carry an index→ICAO mapping with both planes
+	// after the rebuild, so a global Enter dispatch can resolve the
+	// current row to a plane.
+	selection.OpenAt(0)
+
+	if selection.ICAO() == "" {
+		t.Error("OpenAt(0) after rebuild produced empty ICAO; index map not fed into selection")
+	}
 }
 
-// TestUpdatePlaneListFilter exercises the positioned-only filter:
-// the position-less contact is dropped when on, included when off.
-func TestUpdatePlaneListFilter(t *testing.T) {
+// TestUpdatePlaneListDropsPositionless pins the always-positioned
+// contract: position-less contacts (lat/lon == 0) are never shown
+// in the sidebar list. The previous "positioned-only filter" was
+// removed; this test guards the behaviour that replaced it.
+func TestUpdatePlaneListDropsPositionless(t *testing.T) {
 	t.Parallel()
 
 	myLocation := location.New(location.WithLatitude(rxLat), location.WithLongitude(rxLon))
@@ -420,27 +429,89 @@ func TestUpdatePlaneListFilter(t *testing.T) {
 		airplane.WithLongitude(testLon),
 	)
 
-	t.Run("positioned-only drops position-less", func(t *testing.T) {
-		t.Parallel()
+	panel := tview.NewList()
+	ui.UpdatePlaneList(panel, myLocation, planeList, nil)
 
-		panel := tview.NewList()
-		ui.UpdatePlaneList(panel, myLocation, planeList, true)
+	if got := panel.GetItemCount(); got != 1 {
+		t.Errorf("panel.GetItemCount = %d, want 1 (position-less must always be filtered)", got)
+	}
+}
 
-		if got := panel.GetItemCount(); got != 1 {
-			t.Errorf("panel.GetItemCount = %d, want 1 (position-less should be filtered)", got)
-		}
-	})
+// TestUpdatePlaneListPreservesCursorIndex pins the index-stable
+// cursor contract: the tview.List current item stays at the same
+// row index across rebuilds, even when planes re-sort. Following
+// the plane (the prior shape) caused the cursor to bounce up and
+// down the list as distances changed, so the operator preference
+// is "cursor doesn't move on its own".
+func TestUpdatePlaneListPreservesCursorIndex(t *testing.T) {
+	t.Parallel()
 
-	t.Run("all-mode keeps position-less", func(t *testing.T) {
-		t.Parallel()
+	myLocation := location.New(location.WithLatitude(rxLat), location.WithLongitude(rxLon))
+	planeList := airplanes.New()
 
-		panel := tview.NewList()
-		ui.UpdatePlaneList(panel, myLocation, planeList, false)
+	planeList.Ensure(icaoFixtureA)
+	planeList.Ensure(icaoFixtureB)
 
-		if got := panel.GetItemCount(); got != 2 {
-			t.Errorf("panel.GetItemCount = %d, want 2 (all contacts visible)", got)
-		}
-	})
+	planeA, _ := planeList.Get(icaoFixtureA)
+	planeA.Update(airplane.WithLatitude(rxLat+0.01), airplane.WithLongitude(rxLon))
+
+	planeB, _ := planeList.Get(icaoFixtureB)
+	planeB.Update(airplane.WithLatitude(rxLat+1.0), airplane.WithLongitude(rxLon))
+
+	panel := tview.NewList()
+	selection := ui.NewSelection()
+
+	ui.UpdatePlaneList(panel, myLocation, planeList, selection)
+	panel.SetCurrentItem(1)
+
+	// Re-sort: A moves further than B, so the order flips. The
+	// cursor should remain on index 1, NOT follow plane B to its
+	// new position.
+	planeA.Update(airplane.WithLatitude(rxLat+5.0), airplane.WithLongitude(rxLon))
+	ui.UpdatePlaneList(panel, myLocation, planeList, selection)
+
+	if got := panel.GetCurrentItem(); got != 1 {
+		t.Errorf("cursor index after re-sort = %d, want 1 (index should be stable, not follow ICAO)", got)
+	}
+}
+
+// TestUpdatePlaneListClampsCursorWhenListShrinks pins the clamp:
+// if a list shrinks, the cursor at the old (now-past-end) index
+// should snap to the new last row, not stay parked off-list.
+func TestUpdatePlaneListClampsCursorWhenListShrinks(t *testing.T) {
+	t.Parallel()
+
+	myLocation := location.New(location.WithLatitude(rxLat), location.WithLongitude(rxLon))
+	planeList := airplanes.New()
+
+	planeList.Ensure(icaoFixtureA)
+	planeList.Ensure(icaoFixtureB)
+
+	planeA, _ := planeList.Get(icaoFixtureA)
+	planeA.Update(airplane.WithLatitude(rxLat+0.01), airplane.WithLongitude(rxLon))
+
+	planeB, _ := planeList.Get(icaoFixtureB)
+	planeB.Update(airplane.WithLatitude(rxLat+1.0), airplane.WithLongitude(rxLon))
+
+	panel := tview.NewList()
+	selection := ui.NewSelection()
+
+	ui.UpdatePlaneList(panel, myLocation, planeList, selection)
+	panel.SetCurrentItem(1)
+
+	// Plane B loses its position (lat/lon → 0); the always-positioned
+	// filter drops it on the next rebuild and the list shrinks to 1.
+	planeB.Update(airplane.WithLatitude(0), airplane.WithLongitude(0))
+
+	ui.UpdatePlaneList(panel, myLocation, planeList, selection)
+
+	if got := panel.GetItemCount(); got != 1 {
+		t.Fatalf("expected filtered list to shrink to 1, got %d items", got)
+	}
+
+	if got := panel.GetCurrentItem(); got != 0 {
+		t.Errorf("cursor index after shrink = %d, want 0 (clamped to new last row)", got)
+	}
 }
 
 // TestUpdateFooterReadsRadarState wires a real radar.View into
@@ -457,15 +528,15 @@ func TestUpdateFooterReadsRadarState(t *testing.T) {
 
 	commands := tview.NewTextView()
 
-	ui.UpdateFooter(commands, radarPanel, fakeBiasReader{}, true)
+	ui.UpdateFooter(commands, radarPanel, fakeBiasReader{})
 
 	got := commands.GetText(true)
 	if !strings.Contains(got, "Range (+/-): 25 nm") {
 		t.Errorf("UpdateFooter text = %q, want substring 'Range (+/-): 25 nm'", got)
 	}
 
-	if !strings.Contains(got, "Positioned (p): true") {
-		t.Errorf("UpdateFooter text = %q, want substring 'Positioned (p): true'", got)
+	if !strings.Contains(got, "Airports (l): true") {
+		t.Errorf("UpdateFooter text = %q, want substring 'Airports (l): true'", got)
 	}
 
 	if !strings.Contains(got, "Bias-T (b): n/a") {
@@ -507,7 +578,7 @@ func TestUpdateFooterReadsBiasTeeState(t *testing.T) {
 			radarPanel := radar.New(planeList, myLocation, nil)
 
 			commands := tview.NewTextView()
-			ui.UpdateFooter(commands, radarPanel, testCase.reader, false)
+			ui.UpdateFooter(commands, radarPanel, testCase.reader)
 
 			if got := commands.GetText(true); !strings.Contains(got, testCase.want) {
 				t.Errorf("UpdateFooter text = %q, want substring %q", got, testCase.want)
@@ -556,27 +627,27 @@ func TestFormatSourceText(t *testing.T) {
 		{
 			name: "empty label connected with bytes",
 			info: adsb.SourceInfo{Label: "", Connected: true, BytesIn: 1024},
-			want: "Source: unknown [green]●[white] 1.0 KiB",
+			want: "Source: unknown [green]●[-] 1.0 KiB",
 		},
 		{
 			name: "sdr connected no bytes",
 			info: adsb.SourceInfo{Label: "SDR", Connected: true, BytesIn: 0},
-			want: "Source: SDR [green]●[white]",
+			want: "Source: SDR [green]●[-]",
 		},
 		{
 			name: "beast disconnected",
 			info: adsb.SourceInfo{Label: "BEAST host:30005", Connected: false, BytesIn: 0},
-			want: "Source: BEAST host:30005 [red]●[white]",
+			want: "Source: BEAST host:30005 [red]●[-]",
 		},
 		{
 			name: "beast connected with bytes",
 			info: adsb.SourceInfo{Label: "BEAST host:30005", Connected: true, BytesIn: 5_242_880},
-			want: "Source: BEAST host:30005 [green]●[white] 5.0 MiB",
+			want: "Source: BEAST host:30005 [green]●[-] 5.0 MiB",
 		},
 		{
 			name: "replay connected",
 			info: adsb.SourceInfo{Label: "Replay capture.iq", Connected: true, BytesIn: 0},
-			want: "Source: Replay capture.iq [green]●[white]",
+			want: "Source: Replay capture.iq [green]●[-]",
 		},
 	}
 
@@ -648,17 +719,16 @@ func TestFormatFooter(t *testing.T) {
 		{
 			name: "bias-tee unsupported",
 			state: ui.FooterState{
-				AircraftCount:    7,
 				ScopeRange:       50,
 				HeadingEnabled:   true,
 				TrailEnabled:     false,
 				HeatEnabled:      true,
 				AutoScopeEnabled: false,
-				PositionedOnly:   true,
+				AirportsEnabled:  true,
 			},
-			want: "[::b]Tracking: 7 - [::b]Range (+/-): 50 nm - [::b]Heading (h): true - " +
+			want: "[::b]Range (+/-): 50 nm - [::b]Heading (h): true - " +
 				"[::b]Trail (t): false - [::b]Heat (m): true - [::b]Autoscope (a): false - " +
-				"[::b]Positioned (p): true - [::b]Bias-T (b): n/a",
+				"[::b]Airports (l): true - [::b]Bias-T (b): n/a",
 		},
 		{
 			name: "bias-tee on",
@@ -666,9 +736,9 @@ func TestFormatFooter(t *testing.T) {
 				BiasTeeSupported: true,
 				BiasTeeEnabled:   true,
 			},
-			want: "[::b]Tracking: 0 - [::b]Range (+/-): 0 nm - [::b]Heading (h): false - " +
+			want: "[::b]Range (+/-): 0 nm - [::b]Heading (h): false - " +
 				"[::b]Trail (t): false - [::b]Heat (m): false - [::b]Autoscope (a): false - " +
-				"[::b]Positioned (p): false - [::b]Bias-T (b): on",
+				"[::b]Airports (l): false - [::b]Bias-T (b): on",
 		},
 		{
 			name: "bias-tee off",
@@ -676,9 +746,9 @@ func TestFormatFooter(t *testing.T) {
 				BiasTeeSupported: true,
 				BiasTeeEnabled:   false,
 			},
-			want: "[::b]Tracking: 0 - [::b]Range (+/-): 0 nm - [::b]Heading (h): false - " +
+			want: "[::b]Range (+/-): 0 nm - [::b]Heading (h): false - " +
 				"[::b]Trail (t): false - [::b]Heat (m): false - [::b]Autoscope (a): false - " +
-				"[::b]Positioned (p): false - [::b]Bias-T (b): off",
+				"[::b]Airports (l): false - [::b]Bias-T (b): off",
 		},
 	}
 
@@ -690,5 +760,106 @@ func TestFormatFooter(t *testing.T) {
 				t.Errorf("FormatFooter mismatch\ngot:  %q\nwant: %q", got, testCase.want)
 			}
 		})
+	}
+}
+
+// fakeSelection records the SelectionController calls
+// HandleKeyInput fires on Enter and Esc.
+type fakeSelection struct {
+	openVal    bool
+	openIndex  int
+	openCalls  int
+	closeCalls int
+}
+
+func (f *fakeSelection) IsOpen() bool { return f.openVal }
+func (f *fakeSelection) Close()       { f.closeCalls++ }
+func (f *fakeSelection) OpenAt(index int) {
+	f.openIndex = index
+	f.openCalls++
+}
+
+// fakePlaneList implements PlaneListController; HandleKeyInput
+// calls GetCurrentItem to resolve the highlighted row for Enter.
+type fakePlaneList struct {
+	current int
+}
+
+func (f *fakePlaneList) GetCurrentItem() int { return f.current }
+
+// TestHandleKeyInputEscClosesDetailsWhenOpen pins the contract
+// that Esc dismisses the flight-details panel without quitting
+// the app when the panel is currently shown.
+func TestHandleKeyInputEscClosesDetailsWhenOpen(t *testing.T) {
+	t.Parallel()
+
+	app := &fakeApp{}
+	rdr := &fakeRadar{}
+	nts := &fakeNotifs{}
+	bia := &fakeBias{}
+	sel := &fakeSelection{openVal: true}
+	lst := &fakePlaneList{}
+
+	event := tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone)
+
+	ui.HandleKeyInput(event, ui.NewKeyControllers(app, rdr, nts, bia, sel, lst))
+
+	if app.stops != 0 {
+		t.Errorf("Esc with details open should NOT stop the app, stops = %d", app.stops)
+	}
+
+	if sel.closeCalls != 1 {
+		t.Errorf("Esc with details open should call Selection.Close once, got %d", sel.closeCalls)
+	}
+}
+
+// TestHandleKeyInputEscQuitsWhenDetailsClosed pins the converse:
+// Esc with the details panel hidden still quits the app, so the
+// legacy quit shortcut keeps working.
+func TestHandleKeyInputEscQuitsWhenDetailsClosed(t *testing.T) {
+	t.Parallel()
+
+	app := &fakeApp{}
+	rdr := &fakeRadar{}
+	nts := &fakeNotifs{}
+	bia := &fakeBias{}
+	sel := &fakeSelection{openVal: false}
+	lst := &fakePlaneList{}
+
+	event := tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone)
+
+	ui.HandleKeyInput(event, ui.NewKeyControllers(app, rdr, nts, bia, sel, lst))
+
+	if app.stops != 1 {
+		t.Errorf("Esc with details closed should stop the app, stops = %d", app.stops)
+	}
+
+	if sel.closeCalls != 0 {
+		t.Errorf("Esc with details closed should not call Close, got %d", sel.closeCalls)
+	}
+}
+
+// TestHandleKeyInputEnterOpensSelection pins the Enter →
+// Selection.OpenAt(currentItem) wiring.
+func TestHandleKeyInputEnterOpensSelection(t *testing.T) {
+	t.Parallel()
+
+	app := &fakeApp{}
+	rdr := &fakeRadar{}
+	nts := &fakeNotifs{}
+	bia := &fakeBias{}
+	sel := &fakeSelection{}
+	lst := &fakePlaneList{current: 3}
+
+	event := tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone)
+
+	ui.HandleKeyInput(event, ui.NewKeyControllers(app, rdr, nts, bia, sel, lst))
+
+	if sel.openCalls != 1 {
+		t.Errorf("Enter should call Selection.OpenAt once, got %d", sel.openCalls)
+	}
+
+	if sel.openIndex != 3 {
+		t.Errorf("Enter should open at current list index 3, got %d", sel.openIndex)
 	}
 }
