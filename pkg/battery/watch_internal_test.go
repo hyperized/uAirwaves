@@ -1,132 +1,190 @@
 package battery
 
 import (
+	"context"
 	"errors"
-	"os"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
-func TestProcess(t *testing.T) {
+const (
+	fastTick     = time.Millisecond
+	waitDeadline = 2 * time.Second
+)
+
+// errFakeRead is a static sentinel for the fake reader failure
+// path (err113 wants wrapped static errors, not inline ones).
+var errFakeRead = errors.New("fake read failure")
+
+// staticReader yields a fixed reading and error on every call. The
+// error parameter varies across callers (nil / sentinel / unsupported)
+// so it exercises all of applyOnce's branches from one helper.
+func staticReader(got reading, err error) reader {
+	return func(context.Context) (reading, error) { return got, err }
+}
+
+// countingReader wraps a reader, recording how many times it was
+// invoked so a test can prove the ticker branch fired without
+// narrowing the count into the reading itself.
+func countingReader(inner reader, calls *atomic.Int64) reader {
+	return func(ctx context.Context) (reading, error) {
+		calls.Add(1)
+
+		return inner(ctx)
+	}
+}
+
+// waitFor polls cond until it holds or the deadline elapses, so
+// loop-driven assertions don't race the background watcher.
+func waitFor(t *testing.T, cond func() bool) bool {
+	t.Helper()
+
+	deadline := time.Now().Add(waitDeadline)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+
+	return cond()
+}
+
+func TestApplyOnce(t *testing.T) {
 	t.Parallel()
 
-	t.Run("charging status", func(t *testing.T) {
+	t.Run("success folds reading into status", func(t *testing.T) {
 		t.Parallel()
 
 		status := NewStatus()
-		process(status, []string{keyPowerSupplyStatus, "Charging"})
 
-		if !status.IsCharging() {
-			t.Error("expected charging true")
+		if applyOnce(context.Background(), status, staticReader(reading{percentage: 42, charging: true}, nil)) {
+			t.Fatal("success read must not stop the loop")
+		}
+
+		if status.GetPercentage() != 42 || !status.IsCharging() {
+			t.Errorf("status not updated: got %s", status.String())
 		}
 	})
 
-	t.Run("discharging status", func(t *testing.T) {
+	t.Run("transient error keeps polling and leaves status", func(t *testing.T) {
 		t.Parallel()
 
-		status := NewStatus()
-		process(status, []string{keyPowerSupplyStatus, "Discharging"})
+		status := NewStatus(WithPercentage(7))
 
-		if status.IsCharging() {
-			t.Error("expected charging false")
+		if applyOnce(context.Background(), status, staticReader(reading{}, errFakeRead)) {
+			t.Fatal("transient error must not stop the loop")
+		}
+
+		if status.GetPercentage() != 7 {
+			t.Errorf("status changed on error: got %d", status.GetPercentage())
 		}
 	})
 
-	t.Run("capacity status", func(t *testing.T) {
+	t.Run("unsupported stops the loop", func(t *testing.T) {
 		t.Parallel()
 
-		status := NewStatus()
-		process(status, []string{keyPowerSupplyCapacity, "85"})
-
-		if status.GetPercentage() != 85 {
-			t.Errorf("expected percentage 85, got %d", status.GetPercentage())
+		if !applyOnce(context.Background(), NewStatus(), staticReader(reading{}, ErrUnsupported)) {
+			t.Fatal("ErrUnsupported must stop the loop")
 		}
-	})
-
-	t.Run("invalid capacity", func(t *testing.T) {
-		t.Parallel()
-
-		status := NewStatus()
-		old := status.GetPercentage()
-		process(status, []string{keyPowerSupplyCapacity, "abc"})
-
-		if status.GetPercentage() != old {
-			t.Errorf("expected percentage to remain %d, got %d", old, status.GetPercentage())
-		}
-	})
-
-	t.Run("unknown key", func(t *testing.T) {
-		t.Parallel()
-
-		status := NewStatus()
-		process(status, []string{"UNKNOWN", "value"})
-		// should not panic or change anything
 	})
 }
 
-func TestUpdate(t *testing.T) {
+func TestWatchWith_UnsupportedReturnsImmediately(t *testing.T) {
 	t.Parallel()
 
-	tmpDir := t.TempDir()
+	// A non-cancelled context with an hour-long interval would hang
+	// forever if the unsupported source did not short-circuit.
+	read := staticReader(reading{}, ErrUnsupported)
 
-	tmpFile, err := os.CreateTemp(tmpDir, "battery_uevent")
-	if err != nil {
-		t.Fatal(err)
+	if err := watchWith(context.Background(), NewStatus(), time.Hour, read); err != nil {
+		t.Errorf("expected nil on unsupported source, got %v", err)
 	}
+}
 
-	content := `POWER_SUPPLY_NAME=axp20x-battery
-POWER_SUPPLY_STATUS=Charging
-POWER_SUPPLY_PRESENT=1
-POWER_SUPPLY_ONLINE=1
-POWER_SUPPLY_CAPACITY=95
-INVALID_LINE
-ANOTHER_INVALID=TOO=MANY=PARTS
-`
-	if _, err := tmpFile.WriteString(content); err != nil {
-		t.Fatal(err)
-	}
+func TestWatchWith_UpdatesAcrossTicksThenCancel(t *testing.T) {
+	t.Parallel()
 
-	if err := tmpFile.Close(); err != nil {
-		t.Fatal(err)
-	}
+	var calls atomic.Int64
+
+	// A call count >= 2 proves the ticker branch ran, not just the
+	// initial pre-loop read.
+	read := countingReader(staticReader(reading{percentage: 80, charging: true}, nil), &calls)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	status := NewStatus()
+	errCh := make(chan error, 1)
 
-	err = update(status, tmpFile.Name())
-	if err != nil {
-		t.Errorf("update() error = %v", err)
+	go func() { errCh <- watchWith(ctx, status, fastTick, read) }()
+
+	if !waitFor(t, func() bool { return calls.Load() >= 2 }) {
+		t.Fatal("watcher did not tick")
 	}
 
-	if !status.IsCharging() {
-		t.Error("expected charging true")
+	if status.GetPercentage() != 80 {
+		t.Errorf("expected percentage 80, got %d", status.GetPercentage())
 	}
 
-	if status.GetPercentage() != 95 {
-		t.Errorf("expected percentage 95, got %d", status.GetPercentage())
+	cancel()
+
+	if err := <-errCh; err != nil {
+		t.Errorf("expected nil on cancel, got %v", err)
 	}
 }
 
-func TestUpdate_Errors(t *testing.T) {
+func TestWatchWith_BecomesUnsupportedMidLoop(t *testing.T) {
 	t.Parallel()
-	t.Run("missing file", func(t *testing.T) {
-		t.Parallel()
 
-		status := NewStatus()
+	var calls atomic.Int64
 
-		err := update(status, "/non/existent/file")
-		if !errors.Is(err, errFileOpen) {
-			t.Errorf("expected errFileOpen, got %v", err)
+	// First read succeeds so the loop starts; the next read reports
+	// unsupported from the ticker branch, which must end the loop on
+	// its own without a context cancel.
+	read := func(context.Context) (reading, error) {
+		if calls.Add(1) == 1 {
+			return reading{percentage: 10}, nil
 		}
-	})
 
-	t.Run("scanner error", func(t *testing.T) {
-		t.Parallel()
-		// os.Open on a directory succeeds on Unix; bufio.Scanner
-		// then yields no lines without producing an error.
-		// Calling update on a directory exercises the no-line
-		// successful-scan path.
-		dir := t.TempDir()
+		return reading{}, ErrUnsupported
+	}
 
-		status := NewStatus()
-		_ = update(status, dir)
-	})
+	if err := watchWith(context.Background(), NewStatus(), fastTick, read); err != nil {
+		t.Errorf("expected nil when source turns unsupported, got %v", err)
+	}
+}
+
+func TestWatchWith_TransientErrorThenRecovers(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+
+	read := func(context.Context) (reading, error) {
+		if calls.Add(1) == 1 {
+			return reading{}, errFakeRead
+		}
+
+		return reading{percentage: 55, charging: true}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	status := NewStatus()
+	errCh := make(chan error, 1)
+
+	go func() { errCh <- watchWith(ctx, status, fastTick, read) }()
+
+	if !waitFor(t, func() bool { return status.GetPercentage() == 55 }) {
+		t.Fatal("watcher did not recover after transient error")
+	}
+
+	cancel()
+
+	if err := <-errCh; err != nil {
+		t.Errorf("expected nil on cancel, got %v", err)
+	}
 }

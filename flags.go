@@ -57,8 +57,9 @@ func parseFlags(args []string, stderr io.Writer) (cliConfig, error) {
 	flagSet.StringVar(&cfg.gpsdAddress, "gpsd", "",
 		"gpsd address as host:port (empty = use gps library default, currently 127.0.0.1:2947)")
 	flagSet.StringVar(&cfg.batteryPath, "battery", "",
-		"path to the power_supply uevent file (empty = use battery library default, "+
-			"currently /sys/class/power_supply/axp20x-battery/uevent)")
+		"Linux: explicit path to a power_supply uevent file; empty auto-discovers the first "+
+			"Battery-type device under /sys/class/power_supply. Ignored on macOS, where battery "+
+			"state comes from pmset.")
 	flagSet.DurationVar(&cfg.checkDuration, "check", 0,
 		"non-TUI diagnostic mode: run the GPS + ADSB workers for this duration (1s..5m), "+
 			"write a JSON report to stdout, exit non-zero on threshold failure. 0 = TUI mode.")

@@ -1,42 +1,60 @@
 package battery
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"log/slog"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
 	"time"
 )
 
-const (
-	defaultFilePath = "/sys/class/power_supply/axp20x-battery/uevent"
-	defaultInterval = 30 * time.Second
+const defaultInterval = 30 * time.Second
 
-	keyPowerSupplyStatus   = "POWER_SUPPLY_STATUS"
-	keyPowerSupplyCapacity = "POWER_SUPPLY_CAPACITY"
-)
+// ErrUnsupported is returned by a platform reader when the host
+// cannot report battery state at all — a GOOS without a battery
+// backend, or a machine with no battery present (desktop / CI).
+// Watch treats it as terminal: it logs once and stops rather than
+// spinning a ticker against a source that will never yield.
+var ErrUnsupported = errors.New("battery: not supported on this platform")
 
-var errFileOpen = errors.New("failed to open battery uevent file")
-var errScanner = errors.New("failed to scan battery uevent file")
-
-// Watch updates the battery status periodically.
-func Watch(ctx context.Context, status *Status) error {
-	return WatchWithInterval(ctx, status, defaultInterval, defaultFilePath)
+// reading is the normalized battery snapshot a platform reader
+// returns. percentage is 0..100; charging is the live charge
+// state (actively taking on charge, not merely on external power).
+type reading struct {
+	percentage int8
+	charging   bool
 }
 
-// WatchWithInterval updates the battery status with a custom
-// interval and file path. Both the initial read and subsequent
-// ticks treat update failures the same way: log a warning and
-// keep polling. This survives a transient udev race at startup
-// (uevent file briefly unreadable) without taking the whole app
-// down. Returns nil on ctx cancellation.
-func WatchWithInterval(ctx context.Context, status *Status, interval time.Duration, filePath string) error {
-	if err := update(status, filePath); err != nil {
-		slog.Warn("initial battery update failed, will retry", slog.Any("error", err))
+// reader obtains a single battery reading. Each platform file
+// (reader_linux.go / reader_darwin.go / reader_other.go) provides
+// newReader(override) so this loop stays platform-agnostic. The
+// context lets a slow backend (e.g. a shelled-out pmset) be
+// cancelled when the app shuts down mid-read.
+type reader func(ctx context.Context) (reading, error)
+
+// Watch updates the battery status periodically, auto-discovering
+// the platform's battery source.
+func Watch(ctx context.Context, status *Status) error {
+	return WatchWithInterval(ctx, status, defaultInterval, "")
+}
+
+// WatchWithInterval updates the battery status on a custom
+// interval. override is platform-specific: on Linux it is an
+// explicit path to a power_supply uevent file (empty =
+// auto-discover the first Battery-type device); on macOS it is
+// ignored (battery data comes from pmset). Returns nil on ctx
+// cancellation.
+func WatchWithInterval(ctx context.Context, status *Status, interval time.Duration, override string) error {
+	return watchWith(ctx, status, interval, newReader(override))
+}
+
+// watchWith is the platform-agnostic poll loop. Split from
+// WatchWithInterval so tests can inject a fake reader without
+// touching real hardware. Both the initial read and every tick
+// treat a transient failure the same way: log a warning and keep
+// polling, so a startup udev race doesn't take the app down.
+func watchWith(ctx context.Context, status *Status, interval time.Duration, read reader) error {
+	if applyOnce(ctx, status, read) {
+		return nil
 	}
 
 	ticker := time.NewTicker(interval)
@@ -47,60 +65,32 @@ func WatchWithInterval(ctx context.Context, status *Status, interval time.Durati
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := update(status, filePath); err != nil {
-				slog.Warn("battery update failed, will retry", slog.Any("error", err))
+			if applyOnce(ctx, status, read) {
+				return nil
 			}
 		}
 	}
 }
 
-// update reads the battery uevent file and updates the battery status.
-func update(status *Status, filePath string) error {
-	var (
-		err         error
-		fileHandler *os.File
-	)
+// applyOnce performs one read and folds it into status. It
+// returns true when the loop should stop: an unsupported source
+// is terminal (no point polling), while any other error is a
+// transient warning we retry on the next tick.
+func applyOnce(ctx context.Context, status *Status, read reader) bool {
+	got, err := read(ctx)
 
-	fileHandler, err = os.Open(filepath.Clean(filePath))
-	if err != nil {
-		return errors.Join(err, errFileOpen)
-	}
-	defer func(fileHandler *os.File) {
-		_ = fileHandler.Close()
-	}(fileHandler)
+	switch {
+	case errors.Is(err, ErrUnsupported):
+		slog.Info("battery monitoring unavailable on this platform, disabling")
 
-	scanner := bufio.NewScanner(fileHandler)
+		return true
+	case err != nil:
+		slog.Warn("battery update failed, will retry", slog.Any("error", err))
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		parts := strings.Split(line, "=")
+		return false
+	default:
+		status.Update(WithPercentage(got.percentage), WithCharging(got.charging))
 
-		if len(parts) != 2 {
-			continue
-		}
-
-		process(status, parts)
-	}
-
-	if err = scanner.Err(); err != nil {
-		return errors.Join(err, errScanner)
-	}
-
-	return nil
-}
-
-// process updates the battery status based on the uevent key/value pair.
-func process(status *Status, parts []string) {
-	key := parts[0]
-	value := parts[1]
-
-	if key == keyPowerSupplyStatus {
-		status.Update(WithCharging(value == "Charging"))
-	}
-
-	if key == keyPowerSupplyCapacity {
-		if v, err := strconv.ParseInt(value, 10, 8); err == nil {
-			status.Update(WithPercentage(int8(v)))
-		}
+		return false
 	}
 }
