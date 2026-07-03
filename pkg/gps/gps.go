@@ -36,12 +36,20 @@ type Session interface {
 	Close() error
 }
 
+// FixCallback is invoked on every TPV report that carries a
+// non-zero lat/lon. The time argument is the wall-clock instant
+// the report was delivered. Used by the self-locate coordinator
+// to decide when GPS is "fresh" vs. when the ADSB-derived
+// fallback should fill in.
+type FixCallback func(time.Time)
+
 // GPS represents a GPS daemon connection.
 type GPS struct {
 	gpsAddress, serviceName, protocol string
 	session                           Session
 	dial                              func(string) (Session, error)
 	reconnect                         bool
+	onFix                             FixCallback
 }
 
 // Option defines the function signature for configuring a GPS instance.
@@ -95,6 +103,18 @@ func WithProtocol(protocol string) Option {
 func WithReconnect(reconnect bool) Option {
 	return func(g *GPS) {
 		g.reconnect = reconnect
+	}
+}
+
+// WithFixCallback registers a callback that fires on every TPV
+// with valid lat/lon. nil disables the hook. The callback is
+// invoked from the gpsd-handler goroutine, so it must be cheap
+// and lock-friendly; a typical implementation just stamps an
+// atomic time so the self-locate coordinator can gate its
+// fallback on GPS freshness.
+func WithFixCallback(fn FixCallback) Option {
+	return func(g *GPS) {
+		g.onFix = fn
 	}
 }
 
@@ -168,7 +188,7 @@ func (g *GPS) watchOnce(ctx context.Context, myLocation *location.Location) erro
 	var prevMode atomic.Int32
 	prevMode.Store(-1)
 
-	g.session.AddFilter("TPV", buildTPVHandler(myLocation, &lastTPV, &prevMode))
+	g.session.AddFilter("TPV", buildTPVHandler(myLocation, &lastTPV, &prevMode, g.onFix))
 
 	done := g.session.Watch()
 
@@ -179,7 +199,9 @@ func (g *GPS) watchOnce(ctx context.Context, myLocation *location.Location) erro
 // shared lastTPV / prevMode watchdog state. Pulled out of
 // watchOnce so the closure body stays inside revive's
 // cognitive-complexity gate.
-func buildTPVHandler(myLocation *location.Location, lastTPV *atomic.Int64, prevMode *atomic.Int32) gpsd.Filter {
+func buildTPVHandler(
+	myLocation *location.Location, lastTPV *atomic.Int64, prevMode *atomic.Int32, onFix FixCallback,
+) gpsd.Filter {
 	return func(t any) {
 		tpvReport, ok := t.(*gpsd.TPVReport)
 		if !ok {
@@ -202,6 +224,14 @@ func buildTPVHandler(myLocation *location.Location, lastTPV *atomic.Int64, prevM
 			location.WithLongitude(tpvReport.Lon),
 			location.WithAltitude(tpvReport.Alt),
 		)
+
+		// Fire the freshness hook only when the TPV carries a
+		// real position. Mode 1 (no fix) and zero lat/lon mean
+		// gpsd is alive but the receiver hasn't locked yet —
+		// self-locate must still be allowed to fill in.
+		if onFix != nil && (tpvReport.Lat != 0 || tpvReport.Lon != 0) {
+			onFix(time.Now())
+		}
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -22,12 +23,14 @@ import (
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/gps"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/radar"
+	"lab.hyperized.net/hyperized/uAirwaves/pkg/selflocate"
 )
 
 var (
-	errBatteryRecover = errors.New("recovered in battery goroutine")
-	errGPSRecover     = errors.New("recovered in gps goroutine")
-	errADSBRecover    = errors.New("recovered in adsb goroutine")
+	errBatteryRecover    = errors.New("recovered in battery goroutine")
+	errGPSRecover        = errors.New("recovered in gps goroutine")
+	errADSBRecover       = errors.New("recovered in adsb goroutine")
+	errSelfLocateRecover = errors.New("recovered in self-locate goroutine")
 )
 
 const (
@@ -39,6 +42,22 @@ const (
 	// jumping multiple steps per redraw.
 	sweepUpdateInterval = 250 * time.Millisecond
 	batteryPollInterval = 30 * time.Second
+
+	// selfLocateTickInterval is how often the self-locate worker
+	// considers pushing an ADSB-derived position into myLocation.
+	// 15 s is well above the ADSB stream's per-frame cadence
+	// (each Estimate call walks the full observation buffer, so
+	// over-ticking just burns CPU) and below the gpsd watchdog
+	// window so a freshly stalled GPS hands control to self-locate
+	// inside one tick.
+	selfLocateTickInterval = 15 * time.Second
+
+	// selfLocateGPSFreshWindow is how recent a gpsd-supplied fix
+	// must be for the self-locate worker to defer. 30 s matches
+	// gps.tpvTimeout — once gpsd has been silent past that window,
+	// the GPS watchdog has already declared the session stalled,
+	// and self-locate becomes the authority.
+	selfLocateGPSFreshWindow = 30 * time.Second
 )
 
 func main() {
@@ -72,6 +91,7 @@ func main() {
 
 	startBatteryWatcher(uic, cfg.batteryPath)
 	startGPSWatcher(uic, cfg.gpsdAddress)
+	startSelfLocateWorker(uic)
 	startADSBStreamer(uic)
 	startUIUpdater(uic)
 
@@ -143,12 +163,26 @@ type uiComponents struct {
 	flightDetailsMini  *radar.MiniView
 	flightDetailsPanel *tview.Flex
 	leftPages          *tview.Pages
+
+	// selfLocator buffers CPR-decoded plane positions and
+	// produces a receiver-location estimate on demand. Wired
+	// into the ADSB stream as a PositionObserver.
+	selfLocator *selflocate.Locator
+
+	// gpsLastFix records the wall-clock instant of the most
+	// recent GPS fix that carried a real lat/lon. nil means
+	// "GPS has never produced a real fix this session". The
+	// self-locate worker reads this to decide whether to defer
+	// to GPS or push its own estimate.
+	gpsLastFix *atomic.Pointer[time.Time]
 }
 
 func configureUI(cfg cliConfig) *uiComponents {
 	ctx, cancel := context.WithCancel(context.Background())
 	planeList := airplanes.New()
 	myLocation := location.New()
+	selfLocator := selflocate.New()
+	gpsLastFix := &atomic.Pointer[time.Time]{}
 	clock := configureClock()
 	statusBar := configureStatusbar()
 	commands := configureCommands()
@@ -169,11 +203,11 @@ func configureUI(cfg cliConfig) *uiComponents {
 		ctx:                ctx,
 		cancel:             cancel,
 		app:                tview.NewApplication(),
-		errChan:            make(chan error, 3), //nolint:mnd // buffered for the three background workers.
+		errChan:            make(chan error, 4), //nolint:mnd // buffered for the four background workers.
 		myLocation:         myLocation,
 		waitGroup:          &sync.WaitGroup{},
 		planeList:          planeList,
-		adsbStream:         adsb.New(buildADSBOptions(cfg, myLocation)...),
+		adsbStream:         adsb.New(buildADSBOptions(cfg, myLocation, selfLocator)...),
 		statsTracker:       ui.NewStatsTracker(),
 		batteryStatus:      battery.NewStatus(),
 		clock:              clock,
@@ -193,6 +227,8 @@ func configureUI(cfg cliConfig) *uiComponents {
 		flightDetailsText:  detailsText,
 		flightDetailsMini:  detailsMini,
 		flightDetailsPanel: detailsPanel,
+		selfLocator:        selfLocator,
+		gpsLastFix:         gpsLastFix,
 	}
 }
 
@@ -208,8 +244,12 @@ func configureUI(cfg cliConfig) *uiComponents {
 //
 // Replay wins over BEAST so a developer can always replay a
 // captured IQ even on a host that also sets --beast.
-func buildADSBOptions(cfg cliConfig, myLocation *location.Location) []adsb.Option {
+func buildADSBOptions(cfg cliConfig, myLocation *location.Location, selfLocator *selflocate.Locator) []adsb.Option {
 	opts := []adsb.Option{adsb.WithLocation(myLocation)}
+
+	if selfLocator != nil {
+		opts = append(opts, adsb.WithPositionObserver(selfLocator.Observe))
+	}
 
 	if cfg.replayIQPath != "" {
 		path := cfg.replayIQPath
@@ -338,15 +378,37 @@ func startBatteryWatcher(components *uiComponents, filePath string) {
 }
 
 func startGPSWatcher(components *uiComponents, address string) {
+	onFix := stampLastFix(components.gpsLastFix)
+
 	ui.LaunchWorker(components.waitGroup, components.errChan, errGPSRecover, func() error {
-		return runGPSWatch(components.ctx, components.myLocation, address)
+		return runGPSWatch(components.ctx, components.myLocation, address, onFix)
 	})
 }
 
-func runGPSWatch(ctx context.Context, loc *location.Location, address string) error {
+// stampLastFix returns a gps.FixCallback that records the
+// supplied instant into the atomic pointer the self-locate
+// worker reads. Pulled out as a named helper so the wiring is
+// testable without spinning up gpsd.
+func stampLastFix(slot *atomic.Pointer[time.Time]) gps.FixCallback {
+	if slot == nil {
+		return nil
+	}
+
+	return func(at time.Time) {
+		slot.Store(&at)
+	}
+}
+
+func runGPSWatch(
+	ctx context.Context, loc *location.Location, address string, onFix gps.FixCallback,
+) error {
 	opts := []gps.Option{gps.WithReconnect(true)}
 	if address != "" {
 		opts = append(opts, gps.WithGpsAddress(address))
+	}
+
+	if onFix != nil {
+		opts = append(opts, gps.WithFixCallback(onFix))
 	}
 
 	if err := gps.New(opts...).Watch(ctx, loc); err != nil {
@@ -381,7 +443,11 @@ func runCheckMode(cfg cliConfig) int {
 
 	myLocation := location.New()
 	planes := airplanes.New()
-	stream := adsb.New(buildADSBOptions(cfg, myLocation)...)
+	// Check mode skips the self-locate fallback: a ≤ 5 minute
+	// diagnostic window is well below the time it takes the
+	// horizon-circle intersection to converge, and the JSON
+	// output already reports gpsd state explicitly.
+	stream := adsb.New(buildADSBOptions(cfg, myLocation, nil)...)
 
 	report, passed, runErr := check.Run(context.Background(), check.Options{
 		Duration:   duration,
@@ -391,7 +457,7 @@ func runCheckMode(cfg cliConfig) int {
 		Planes:     planes,
 		Location:   myLocation,
 		StartGPS: func(ctx context.Context) error {
-			return runGPSWatch(ctx, myLocation, cfg.gpsdAddress)
+			return runGPSWatch(ctx, myLocation, cfg.gpsdAddress, nil)
 		},
 		StartADSB: func(ctx context.Context) error {
 			return stream.Stream(ctx, planes)
@@ -416,6 +482,99 @@ func startADSBStreamer(components *uiComponents) {
 	ui.LaunchWorker(components.waitGroup, components.errChan, errADSBRecover, func() error {
 		return components.adsbStream.Stream(components.ctx, components.planeList)
 	})
+}
+
+// startSelfLocateWorker spins up the goroutine that periodically
+// considers pushing an ADSB-derived position into myLocation
+// when GPS has not produced a fix recently. Always runs alongside
+// the GPS watcher; the per-tick gpsFreshness check decides which
+// source wins on any given tick.
+func startSelfLocateWorker(components *uiComponents) {
+	ui.LaunchWorker(components.waitGroup, components.errChan, errSelfLocateRecover, func() error {
+		runSelfLocate(
+			components.ctx, components.myLocation, components.selfLocator, components.gpsLastFix,
+			selfLocateTickInterval, selfLocateGPSFreshWindow,
+		)
+
+		return nil
+	})
+}
+
+// runSelfLocate loops on a ticker, asking the locator for an
+// estimate each tick and pushing it into myLocation when GPS has
+// been silent long enough that the fallback should fill in.
+//
+// Parameters are explicit (rather than read from package-level
+// constants) so internal tests can drive a fast tick + freshness
+// window without touching the production values.
+func runSelfLocate(
+	ctx context.Context,
+	loc *location.Location,
+	locator *selflocate.Locator,
+	gpsLastFix *atomic.Pointer[time.Time],
+	tickInterval, gpsFreshWindow time.Duration,
+) {
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+
+	var (
+		lastAppliedLat, lastAppliedLon float64
+		hasApplied                     bool
+	)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if gpsIsFresh(gpsLastFix, gpsFreshWindow) {
+				continue
+			}
+
+			fix, ok := locator.Estimate()
+			if !ok {
+				continue
+			}
+
+			if hasApplied && fix.Latitude == lastAppliedLat && fix.Longitude == lastAppliedLon {
+				continue
+			}
+
+			loc.Update(
+				location.WithLatitude(fix.Latitude),
+				location.WithLongitude(fix.Longitude),
+			)
+
+			if !hasApplied {
+				slog.Info("Self-locate fix applied",
+					slog.Float64("lat", fix.Latitude),
+					slog.Float64("lon", fix.Longitude),
+					slog.Float64("confidence_nm", fix.ConfidenceRadiusNm),
+					slog.Int("observations", fix.ObservationCount),
+				)
+			}
+
+			lastAppliedLat = fix.Latitude
+			lastAppliedLon = fix.Longitude
+			hasApplied = true
+		}
+	}
+}
+
+// gpsIsFresh reports whether the most recent GPS fix is younger
+// than the supplied window. nil slot or never-set pointer counts
+// as "stale" so self-locate is free to fill in.
+func gpsIsFresh(slot *atomic.Pointer[time.Time], window time.Duration) bool {
+	if slot == nil {
+		return false
+	}
+
+	last := slot.Load()
+	if last == nil {
+		return false
+	}
+
+	return time.Since(*last) < window
 }
 
 func startUIUpdater(components *uiComponents) {

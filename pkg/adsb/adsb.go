@@ -154,6 +154,13 @@ type ADSB struct {
 	// matching CPR half).
 	myLocation *location.Location
 
+	// positionObserver, when set, is invoked on every successfully
+	// CPR-decoded aircraft position that also carries a valid
+	// altitude. pkg/selflocate is the production consumer — it
+	// folds the fixes into a horizon-circle intersection to derive
+	// the receiver's own location when no GPS is available.
+	positionObserver PositionObserver
+
 	// cpr caches the most recent even / odd half-position
 	// per aircraft so a paired frame can resolve to lat/lon
 	// when no reference position is available. Stored as a
@@ -415,6 +422,23 @@ func WithPruneThreshold(threshold time.Duration) Option {
 // back to globally-unambiguous CPR pairing.
 func WithLocation(loc *location.Location) Option {
 	return func(a *ADSB) { a.myLocation = loc }
+}
+
+// PositionObserver is the callback signature for downstream
+// consumers of CPR-decoded aircraft positions. Implementations
+// must be safe to call from the ADSB ingest goroutine and must
+// not block — pkg/selflocate.Locator.Observe satisfies this
+// contract.
+type PositionObserver func(lat, lon, altFt float64)
+
+// WithPositionObserver registers a callback invoked on every
+// CPR-decoded aircraft position that also has a valid altitude.
+// nil disables the hook. Lat/lon are the plane's
+// globally-decoded position; altFt is its barometric altitude
+// in feet. Calls happen on the ingest goroutine, so observers
+// must be cheap and lock-friendly.
+func WithPositionObserver(fn PositionObserver) Option {
+	return func(a *ADSB) { a.positionObserver = fn }
 }
 
 // WithReceiverFactory replaces the default rtl2832u-backed

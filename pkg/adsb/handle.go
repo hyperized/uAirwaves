@@ -211,6 +211,15 @@ func applyAirbornePosition(
 
 	if lat, lon, ok := stream.resolveCPR(icao, msg.CPR, plane.GetLastUpdate()); ok {
 		opts = append(opts, airplane.WithPosition(lat, lon))
+
+		// Feed the self-locate observer only when this frame
+		// carried a usable altitude — the horizon-circle math
+		// needs altitude to derive a constraint radius. Surface-
+		// position frames skip this hook intentionally; they
+		// arrive at small horizons but with no altitude field.
+		if stream.positionObserver != nil && msg.AltitudeError == nil {
+			stream.positionObserver(lat, lon, float64(msg.AltitudeFeet))
+		}
 	}
 
 	return opts
