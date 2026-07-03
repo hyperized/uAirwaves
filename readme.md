@@ -11,11 +11,13 @@ A single-binary TUI for the uConsole with a HackerGadgets Antenna board (GPS / S
   Both paths fold per-ICAO state into a live aircraft list with callsign / altitude / squawk / speed / heading / position / vertical rate.
 
 - **GPS** — talks to `gpsd` and pins a "you-are-here" reference. The ADS-B side reads it on every position frame so locally-unambiguous CPR resolves to lat/lon from a single airborne-position broadcast (no even/odd pairing wait). A watchdog forces a reconnect if no TPV report arrives in 30 s (silent socket stall), and every mode change (e.g. `no fix → 3D fix`) is surfaced in the in-app notification bar.
+- **Self-locate (GPS fallback)** — when `gpsd` isn't reachable or hasn't produced a fix in 30 s, the receiver derives its own position from the ADS-B stream it's already decoding: every aircraft broadcast with a CPR-resolved lat/lon and a usable altitude constrains the receiver to lie within that aircraft's radio horizon, and the recursive intersection of all such circles converges on the operator's location (typically ±5–30 nm after a few minutes of moderately busy traffic). Internet-free, GPS-free, and good enough to bootstrap CPR locally-unambiguous decoding on a cold-start uConsole in the field. The first applied fix is surfaced in the notification bar; gpsd reasserts authority the moment it produces a real fix.
 - **Phantom-ICAO suppression** — address-parity Mode S frames (DF 0/4/5/16/20/21) only register a contact once the ICAO has been seen in a CRC-verified DF 11/17/18 frame; random noise stops minting ghosts. Backed by [`demod1090/icaofilter`](https://github.com/hyperized/demod1090/tree/main/icaofilter).
-- **Plotting** — radar / scope panels rendered in [`tview`](https://github.com/rivo/tview). Trails are coloured by the altitude flown at each fix (so the climb/descent profile is readable straight off the scope); heading lines are white (a projection, not a flown path). An optional heatmap overlay tracks contact density.
+- **Plotting** — radar / scope panels rendered in [`tview`](https://github.com/rivo/tview). Trails are coloured by the altitude flown at each fix (so the climb/descent profile is readable straight off the scope); heading lines are white and slow-blink so the projection visually separates from the steady trail dots. Trail length is a tri-state cycle: off, short (last 10 fixes ≈ 100 s of history) or long (every recorded fix until the plane is pruned). An optional heatmap overlay tracks contact density.
 - **Airport overlay** — ~310 major civil airports (sourced from the OurAirports public-domain dataset) render as dim cyan `⊕ ICAO` markers on the scope, filtered to those inside the current range. Toggle with `l`.
-- **Flight details** — press `Enter` on the right-column plane list to open a detail panel for the highlighted contact: identity, altitude (with FL), heading, velocity (kt + km/h), vertical rate, position, distance + great-circle bearing from the receiver, age, message count, plus a single-flight mini-scope inset showing only that plane and its trail. `Esc` returns to the radar.
-- **Battery + system status** — secondary panels.
+- **Flight details** — press `Enter` on the right-column plane list to open a detail panel for the highlighted contact: identity, altitude (with FL), heading, velocity (kt + km/h), vertical rate, position, distance + great-circle bearing from the receiver, age, message count, plus a single-flight mini-scope inset centred on the plane (not the receiver) that auto-fits to the full known trail. The mini scope also draws the receiver as a regular `X` crosshair when its position falls inside the rendered range. While the details panel is open the `+/-` (zoom) and `a` (autoscope) keys redirect from the main radar to the mini view so the operator can dig in without leaving the panel. `Esc` returns to the radar.
+- **Stats panel** — running tally of tracked / positioned contacts, nearest/farthest/highest with session peaks, frames-per-second with a session-peak appendix, and the rolling callsign-decode ratio.
+- **Battery + system status** — secondary panels. Battery reads are cross-platform: sysfs `power_supply` on Linux (auto-discovered, not pinned to the uConsole's `axp20x-battery`) and `pmset` on macOS.
 
 ## Architecture
 
@@ -77,10 +79,10 @@ make build-macos      # local build for development
 | `Esc` | Close flight-details panel if open; otherwise quit |
 | `Enter` | Open the flight-details panel for the highlighted plane in the right-column list |
 | `↑` / `↓` | Navigate the plane list (cursor index stays put across the per-tick rebuild; no wrap at the ends) |
-| `+` / `-` | Increase / decrease scope range |
-| `a` | Toggle auto-scope (fits scope to the farthest plane, rounded up to the next 20 nm; on by default) |
-| `h` | Toggle heading indicator (on by default) |
-| `t` | Toggle trail / position history (on by default) |
+| `+` / `-` | Increase / decrease scope range (main radar; redirects to the mini view when the details panel is open) |
+| `a` | Toggle auto-scope (fits scope to the farthest plane, rounded up to the next 20 nm; on by default — when details open, toggles the mini view's auto-fit instead) |
+| `h` | Toggle heading indicator (on by default; line slow-blinks so it's distinguishable from the trail) |
+| `t` | Cycle trail length: short (default, last ~100 s) → long (every fix until the plane is pruned) → off |
 | `m` | Toggle heatmap overlay (off by default) |
 | `l` | Toggle airport overlay (on by default) |
 | `b` | Toggle bias-tee on the SDR (powered off automatically on app shutdown) |
@@ -108,7 +110,7 @@ Environment variables (all optional):
 | Variable              | Default                                            | Effect |
 |-----------------------|----------------------------------------------------|--------|
 | `GPSD_ADDRESS`        | `127.0.0.1:2947`                                   | `gpsd` socket. |
-| `BATTERY_PATH`        | `/sys/class/power_supply/axp20x-battery/uevent`    | `power_supply` uevent file. Missing/unreadable is non-fatal — the watcher logs a warning and keeps polling, so a transient udev race at boot doesn't take the app down. |
+| `BATTERY_PATH`        | auto-discover                                      | **Linux:** optional explicit `power_supply` uevent file; empty auto-discovers the first `Battery`-type device under `/sys/class/power_supply` (no longer pinned to `axp20x-battery`). **macOS:** ignored — battery state comes from `pmset`. Missing/unreadable is non-fatal — the watcher logs a warning and keeps polling, so a transient udev race at boot doesn't take the app down. |
 | `BEAST_ADDRESS`       | unset                                              | `host:port` of a remote BEAST TCP server. When set, uAirwaves consumes Mode-S Beast frames from that server instead of opening the local SDR. Reconnects with exponential backoff (1 s base, 30 s cap). Precedence: `UAIRWAVES_REPLAY_IQ > BEAST_ADDRESS > local SDR`. |
 | `UAIRWAVES_REPLAY_IQ` | unset                                              | Path to a captured IQ file. When set, the SDR backend is bypassed and the file is streamed through the demod chain instead — useful for deterministic on-device replay and off-line A/B testing. The receiver returns `adsb.ErrReplayEnded` on EOF, which `Stream` converts to a clean shutdown. |
 | `UAIRWAVES_CHECK`     | unset                                              | Go duration (1 s – 5 min). When set, uAirwaves skips the TUI, runs the GPS + ADSB workers for the window, writes a JSON report to stdout, and exits non-zero when default thresholds (≥ 1 frame, ≥ 1 tracked plane) are not met. Useful as a deployment smoke test. |
@@ -153,12 +155,20 @@ pkg/airplane/           — single-plane state + Snapshot (lock-free read path).
 pkg/airplanes/          — thread-safe map; Sorted() returns []Snapshot
 pkg/airports/           — embedded ~310-airport overlay set (CC0 OurAirports data, hand-picked
                           ICAO list). Regen workflow + scripts live in internal/gen/.
-pkg/battery/            — power_supply uevent watcher (resilient to transient read errors)
+pkg/battery/            — cross-platform battery watcher: sysfs power_supply (Linux,
+                          auto-discovered) / pmset (macOS), resilient to transient read errors
 pkg/gps/                — gpsd client with reconnect-on-hangup + 30 s TPV watchdog
 pkg/location/           — receiver lat/lon
 pkg/radar/              — scope, plane rendering, heatmap, altitude-coloured trails,
-                          auto-scope fit-to-farthest, single-flight MiniView, airport overlay
+                          slow-blink heading projection, trail-length cycle
+                          (off/short/long), auto-scope fit-to-farthest,
+                          plane-centred MiniView with auto-fit + manual zoom and
+                          receiver crosshair when in range, airport overlay
 pkg/scope/              — scope range arithmetic
+pkg/selflocate/         — horizon-circle intersection self-locator: derives receiver
+                          position from CPR-decoded aircraft fixes when gpsd is
+                          unavailable. Passive (Observe + Estimate); main.go runs
+                          the coordinator that decides GPS-vs-self-locate.
 ```
 
 ## Testing
