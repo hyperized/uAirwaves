@@ -36,13 +36,13 @@ func TestNewStatsTrackerSeedsSampleTime(t *testing.T) {
 	// Sleep one tick to guarantee elapsed > 0 even on the fastest CI.
 	time.Sleep(time.Millisecond)
 
-	framesPerSec, recoveredPerSec := tracker.Sample(adsb.Stats{TotalFrames: 10, RecoveredFrames: 2})
+	framesPerSec := tracker.Sample(adsb.Stats{TotalFrames: 10, RecoveredFrames: 2})
 	if framesPerSec <= 0 {
 		t.Errorf("framesPerSec = %v, want > 0 after first Sample with positive elapsed", framesPerSec)
 	}
 
-	if recoveredPerSec <= 0 {
-		t.Errorf("recoveredPerSec = %v, want > 0", recoveredPerSec)
+	if got := tracker.FramesPerSecRecord(); got != framesPerSec {
+		t.Errorf("FramesPerSecRecord after first Sample = %v, want %v (the first non-zero rate)", got, framesPerSec)
 	}
 }
 
@@ -64,7 +64,7 @@ func TestStatsTrackerSampleAdvancesState(t *testing.T) {
 	time.Sleep(time.Millisecond)
 
 	// Second sample: delta should reflect the increment.
-	framesPerSec, _ := tracker.Sample(adsb.Stats{TotalFrames: 10, RecoveredFrames: 2})
+	framesPerSec := tracker.Sample(adsb.Stats{TotalFrames: 10, RecoveredFrames: 2})
 	if framesPerSec <= 0 {
 		t.Errorf("framesPerSec = %v, want > 0 (5 new frames / non-zero elapsed)", framesPerSec)
 	}
@@ -142,27 +142,27 @@ func TestFormatStatsTextWithAggregates(t *testing.T) {
 	t.Parallel()
 
 	got := ui.FormatStatsText(ui.StatsRender{
-		Tracked:          3,
-		Positioned:       2,
-		NearestDist:      1.5,
-		NearestCallsign:  "KLM1023",
-		FarthestDist:     42.0,
-		FarthestCallsign: csFarthest,
-		HighestAlt:       38000,
-		HighestCallsign:  csHighest,
-		FramesPerSec:     12.3,
-		RecoveredPerSec:  0.45,
-		TotalFrames:      999,
-		RecoveredFrames:  17,
-		CallsignsDecoded: 88,
-		CallsignsApplied: 77,
+		Tracked:            3,
+		Positioned:         2,
+		NearestDist:        1.5,
+		NearestCallsign:    "KLM1023",
+		FarthestDist:       42.0,
+		FarthestCallsign:   csFarthest,
+		HighestAlt:         38000,
+		HighestCallsign:    csHighest,
+		FramesPerSec:       12.3,
+		FramesPerSecRecord: 28.7,
+		TotalFrames:        999,
+		RecoveredFrames:    17,
+		CallsignsDecoded:   88,
+		CallsignsApplied:   77,
 	})
 
 	for _, want := range []string{
 		"1.5 nm  [gray]KLM1023[white]",
 		"42.0 nm  [gray]BAW123[white]",
 		"38000 ft  [gray]DLH456[white]",
-		"12.3  ([gray]rec 0.45[white])",
+		"Frames/s[::-]   12.3  [gray](peak 28.7)[white]",
 		"999  ([gray]IDs 77/88[white])",
 	} {
 		if !strings.Contains(got, want) {
@@ -305,6 +305,57 @@ func TestStatsTrackerRecordsMonotonic(t *testing.T) {
 	alt, hcallsign = tracker.HighestRecord()
 	if alt != 42000 || hcallsign != "UAE11" {
 		t.Errorf("HighestRecord = (%v, %q), want (42000, UAE11)", alt, hcallsign)
+	}
+}
+
+// TestFramesPerSecRecordMonotonic confirms the session-peak
+// frames/sec only ever grows: feed in a high rate, then a lower
+// rate, and the peak must still report the high water mark.
+func TestFramesPerSecRecordMonotonic(t *testing.T) {
+	t.Parallel()
+
+	tracker := ui.NewStatsTracker()
+
+	// Two ticks separated by ~10 ms so elapsed is comfortably
+	// positive on every host.
+	time.Sleep(10 * time.Millisecond)
+	tracker.Sample(adsb.Stats{TotalFrames: 1000})
+
+	peakAfterFirst := tracker.FramesPerSecRecord()
+	if peakAfterFirst <= 0 {
+		t.Fatalf("first Sample should promote the peak; got %v", peakAfterFirst)
+	}
+
+	// A long-ish window with the same total → near-zero rate. The
+	// peak must not regress.
+	time.Sleep(20 * time.Millisecond)
+	tracker.Sample(adsb.Stats{TotalFrames: 1000})
+
+	if got := tracker.FramesPerSecRecord(); got != peakAfterFirst {
+		t.Errorf("FramesPerSecRecord after lower-rate Sample = %v, want unchanged %v", got, peakAfterFirst)
+	}
+}
+
+// TestFormatStatsTextHidesPeakWhenZero covers the "no peak yet"
+// branch in FormatStatsText: when FramesPerSecRecord is zero the
+// peak appendix must be omitted so the line doesn't render a
+// confusing "peak 0.0" before any samples land.
+func TestFormatStatsTextHidesPeakWhenZero(t *testing.T) {
+	t.Parallel()
+
+	got := ui.FormatStatsText(ui.StatsRender{
+		Tracked:            1,
+		Positioned:         0,
+		FramesPerSec:       4.2,
+		FramesPerSecRecord: 0,
+	})
+
+	if strings.Contains(got, "peak") {
+		t.Errorf("zero peak should suppress the appendix; got:\n%s", got)
+	}
+
+	if !strings.Contains(got, "Frames/s[::-]   4.2") {
+		t.Errorf("Frames/s value missing or formatted unexpectedly; got:\n%s", got)
 	}
 }
 

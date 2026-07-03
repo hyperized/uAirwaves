@@ -19,7 +19,6 @@ const (
 	defaultHeading          = -1
 	defaultVelocity         = -1
 	defaultVertRate         = 0
-	maxPositionHistory      = 10
 	positionHistoryInterval = 10 * time.Second
 
 	squawkHijacking        = "7500"
@@ -263,9 +262,5 @@ func WithPosition(latitude, longitude float64) Option {
 			Altitude:  plane.altitude,
 		}
 		plane.positionHistory = append(plane.positionHistory, entry)
-
-		if len(plane.positionHistory) > maxPositionHistory {
-			plane.positionHistory = plane.positionHistory[len(plane.positionHistory)-maxPositionHistory:]
-		}
 	}
 }

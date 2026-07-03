@@ -14,17 +14,18 @@ import (
 // StatsTracker keeps the prior tick's frame counters so the
 // stats panel can derive a per-second rate without each call to
 // adsb.Stats() mutating shared state. It also remembers the
-// session-peak farthest distance and highest altitude so the
-// panel can show a record alongside the current value.
+// session-peak farthest distance, highest altitude, and frame
+// rate so the panel can show a record alongside the current
+// value for each.
 type StatsTracker struct {
 	lastTotal     uint64
-	lastRecovered uint64
 	lastSampledAt time.Time
 
 	farthestRecordDist     float64
 	farthestRecordCallsign string
 	highestRecordAlt       float64
 	highestRecordCallsign  string
+	framesPerSecRecord     float64
 }
 
 // NewStatsTracker returns a tracker seeded with the construction
@@ -35,26 +36,35 @@ func NewStatsTracker() *StatsTracker {
 	return &StatsTracker{lastSampledAt: time.Now()}
 }
 
-// Sample returns the per-second frame and recovery rate since
-// the previous call, alongside the cumulative totals. The first
-// call after NewStatsTracker has a tiny window (now - construct
-// time), so the rate is approximate until the second tick.
-//
-//nolint:nonamedreturns // (frames/s, recovered/s) reads clearer named at this signature.
-func (t *StatsTracker) Sample(stats adsb.Stats) (framesPerSec, recoveredPerSec float64) {
+// Sample returns the per-second frame rate since the previous
+// call. The first call after NewStatsTracker has a tiny window
+// (now - construct time), so the rate is approximate until the
+// second tick. The session-peak rate is promoted in lock-step
+// so callers don't have to track it separately.
+func (t *StatsTracker) Sample(stats adsb.Stats) float64 {
 	now := time.Now()
 	elapsed := now.Sub(t.lastSampledAt).Seconds()
 
+	var framesPerSec float64
 	if elapsed > 0 {
 		framesPerSec = float64(stats.TotalFrames-t.lastTotal) / elapsed
-		recoveredPerSec = float64(stats.RecoveredFrames-t.lastRecovered) / elapsed
 	}
 
 	t.lastTotal = stats.TotalFrames
-	t.lastRecovered = stats.RecoveredFrames
 	t.lastSampledAt = now
 
-	return framesPerSec, recoveredPerSec
+	if framesPerSec > t.framesPerSecRecord {
+		t.framesPerSecRecord = framesPerSec
+	}
+
+	return framesPerSec
+}
+
+// FramesPerSecRecord returns the session-peak frames-per-second
+// observed by Sample. Monotonic: never decreases for the
+// lifetime of the tracker.
+func (t *StatsTracker) FramesPerSecRecord() float64 {
+	return t.framesPerSecRecord
 }
 
 // UpdateRecords promotes the current observation to a new
@@ -117,7 +127,8 @@ type StatsRender struct {
 	FarthestRecordCallsign             string
 	HighestRecordAlt                   float64
 	HighestRecordCallsign              string
-	FramesPerSec, RecoveredPerSec      float64
+	FramesPerSec                       float64
+	FramesPerSecRecord                 float64
 	TotalFrames, RecoveredFrames       uint64
 	CallsignsDecoded, CallsignsApplied uint64
 }
@@ -156,18 +167,23 @@ func FormatStatsText(render StatsRender) string {
 		)
 	}
 
+	framesLine := fmt.Sprintf("%.1f", render.FramesPerSec)
+	if render.FramesPerSecRecord > 0 {
+		framesLine += fmt.Sprintf("  [gray](peak %.1f)[white]", render.FramesPerSecRecord)
+	}
+
 	return fmt.Sprintf(
 		"[::b]Tracked[::-]    %d  ([gray]%d positioned[white])\n"+
 			"[::b]Nearest[::-]    %s\n"+
 			"[::b]Farthest[::-]   %s\n"+
 			"[::b]Highest[::-]    %s\n"+
-			"[::b]Frames/s[::-]   %.1f  ([gray]rec %.2f[white])\n"+
+			"[::b]Frames/s[::-]   %s\n"+
 			"[::b]Total[::-]      %d  ([gray]IDs %d/%d[white])",
 		render.Tracked, render.Positioned,
 		nearest,
 		farthest,
 		highest,
-		render.FramesPerSec, render.RecoveredPerSec,
+		framesLine,
 		render.TotalFrames, render.CallsignsApplied, render.CallsignsDecoded,
 	)
 }
@@ -189,7 +205,7 @@ func AggregateStats(
 	planeList *airplanes.Airplanes,
 ) StatsRender {
 	frameStats := stream.Stats()
-	framesPerSec, recoveredPerSec := tracker.Sample(frameStats)
+	framesPerSec := tracker.Sample(frameStats)
 
 	receiverLat, receiverLon := myLocation.GetCoordinates()
 	tracked := planeList.Count()
@@ -214,7 +230,7 @@ func AggregateStats(
 		HighestRecordAlt:       highestRecordAlt,
 		HighestRecordCallsign:  highestRecordCallsign,
 		FramesPerSec:           framesPerSec,
-		RecoveredPerSec:        recoveredPerSec,
+		FramesPerSecRecord:     tracker.FramesPerSecRecord(),
 		TotalFrames:            frameStats.TotalFrames,
 		RecoveredFrames:        frameStats.RecoveredFrames,
 		CallsignsDecoded:       frameStats.CallsignsDecoded,

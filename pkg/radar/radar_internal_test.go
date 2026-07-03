@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
 )
 
 // TestHeatMapAddClampsToOne locks the add() saturation behaviour:
@@ -458,5 +459,180 @@ func TestDrawCenterPointAnimatesWhenSweeping(t *testing.T) {
 
 	if stars != 1 {
 		t.Errorf("spinner '*' count around centre = %d, want exactly 1", stars)
+	}
+}
+
+// TestHeadingVisibleCoversBothPhases pins the wall-clock blink
+// math: any instant in [0, headingBlinkOn) of the period reads
+// as visible; anything in [headingBlinkOn, headingBlinkPeriod)
+// reads as hidden. Walking the boundaries covers the modulo
+// branch in headingVisible.
+func TestHeadingVisibleCoversBothPhases(t *testing.T) {
+	t.Parallel()
+
+	epoch := time.Unix(0, 0)
+
+	cases := []struct {
+		name   string
+		offset time.Duration
+		want   bool
+	}{
+		{name: "period start is on", offset: 0, want: true},
+		{name: "mid on phase", offset: headingBlinkOn / 2, want: true},
+		{name: "off boundary", offset: headingBlinkOn, want: false},
+		{name: "mid off phase", offset: headingBlinkOn + (headingBlinkPeriod-headingBlinkOn)/2, want: false},
+		{name: "next period wraps to on", offset: headingBlinkPeriod, want: true},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := headingVisible(epoch.Add(testCase.offset))
+			if got != testCase.want {
+				t.Errorf("headingVisible(epoch+%v) = %v, want %v", testCase.offset, got, testCase.want)
+			}
+		})
+	}
+}
+
+// TestSetHeadingBlinkingMutesPhase confirms that with blinking
+// off, snapshotToggles returns heading=true for an instant that
+// would otherwise sit in the off slice — the SetHeadingBlinking
+// hatch the radar tests rely on really does override the clock.
+func TestSetHeadingBlinkingMutesPhase(t *testing.T) {
+	t.Parallel()
+
+	view := &View{headingIndicator: true, headingBlinking: true}
+
+	// Force a representative off-phase wall-clock instant via the
+	// helper; if the helper said off, the toggle must follow.
+	offInstant := time.Unix(0, headingBlinkOn.Nanoseconds())
+	if headingVisible(offInstant) {
+		t.Fatalf("test precondition failed: %v should be in the off phase", offInstant)
+	}
+
+	view.SetHeadingBlinking(false)
+
+	got := view.snapshotToggles()
+	if !got.heading {
+		t.Error("heading toggle should stay on once blinking is disabled, regardless of phase")
+	}
+}
+
+// TestMiniTogglesFollowsBlinkPhase confirms the miniView toggle
+// helper inherits the same on/off cycle as the main radar — the
+// projected dots pulse in sync rather than each view picking its
+// own clock.
+func TestMiniTogglesFollowsBlinkPhase(t *testing.T) {
+	t.Parallel()
+
+	onInstant := time.Unix(0, 0)
+	if !headingVisible(onInstant) {
+		t.Fatalf("test precondition failed: %v should be in the on phase", onInstant)
+	}
+
+	if !miniToggles(onInstant).heading {
+		t.Error("miniToggles(on-phase).heading = false, want true")
+	}
+
+	offInstant := time.Unix(0, headingBlinkOn.Nanoseconds())
+	if headingVisible(offInstant) {
+		// guard against future tuning of the constants
+		t.Skip("constants moved; off-phase boundary no longer matches the test fixture")
+	}
+
+	if miniToggles(offInstant).heading {
+		t.Error("miniToggles(off-phase).heading = true, want false")
+	}
+
+	if got := miniToggles(onInstant).trail; got != TrailLong {
+		t.Errorf("miniToggles(...).trail = %v, want %v (mini view always paints the full trail)", got, TrailLong)
+	}
+}
+
+// TestNextTrailModeCycles pins the off → short → long → off
+// cycle the operator's 't' key drives. Walking through every
+// case explicitly is cheap and catches accidental ordering
+// regressions when new modes get added later.
+func TestNextTrailModeCycles(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		from TrailMode
+		want TrailMode
+	}{
+		{from: TrailOff, want: TrailShort},
+		{from: TrailShort, want: TrailLong},
+		{from: TrailLong, want: TrailOff},
+	}
+
+	for _, testCase := range cases {
+		if got := nextTrailMode(testCase.from); got != testCase.want {
+			t.Errorf("nextTrailMode(%v) = %v, want %v", testCase.from, got, testCase.want)
+		}
+	}
+}
+
+// TestTrailModeStringCoversAllVariants confirms each enumerator
+// renders a stable operator label. The footer reads this so a
+// silent label drift would land as an invisible UX regression.
+func TestTrailModeStringCoversAllVariants(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		mode TrailMode
+		want string
+	}{
+		{mode: TrailOff, want: "off"},
+		{mode: TrailShort, want: "short"},
+		{mode: TrailLong, want: "long"},
+		{mode: TrailMode(255), want: "?"}, // out-of-range guard
+	}
+
+	for _, testCase := range cases {
+		if got := testCase.mode.String(); got != testCase.want {
+			t.Errorf("TrailMode(%d).String() = %q, want %q", testCase.mode, got, testCase.want)
+		}
+	}
+}
+
+// TestSliceTrailRespectsMode confirms the render-time slicing
+// rules: Off returns nil, Long passes through, Short keeps only
+// the tail of the slice (last shortTrailEntries entries).
+func TestSliceTrailRespectsMode(t *testing.T) {
+	t.Parallel()
+
+	history := make([]airplane.PositionEntry, 0, shortTrailEntries+5)
+	for index := range shortTrailEntries + 5 {
+		history = append(history, airplane.PositionEntry{Latitude: float64(index)})
+	}
+
+	if got := sliceTrail(history, TrailOff); got != nil {
+		t.Errorf("Off should return nil, got %v entries", len(got))
+	}
+
+	if got := sliceTrail(history, TrailLong); len(got) != len(history) {
+		t.Errorf("Long should pass through; len=%d, want %d", len(got), len(history))
+	}
+
+	short := sliceTrail(history, TrailShort)
+	if len(short) != shortTrailEntries {
+		t.Errorf("Short slice len = %d, want %d", len(short), shortTrailEntries)
+	}
+
+	if got := short[0].Latitude; got != float64(5) {
+		t.Errorf("short[0].Latitude = %v, want 5 (cap drops the older five entries)", got)
+	}
+
+	// A short history that fits inside the cap should round-trip
+	// unchanged, not panic on the index arithmetic.
+	smaller := history[:shortTrailEntries-1]
+	if got := sliceTrail(smaller, TrailShort); len(got) != len(smaller) {
+		t.Errorf("under-cap Short should pass through; len=%d, want %d", len(got), len(smaller))
+	}
+
+	if got := sliceTrail(history, TrailMode(99)); got != nil {
+		t.Errorf("unknown mode should return nil, got %v entries", len(got))
 	}
 }

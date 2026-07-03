@@ -98,7 +98,8 @@ func main() {
 	// Input capture for global shortcuts.
 	biasTee := &biasTeeAdapter{stream: uic.adsbStream}
 	ctrls := ui.NewKeyControllers(
-		uic.app, uic.radarPanel, uic.notifications, biasTee,
+		uic.app, uic.radarPanel, uic.flightDetailsMini,
+		uic.notifications, biasTee,
 		uic.selection, uic.planeListPanel,
 	)
 

@@ -67,7 +67,7 @@ type RadarController interface {
 	DecrementScope()
 	ToggleAutoScope()
 	ToggleHeadingIndicator()
-	ToggleTrailIndicator()
+	CycleTrailMode()
 	ToggleHeatIndicator()
 	ToggleAirportIndicator()
 }
@@ -110,6 +110,17 @@ type PlaneListController interface {
 	GetCurrentItem() int
 }
 
+// MiniRadarController is the minimal scope-control surface the
+// flight-details mini-radar exposes. When the details panel is
+// open the dispatcher rebinds the scope-mutating keys (+, -, a)
+// from the main radar to the mini view so the operator can zoom
+// the per-plane scope without leaving the details panel.
+type MiniRadarController interface {
+	IncrementScope()
+	DecrementScope()
+	ToggleAutoScope()
+}
+
 // KeyControllers bundles every dependency HandleKeyInput needs
 // so the function signature stays inside revive's argument-count
 // limit. Cheap to construct at the call site via
@@ -117,6 +128,7 @@ type PlaneListController interface {
 type KeyControllers struct {
 	App       AppController
 	Radar     RadarController
+	MiniRadar MiniRadarController
 	Notifs    NotificationController
 	BiasTee   BiasTeeController
 	Selection SelectionController
@@ -162,6 +174,7 @@ func HandleKeyInput(event *tcell.EventKey, ctrls KeyControllers) *tcell.EventKey
 func NewKeyControllers(
 	app AppController,
 	radarPanel RadarController,
+	miniRadar MiniRadarController,
 	notifs NotificationController,
 	biasTee BiasTeeController,
 	selection SelectionController,
@@ -170,6 +183,7 @@ func NewKeyControllers(
 	return KeyControllers{
 		App:       app,
 		Radar:     radarPanel,
+		MiniRadar: miniRadar,
 		Notifs:    notifs,
 		BiasTee:   biasTee,
 		Selection: selection,
@@ -180,18 +194,21 @@ func NewKeyControllers(
 // dispatchRune is a strategy-table dispatcher keyed on the
 // pressed rune. Split out of HandleKeyInput so the switch stays
 // small enough for revive's cyclomatic-complexity gate.
+//
+// When the flight-details panel is open the scope-mutating keys
+// (+/-, a) route to the mini view instead of the main radar so
+// the operator can zoom the per-plane scope without backing out
+// of the panel.
 func dispatchRune(pressed rune, ctrls KeyControllers) {
+	if dispatchScopeRune(pressed, ctrls) {
+		return
+	}
+
 	switch pressed {
-	case '+':
-		ctrls.Radar.IncrementScope()
-	case '-':
-		ctrls.Radar.DecrementScope()
-	case 'a':
-		ctrls.Radar.ToggleAutoScope()
 	case 'h':
 		ctrls.Radar.ToggleHeadingIndicator()
 	case 't':
-		ctrls.Radar.ToggleTrailIndicator()
+		ctrls.Radar.CycleTrailMode()
 	case 'm':
 		ctrls.Radar.ToggleHeatIndicator()
 	case 'l':
@@ -207,6 +224,44 @@ func dispatchRune(pressed rune, ctrls KeyControllers) {
 	default:
 		// No-op for unrecognised keys; event still bubbles up.
 	}
+}
+
+// dispatchScopeRune handles the three keys whose target switches
+// between the main radar and the mini view depending on whether
+// the details panel is open. Returns true when the rune was
+// recognised so dispatchRune can short-circuit and skip the
+// generic switch.
+func dispatchScopeRune(pressed rune, ctrls KeyControllers) bool {
+	target := scopeTargetFor(ctrls)
+
+	switch pressed {
+	case '+':
+		target.IncrementScope()
+	case '-':
+		target.DecrementScope()
+	case 'a':
+		target.ToggleAutoScope()
+	default:
+		return false
+	}
+
+	return true
+}
+
+// scopeTargetFor picks which scope controller the +/-/a keys
+// should drive. When a selection is open and a MiniRadar
+// controller is wired up, the mini view wins; otherwise the
+// main radar handles the key. The main radar's full
+// RadarController already satisfies MiniRadarController via the
+// shared three-method subset, so the return type unifies cleanly.
+//
+//nolint:ireturn // interface return is intentional: callers dispatch on the unified scope-control surface.
+func scopeTargetFor(ctrls KeyControllers) MiniRadarController {
+	if ctrls.MiniRadar != nil && ctrls.Selection != nil && ctrls.Selection.IsOpen() {
+		return ctrls.MiniRadar
+	}
+
+	return ctrls.Radar
 }
 
 // UpdatePlaneList rewrites the right-column plane list panel
@@ -415,7 +470,7 @@ func UpdateFooter(commands *tview.TextView, radarPanel *radar.View, biasTee Bias
 type FooterState struct {
 	ScopeRange       float64
 	HeadingEnabled   bool
-	TrailEnabled     bool
+	TrailMode        radar.TrailMode
 	HeatEnabled      bool
 	AutoScopeEnabled bool
 	AirportsEnabled  bool
@@ -428,11 +483,11 @@ type FooterState struct {
 func FormatFooter(state FooterState) string {
 	return fmt.Sprintf(
 		"[::b]Range (+/-): %0.0f nm - [::b]Heading (h): %t - "+
-			"[::b]Trail (t): %t - [::b]Heat (m): %t - [::b]Autoscope (a): %t - "+
+			"[::b]Trail (t): %s - [::b]Heat (m): %t - [::b]Autoscope (a): %t - "+
 			"[::b]Airports (l): %t - [::b]Bias-T (b): %s",
 		state.ScopeRange,
 		state.HeadingEnabled,
-		state.TrailEnabled,
+		state.TrailMode,
 		state.HeatEnabled,
 		state.AutoScopeEnabled,
 		state.AirportsEnabled,
@@ -481,7 +536,7 @@ func footerStateFromRadar(radarPanel *radar.View, biasTee BiasTeeReader) FooterS
 	return FooterState{
 		ScopeRange:       radarPanel.GetScopeRange(),
 		HeadingEnabled:   radarPanel.GetHeadingIndicatorEnabled(),
-		TrailEnabled:     radarPanel.GetTrailIndicatorEnabled(),
+		TrailMode:        radarPanel.GetTrailMode(),
 		HeatEnabled:      radarPanel.GetHeatIndicatorEnabled(),
 		AutoScopeEnabled: radarPanel.GetAutoScopeEnabled(),
 		AirportsEnabled:  radarPanel.GetAirportIndicatorEnabled(),

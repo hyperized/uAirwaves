@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
+	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
 )
 
 func TestMiniScopeRangeFloorsAtMinimum(t *testing.T) {
@@ -82,6 +83,116 @@ func TestMiniScalesLockToTheConstrainedAxis(t *testing.T) {
 
 	if math.Abs(xScale-0.6) > 0.01 {
 		t.Errorf("uniform scale = %v, want ~0.6 (locked to the more constrained yRaw)", xScale)
+	}
+}
+
+// TestMiniCenterPicksPlaneWhenAvailable covers the centering
+// rule: a snapshot with a resolved position drives the centre;
+// no-snap or (0,0) sentinel falls back to the receiver.
+func TestMiniCenterPicksPlaneWhenAvailable(t *testing.T) {
+	t.Parallel()
+
+	snap := airplane.Snapshot{Latitude: 51.0, Longitude: 5.0}
+
+	gotLat, gotLon := miniCenter(snap, true, 52.0, 4.0)
+	if gotLat != snap.Latitude || gotLon != snap.Longitude {
+		t.Errorf("with snap: centre = (%v, %v), want (%v, %v) (plane)",
+			gotLat, gotLon, snap.Latitude, snap.Longitude)
+	}
+
+	gotLat, gotLon = miniCenter(airplane.Snapshot{}, false, 52.0, 4.0)
+	if gotLat != 52.0 || gotLon != 4.0 {
+		t.Errorf("no snap: centre = (%v, %v), want (52, 4) (receiver fallback)", gotLat, gotLon)
+	}
+
+	gotLat, gotLon = miniCenter(airplane.Snapshot{}, true, 52.0, 4.0)
+	if gotLat != 52.0 || gotLon != 4.0 {
+		t.Errorf("snap-without-position: centre = (%v, %v), want (52, 4) (still falls back)", gotLat, gotLon)
+	}
+}
+
+// TestMiniViewManualScopeDisablesAutoFit pins the implicit-off
+// rule: IncrementScope / DecrementScope must flip autoScope off
+// so the next Draw doesn't immediately overwrite the operator's
+// manual range.
+func TestMiniViewManualScopeDisablesAutoFit(t *testing.T) {
+	t.Parallel()
+
+	view := NewMiniView(location.New())
+
+	if !view.GetAutoScopeEnabled() {
+		t.Fatal("precondition: MiniView should construct with autoScope=true")
+	}
+
+	view.IncrementScope()
+
+	if view.GetAutoScopeEnabled() {
+		t.Error("IncrementScope must disable autoScope so the manual range sticks")
+	}
+
+	view.ToggleAutoScope() // back on for the next assertion
+
+	if !view.GetAutoScopeEnabled() {
+		t.Fatal("ToggleAutoScope should re-enable autoScope")
+	}
+
+	view.DecrementScope()
+
+	if view.GetAutoScopeEnabled() {
+		t.Error("DecrementScope must disable autoScope so the manual range sticks")
+	}
+}
+
+// TestMiniViewIncrementDecrementMoveScope confirms +/- actually
+// shift the scope range in the expected direction, not just flip
+// the autoScope flag. Starts from a few increments above the
+// scope's min so a single Decrement actually has headroom to
+// shrink into.
+func TestMiniViewIncrementDecrementMoveScope(t *testing.T) {
+	t.Parallel()
+
+	view := NewMiniView(location.New())
+	view.ToggleAutoScope() // off so the manual range sticks
+	view.IncrementScope()
+	view.IncrementScope()
+
+	afterIncrement := view.GetScopeRange()
+
+	view.DecrementScope()
+
+	if got := view.GetScopeRange(); got >= afterIncrement {
+		t.Errorf("DecrementScope should shrink the range; before=%v after=%v", afterIncrement, got)
+	}
+}
+
+// TestScopeForFrameRespectsAutoScopeFlag pins the resolver:
+// auto-on draws miniScopeRange (and persists it back into the
+// shared scope so the operator sees a sensible value when they
+// switch to manual); auto-off uses the stored scope verbatim.
+func TestScopeForFrameRespectsAutoScopeFlag(t *testing.T) {
+	t.Parallel()
+
+	view := NewMiniView(location.New())
+
+	snap := airplane.Snapshot{Latitude: 52.5, Longitude: 4.5}
+
+	autoFit := view.scopeForFrame(snap, true, true, 52.0, 4.0)
+	if autoFit < miniMinScopeNm {
+		t.Errorf("auto-on resolved range = %v, want >= %v", autoFit, miniMinScopeNm)
+	}
+
+	view.ToggleAutoScope() // off
+	view.myScope.Update()  // leave defaults
+
+	manual := view.scopeForFrame(snap, true, false, 52.0, 4.0)
+	if got := view.GetScopeRange(); manual != got {
+		t.Errorf("auto-off resolver should return the stored range; resolved=%v stored=%v", manual, got)
+	}
+
+	// auto-on with no snap returns the floor.
+	floor := view.scopeForFrame(airplane.Snapshot{}, false, true, 52.0, 4.0)
+	if floor != miniMinScopeNm {
+		t.Errorf("auto-on no-snap = %v, want floor %v", floor, miniMinScopeNm)
 	}
 }
 

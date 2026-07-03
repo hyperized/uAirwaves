@@ -58,6 +58,26 @@ const (
 	// cadence while sweeping so the redraw rate matches.
 	sweepSpinnerStep = 250 * time.Millisecond
 
+	// headingBlinkPeriod is the full on→off cycle for the heading
+	// projection dots. Picked at 1.5 s so the 1 Hz UI ticker
+	// can't lock onto a single phase — the operator sees the
+	// projection pulse off intermittently, which visually
+	// separates it from the steady, altitude-coloured trail dots.
+	headingBlinkPeriod = 1500 * time.Millisecond
+	// headingBlinkOn is how much of each period the heading is
+	// visible. 1 s on / 0.5 s off (~67 % duty cycle) makes the
+	// blink read as "slow pulse" — the projection stays present
+	// most of the time but visibly flickers off often enough to
+	// be unmistakably distinct from the trail.
+	headingBlinkOn = 1000 * time.Millisecond
+
+	// shortTrailEntries caps the number of PositionEntry the
+	// renderer paints when TrailMode is Short. Matches the old
+	// hard cap in pkg/airplane so the short setting feels
+	// identical to the pre-toggle behaviour; "long" mode draws
+	// the full slice.
+	shortTrailEntries = 10
+
 	// Flight-level bucket boundaries (in feet) used by
 	// getFlightLevelColor. Each constant is the exclusive upper
 	// bound of a colour band; altitudes at or above the highest
@@ -72,6 +92,56 @@ const (
 	flightLevelSub500 = 50000
 	flightLevelSub600 = 60000
 )
+
+// TrailMode is the operator-cycled state of the radar's trail
+// rendering: Off (no dots), Short (last shortTrailEntries fixes,
+// matches the old default), Long (every recorded fix until the
+// plane is pruned). The 't' key cycles in that order, mirroring
+// the natural verbosity gradient.
+type TrailMode uint8
+
+// Trail-mode enumerators. The zero value is TrailOff so a freshly
+// constructed View with no explicit mode renders no trail — same
+// no-side-effect default the other indicator bools follow.
+const (
+	TrailOff TrailMode = iota
+	TrailShort
+	TrailLong
+)
+
+// String returns the operator-facing label for a trail mode.
+// Used by the footer renderer; kept on the type so callers don't
+// hand-roll switch statements at every render site.
+func (m TrailMode) String() string {
+	switch m {
+	case TrailOff:
+		return "off"
+	case TrailShort:
+		return "short"
+	case TrailLong:
+		return "long"
+	default:
+		return "?"
+	}
+}
+
+// nextTrailMode advances the cycle: off → short → long → off.
+// Hoisted to a package function so the cycle order has one
+// canonical definition and tests can pin it without touching
+// View state. Unrecognised inputs fall through to TrailOff
+// (treated identically to TrailLong) so an out-of-range value
+// recovers cleanly on the next cycle.
+func nextTrailMode(current TrailMode) TrailMode {
+	if current == TrailOff {
+		return TrailShort
+	}
+
+	if current == TrailShort {
+		return TrailLong
+	}
+
+	return TrailOff
+}
 
 // SweepIndicator reports whether a long-running boot operation
 // (typically the SDR gain auto-sweep) is in progress. The radar
@@ -88,7 +158,8 @@ type View struct {
 	*tview.Box
 
 	headingIndicator bool
-	trailIndicator   bool
+	headingBlinking  bool
+	trailMode        TrailMode
 	heatIndicator    bool
 	autoScope        bool
 	airportIndicator bool
@@ -107,7 +178,8 @@ func New(planes *airplanes.Airplanes, myLocation *location.Location, sweep Sweep
 	return &View{
 		Box:              tview.NewBox().SetBorder(false).SetBorderPadding(1, 1, 1, 1),
 		headingIndicator: true,
-		trailIndicator:   true,
+		headingBlinking:  true,
+		trailMode:        TrailShort,
 		heatIndicator:    false,
 		airportIndicator: true,
 		myScope:          scope.New(),
@@ -142,20 +214,38 @@ func (r *View) ToggleHeadingIndicator() {
 	r.headingIndicator = !r.headingIndicator
 }
 
-// ToggleTrailIndicator toggles the display of position history trails.
-func (r *View) ToggleTrailIndicator() {
+// SetHeadingBlinking toggles the heading-line slow-blink effect.
+// Production code leaves the default (true) so the projection
+// pulses visibly against the steady trail; tests disable it to
+// pin the on phase and assert dot presence deterministically.
+func (r *View) SetHeadingBlinking(on bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.trailIndicator = !r.trailIndicator
+	r.headingBlinking = on
 }
 
-// GetTrailIndicatorEnabled returns whether trail display is enabled.
-func (r *View) GetTrailIndicatorEnabled() bool {
+// CycleTrailMode advances the trail-length cycle:
+// off → short → long → off. Cycling is the only mutator;
+// callers can't jump straight to a specific mode, which keeps
+// the operator's mental model aligned with what the 't' key
+// actually does at the keyboard.
+func (r *View) CycleTrailMode() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.trailMode = nextTrailMode(r.trailMode)
+}
+
+// GetTrailMode returns the current trail-length setting. The
+// footer reads this to render the on/short/long label and the
+// snapshot reader folds it into drawToggles so render code stays
+// lock-free at View level.
+func (r *View) GetTrailMode() TrailMode {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	return r.trailIndicator
+	return r.trailMode
 }
 
 // ToggleHeatIndicator toggles the heat map overlay.
@@ -233,7 +323,8 @@ func (r *View) GetAircraftCount() int {
 // downstream rendering helpers receive one read-only argument
 // instead of a fan of control-flag bools.
 type drawToggles struct {
-	heading, autoScope, heat, trail, airport bool
+	heading, autoScope, heat, airport bool
+	trail                             TrailMode
 }
 
 // Draw draws the radar scope view on the screen.
@@ -294,17 +385,38 @@ func (r *View) Draw(screen tcell.Screen) {
 // a single short RLock window. The struct return lets the rest of
 // Draw run lock-free at View level while the heatmap and scope
 // keep their own internal serialisation.
+//
+// The heading bit folds in the blink phase: if blinking is on and
+// the wall clock currently sits in the off slice of the period,
+// heading drops to false for this frame even though the indicator
+// is enabled — that gives the slow-blink effect without
+// per-renderer state.
 func (r *View) snapshotToggles() drawToggles {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	heading := r.headingIndicator
+	if heading && r.headingBlinking && !headingVisible(time.Now()) {
+		heading = false
+	}
+
 	return drawToggles{
-		heading:   r.headingIndicator,
+		heading:   heading,
 		autoScope: r.autoScope,
 		heat:      r.heatIndicator,
-		trail:     r.trailIndicator,
+		trail:     r.trailMode,
 		airport:   r.airportIndicator,
 	}
+}
+
+// headingVisible returns whether the heading projection should
+// paint at the supplied wall-clock instant. Pure function so
+// every Draw call lands on a deterministic phase derived from
+// the clock — no shared counter, no atomic, no lock.
+func headingVisible(now time.Time) bool {
+	phase := now.UnixNano() % headingBlinkPeriod.Nanoseconds()
+
+	return phase < headingBlinkOn.Nanoseconds()
 }
 
 // applyAutoScope sizes the scope to the farthest position-bearing
@@ -452,9 +564,9 @@ func (r *View) drawPlanes(
 
 		r.heat.add(nmX, nmY)
 
-		if toggles.trail {
+		if toggles.trail != TrailOff {
 			drawTrail(
-				screen, plane.PositionHistory,
+				screen, sliceTrail(plane.PositionHistory, toggles.trail),
 				centerX, centerY, xScale, yScale,
 				centerLatitude, centerLongitude,
 			)
@@ -496,6 +608,38 @@ func drawPlane(
 	tview.Print(screen, vertSymbol, planeX+1+len(altText), planeY+1, 1, tview.AlignLeft, vertColor)
 }
 
+// sliceTrail returns the slice of position entries the renderer
+// should paint for the given trail mode. Long passes the whole
+// history through; Short clamps to the last shortTrailEntries
+// fixes (matching the old hard cap); everything else short-
+// circuits to nil so the caller can still hand the result to
+// drawTrail without an extra guard (drawTrail over an empty
+// slice is a no-op).
+func sliceTrail(history []airplane.PositionEntry, mode TrailMode) []airplane.PositionEntry {
+	if mode == TrailLong {
+		return history
+	}
+
+	if mode == TrailShort {
+		if len(history) <= shortTrailEntries {
+			return history
+		}
+
+		return history[len(history)-shortTrailEntries:]
+	}
+
+	return nil
+}
+
+// trailGlyph is the rune painted for each historical position
+// fix. A filled bullet ('•', U+2022) is deliberately larger and
+// more solid than the heading line's middle dot ('·', U+00B7),
+// so the operator can distinguish "where I've been" from "where
+// I'm projected to go" by shape alone — colour isn't load-bearing
+// for terminals that render dark altitude buckets dimly against
+// the black background.
+const trailGlyph = '•'
+
 // drawTrail renders historical position dots behind a plane.
 // Each dot is coloured by the flight level the plane was at when
 // the fix was sampled (entry.Altitude) using the same palette the
@@ -524,7 +668,7 @@ func drawTrail(
 		style := tcell.StyleDefault.
 			Foreground(getFlightLevelColor(entry.Altitude)).
 			Background(tcell.ColorBlack)
-		screen.SetContent(screenX, screenY, '·', nil, style)
+		screen.SetContent(screenX, screenY, trailGlyph, nil, style)
 	}
 }
 

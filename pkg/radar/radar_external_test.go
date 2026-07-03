@@ -30,8 +30,8 @@ func TestNew(t *testing.T) {
 		t.Error("expected heading indicator to be enabled by default")
 	}
 
-	if !view.GetTrailIndicatorEnabled() {
-		t.Error("expected trail indicator to be enabled by default")
+	if got := view.GetTrailMode(); got != radar.TrailShort {
+		t.Errorf("expected default trail mode to be TrailShort, got %v", got)
 	}
 
 	if view.GetHeatIndicatorEnabled() {
@@ -93,24 +93,29 @@ func TestView_Toggles(t *testing.T) {
 		t.Error("ToggleAutoScope() failed to change state")
 	}
 
-	// Trail and heat toggles live alongside the heading/autoScope
-	// pair. Same contract: each call flips the flag, and the
-	// matching getter reflects it. Default-on per radar.New —
-	// flipping once must reach false.
-	if !view.GetTrailIndicatorEnabled() {
-		t.Error("trail indicator should default to enabled")
+	// Trail mode now cycles off → short → long → off. Defaults
+	// to short so the existing operator experience is unchanged
+	// after the bool-to-enum refactor.
+	if got := view.GetTrailMode(); got != radar.TrailShort {
+		t.Errorf("default trail mode = %v, want TrailShort", got)
 	}
 
-	view.ToggleTrailIndicator()
+	view.CycleTrailMode()
 
-	if view.GetTrailIndicatorEnabled() {
-		t.Error("ToggleTrailIndicator() failed to flip to disabled")
+	if got := view.GetTrailMode(); got != radar.TrailLong {
+		t.Errorf("CycleTrailMode() once = %v, want TrailLong", got)
 	}
 
-	view.ToggleTrailIndicator()
+	view.CycleTrailMode()
 
-	if !view.GetTrailIndicatorEnabled() {
-		t.Error("ToggleTrailIndicator() failed to flip back to enabled")
+	if got := view.GetTrailMode(); got != radar.TrailOff {
+		t.Errorf("CycleTrailMode() twice = %v, want TrailOff", got)
+	}
+
+	view.CycleTrailMode()
+
+	if got := view.GetTrailMode(); got != radar.TrailShort {
+		t.Errorf("CycleTrailMode() three times = %v, want TrailShort (cycle wrap)", got)
 	}
 
 	if view.GetHeatIndicatorEnabled() {
@@ -153,11 +158,12 @@ func TestView_GetAircraftCount(t *testing.T) {
 
 // TestView_Draw_TrailRendersHistory exercises the drawTrail code
 // path: a plane with a populated PositionHistory whose entries
-// all fall inside scope must produce at least one '·' cell on
+// all fall inside scope must produce at least one '•' cell on
 // the simulation screen. The plane's own '+' glyph is drawn last
-// for its own position, so we count '·' separately — the trail
-// is the only producer of that rune in the radar package outside
-// the heading indicator (off here).
+// for its own position, so we count '•' separately — the trail
+// is the only producer of that rune in the radar package; the
+// heading line uses '·' (middle dot) deliberately, so even with
+// heading enabled the two are disambiguated by shape.
 //
 // We use airplane.WithPosition iteratively, manipulating no
 // internal state — the pure public surface drives the trail.
@@ -172,11 +178,11 @@ func TestView_Draw_TrailRendersHistory(t *testing.T) {
 	view.SetRect(0, 0, 80, 24)
 
 	// Disable auto-scope so the scope range stays at the default
-	// 20nm. Heat already defaults off; trail defaults on. Heading
-	// defaults on too, but WithHeading clamps -1 to 0 so a "no
-	// heading" plane would still spray a northward line of '·'
-	// across the screen — kill heading explicitly so the only
-	// source of '·' is the trail.
+	// 20nm. Heading defaults on, but the trail glyph is now '•'
+	// (bullet) while the heading uses '·' (middle dot), so they
+	// no longer share a rune — keeping heading on is harmless for
+	// the assertion. We still kill heading to keep the search
+	// focused; flipping it on/off shouldn't change the outcome.
 	view.ToggleAutoScope()
 	view.ToggleHeadingIndicator()
 
@@ -208,7 +214,7 @@ func TestView_Draw_TrailRendersHistory(t *testing.T) {
 	screen.SetSize(80, 24)
 	view.Draw(screen)
 
-	const trailDot = '·'
+	const trailDot = '•'
 
 	var found bool
 
@@ -228,7 +234,7 @@ func TestView_Draw_TrailRendersHistory(t *testing.T) {
 	}
 
 	if !found {
-		t.Error("trail '·' not found anywhere on the simulation screen after Draw")
+		t.Error("trail '•' not found anywhere on the simulation screen after Draw")
 	}
 }
 
@@ -246,7 +252,8 @@ func TestView_Draw_HeatRenders(t *testing.T) {
 	view.SetRect(0, 0, 80, 24)
 	view.ToggleAutoScope()        // pin scope at 20nm
 	view.ToggleHeadingIndicator() // keep the screen clear of heading dots
-	view.ToggleTrailIndicator()   // and trail dots
+	view.CycleTrailMode()         // short → long
+	view.CycleTrailMode()         // long → off (no trail dots painted)
 	view.ToggleHeatIndicator()    // turn heat ON
 
 	planes.Ensure("HOTONE")
@@ -289,13 +296,13 @@ func TestView_Draw_HeatRenders(t *testing.T) {
 // without time control, so we use an aux package-test fixture
 // that places a plane with a non-zero current position plus a
 // fake history that includes one (0, 0) entry; the test passes
-// when at most one '·' (for the non-zero history entry) renders
+// when at most one '•' (for the non-zero history entry) renders
 // — the (0, 0) one is dropped.
 //
 // We have no public seam for "set history"; the next best move is
 // to drive Draw with a plane whose only history fix is at (0,0).
 // drawTrail must take the `continue` and emit no dot. We assert
-// the screen has no '·' anywhere — '+' at the plane position is
+// the screen has no '•' anywhere — '+' at the plane position is
 // the only glyph from the plane itself in this configuration.
 func TestView_Draw_TrailSkipsZeroPositionEntries(t *testing.T) {
 	t.Parallel()
@@ -342,13 +349,13 @@ func TestView_Draw_TrailSkipsZeroPositionEntries(t *testing.T) {
 	screen.SetSize(80, 24)
 	view.Draw(screen)
 
-	const trailDot = '·'
+	const trailDot = '•'
 
 	for posY := range 24 {
 		for posX := range 80 {
 			cellStr, _, _ := screen.Get(posX, posY)
 			if []rune(cellStr)[0] == trailDot {
-				t.Errorf("found trail '·' at (%d, %d) despite history entry at (0, 0)", posX, posY)
+				t.Errorf("found trail '•' at (%d, %d) despite history entry at (0, 0)", posX, posY)
 			}
 		}
 	}
@@ -366,8 +373,10 @@ func TestView_Draw_HeadingLineRenders(t *testing.T) {
 	planes := airplanes.New()
 	view := radar.New(planes, loc, nil)
 	view.SetRect(0, 0, 80, 24)
-	view.ToggleAutoScope()      // pin scope at 20nm
-	view.ToggleTrailIndicator() // off, so '·' is heading-only (heading defaults on)
+	view.ToggleAutoScope()         // pin scope at 20nm
+	view.CycleTrailMode()          // short → long
+	view.CycleTrailMode()          // long → off, so '·' is heading-only (heading defaults on)
+	view.SetHeadingBlinking(false) // disable blink so the assertion can't race the off phase
 
 	planes.Ensure("HEADED")
 

@@ -100,16 +100,20 @@ func TestWithPositionAppendsAndRateLimits(t *testing.T) {
 	}
 }
 
-// TestWithPositionTruncatesToMaxHistory exercises the cap branch:
-// once the slice grows past maxPositionHistory, the oldest entry
-// is dropped. We force every append through the rate gate by
-// rewinding lastPositionTime between calls.
-func TestWithPositionTruncatesToMaxHistory(t *testing.T) {
+// TestWithPositionRetainsEveryRatedFix locks the new contract:
+// once the radar gained a "long" trail mode, the airplane keeps
+// every appended fix instead of capping at 10. We force every
+// append through the rate gate by rewinding lastPositionTime
+// between calls; the slice grows without truncation, ordering
+// preserved.
+func TestWithPositionRetainsEveryRatedFix(t *testing.T) {
 	t.Parallel()
 
 	plane := New("ABCDEF")
 
-	for index := range maxPositionHistory + 3 {
+	const wantEntries = 25
+
+	for index := range wantEntries {
 		plane.mu.Lock()
 		plane.lastPositionTime = time.Now().Add(-2 * positionHistoryInterval)
 		plane.mu.Unlock()
@@ -119,20 +123,18 @@ func TestWithPositionTruncatesToMaxHistory(t *testing.T) {
 	}
 
 	history := plane.GetSnapshot().PositionHistory
-	if got := len(history); got != maxPositionHistory {
-		t.Fatalf("len(history) = %d, want %d (truncation cap)", got, maxPositionHistory)
+	if got := len(history); got != wantEntries {
+		t.Fatalf("len(history) = %d, want %d (cap removed)", got, wantEntries)
 	}
 
-	// The oldest three entries must have been dropped: the first
-	// remaining entry is index 3, the last is index maxPositionHistory+2.
-	const dropped = 3
-
-	if got := history[0].Latitude; got != float64(dropped) {
-		t.Errorf("history[0].Latitude = %v, want %v (oldest dropped)", got, float64(dropped))
+	// First entry must still be the very first append (no head drop).
+	if got := history[0].Latitude; got != 0 {
+		t.Errorf("history[0].Latitude = %v, want 0 (oldest fix retained)", got)
 	}
 
-	if got := history[len(history)-1].Latitude; got != float64(maxPositionHistory+2) {
-		t.Errorf("history[last].Latitude = %v, want %v", got, float64(maxPositionHistory+2))
+	// Last entry is the final iteration index.
+	if got := history[len(history)-1].Latitude; got != float64(wantEntries-1) {
+		t.Errorf("history[last].Latitude = %v, want %v", got, float64(wantEntries-1))
 	}
 }
 

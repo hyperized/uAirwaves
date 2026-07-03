@@ -94,7 +94,7 @@ func (r *fakeRadar) IncrementScope()         { r.incrementScope++ }
 func (r *fakeRadar) DecrementScope()         { r.decrementScope++ }
 func (r *fakeRadar) ToggleAutoScope()        { r.autoScope++ }
 func (r *fakeRadar) ToggleHeadingIndicator() { r.heading++ }
-func (r *fakeRadar) ToggleTrailIndicator()   { r.trail++ }
+func (r *fakeRadar) CycleTrailMode()         { r.trail++ }
 func (r *fakeRadar) ToggleHeatIndicator()    { r.heat++ }
 func (r *fakeRadar) ToggleAirportIndicator() { r.airport++ }
 
@@ -217,7 +217,7 @@ func assertKeyDispatch(t *testing.T, testCase keyDispatchCase) {
 
 	returned := ui.HandleKeyInput(
 		testCase.event,
-		ui.NewKeyControllers(app, rdr, nts, bia, nil, nil),
+		ui.NewKeyControllers(app, rdr, nil, nts, bia, nil, nil),
 	)
 	if returned != testCase.event {
 		t.Errorf("HandleKeyInput should return event unchanged; got %v want %v", returned, testCase.event)
@@ -721,33 +721,35 @@ func TestFormatFooter(t *testing.T) {
 			state: ui.FooterState{
 				ScopeRange:       50,
 				HeadingEnabled:   true,
-				TrailEnabled:     false,
+				TrailMode:        radar.TrailOff,
 				HeatEnabled:      true,
 				AutoScopeEnabled: false,
 				AirportsEnabled:  true,
 			},
 			want: "[::b]Range (+/-): 50 nm - [::b]Heading (h): true - " +
-				"[::b]Trail (t): false - [::b]Heat (m): true - [::b]Autoscope (a): false - " +
+				"[::b]Trail (t): off - [::b]Heat (m): true - [::b]Autoscope (a): false - " +
 				"[::b]Airports (l): true - [::b]Bias-T (b): n/a",
 		},
 		{
 			name: "bias-tee on",
 			state: ui.FooterState{
+				TrailMode:        radar.TrailShort,
 				BiasTeeSupported: true,
 				BiasTeeEnabled:   true,
 			},
 			want: "[::b]Range (+/-): 0 nm - [::b]Heading (h): false - " +
-				"[::b]Trail (t): false - [::b]Heat (m): false - [::b]Autoscope (a): false - " +
+				"[::b]Trail (t): short - [::b]Heat (m): false - [::b]Autoscope (a): false - " +
 				"[::b]Airports (l): false - [::b]Bias-T (b): on",
 		},
 		{
 			name: "bias-tee off",
 			state: ui.FooterState{
+				TrailMode:        radar.TrailLong,
 				BiasTeeSupported: true,
 				BiasTeeEnabled:   false,
 			},
 			want: "[::b]Range (+/-): 0 nm - [::b]Heading (h): false - " +
-				"[::b]Trail (t): false - [::b]Heat (m): false - [::b]Autoscope (a): false - " +
+				"[::b]Trail (t): long - [::b]Heat (m): false - [::b]Autoscope (a): false - " +
 				"[::b]Airports (l): false - [::b]Bias-T (b): off",
 		},
 	}
@@ -802,7 +804,7 @@ func TestHandleKeyInputEscClosesDetailsWhenOpen(t *testing.T) {
 
 	event := tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone)
 
-	ui.HandleKeyInput(event, ui.NewKeyControllers(app, rdr, nts, bia, sel, lst))
+	ui.HandleKeyInput(event, ui.NewKeyControllers(app, rdr, nil, nts, bia, sel, lst))
 
 	if app.stops != 0 {
 		t.Errorf("Esc with details open should NOT stop the app, stops = %d", app.stops)
@@ -828,7 +830,7 @@ func TestHandleKeyInputEscQuitsWhenDetailsClosed(t *testing.T) {
 
 	event := tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone)
 
-	ui.HandleKeyInput(event, ui.NewKeyControllers(app, rdr, nts, bia, sel, lst))
+	ui.HandleKeyInput(event, ui.NewKeyControllers(app, rdr, nil, nts, bia, sel, lst))
 
 	if app.stops != 1 {
 		t.Errorf("Esc with details closed should stop the app, stops = %d", app.stops)
@@ -837,6 +839,93 @@ func TestHandleKeyInputEscQuitsWhenDetailsClosed(t *testing.T) {
 	if sel.closeCalls != 0 {
 		t.Errorf("Esc with details closed should not call Close, got %d", sel.closeCalls)
 	}
+}
+
+// fakeMiniRadar implements MiniRadarController for the scope-key
+// redirect tests. Counts the three method calls the dispatcher
+// fires so a single assertion confirms which target served the
+// keystroke.
+type fakeMiniRadar struct {
+	increment, decrement, autoScope int
+}
+
+func (f *fakeMiniRadar) IncrementScope()  { f.increment++ }
+func (f *fakeMiniRadar) DecrementScope()  { f.decrement++ }
+func (f *fakeMiniRadar) ToggleAutoScope() { f.autoScope++ }
+
+// TestHandleKeyInputScopeKeysRoute pins the conditional redirect
+// of +/-/a between the main radar and the mini view. When the
+// flight-details panel is open the mini radar wins; otherwise
+// the main radar still handles the keys. The table covers both
+// branches so a future logic flip is caught immediately.
+func TestHandleKeyInputScopeKeysRoute(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		selectionOpen    bool
+		wantMainScope    int
+		wantMiniScope    int
+		failOnMainOpen   string
+		failOnMiniClosed string
+	}{
+		{
+			name:           "details open routes scope keys to mini",
+			selectionOpen:  true,
+			wantMiniScope:  1,
+			failOnMainOpen: "main radar should NOT receive scope keys when details open",
+		},
+		{
+			name:             "details closed routes scope keys to main",
+			selectionOpen:    false,
+			wantMainScope:    1,
+			failOnMiniClosed: "mini radar should NOT receive scope keys when details closed",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			rdr, mini := assertScopeRouting(t, testCase.selectionOpen)
+
+			if testCase.wantMainScope == 0 && (rdr.incrementScope+rdr.decrementScope+rdr.autoScope) != 0 {
+				t.Errorf("%s; got inc=%d dec=%d auto=%d", testCase.failOnMainOpen,
+					rdr.incrementScope, rdr.decrementScope, rdr.autoScope)
+			}
+
+			if testCase.wantMiniScope == 0 && (mini.increment+mini.decrement+mini.autoScope) != 0 {
+				t.Errorf("%s; got inc=%d dec=%d auto=%d", testCase.failOnMiniClosed,
+					mini.increment, mini.decrement, mini.autoScope)
+			}
+		})
+	}
+}
+
+// assertScopeRouting fires +/-/a through HandleKeyInput against a
+// freshly-constructed controller set with the supplied selection
+// state and returns the recorders for further assertion. Pulled
+// out so the table case body stays under the wsl_v5 statement
+// limit and the duplication linter doesn't flag two near-
+// identical drivers.
+func assertScopeRouting(t *testing.T, selectionOpen bool) (*fakeRadar, *fakeMiniRadar) {
+	t.Helper()
+
+	app := &fakeApp{}
+	rdr := &fakeRadar{}
+	mini := &fakeMiniRadar{}
+	nts := &fakeNotifs{}
+	bia := &fakeBias{}
+	sel := &fakeSelection{openVal: selectionOpen}
+	lst := &fakePlaneList{}
+
+	ctrls := ui.NewKeyControllers(app, rdr, mini, nts, bia, sel, lst)
+
+	for _, pressed := range []rune{'+', '-', 'a'} {
+		ui.HandleKeyInput(tcell.NewEventKey(tcell.KeyRune, pressed, tcell.ModNone), ctrls)
+	}
+
+	return rdr, mini
 }
 
 // TestHandleKeyInputEnterOpensSelection pins the Enter →
@@ -853,7 +942,7 @@ func TestHandleKeyInputEnterOpensSelection(t *testing.T) {
 
 	event := tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone)
 
-	ui.HandleKeyInput(event, ui.NewKeyControllers(app, rdr, nts, bia, sel, lst))
+	ui.HandleKeyInput(event, ui.NewKeyControllers(app, rdr, nil, nts, bia, sel, lst))
 
 	if sel.openCalls != 1 {
 		t.Errorf("Enter should call Selection.OpenAt once, got %d", sel.openCalls)
