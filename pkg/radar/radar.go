@@ -344,7 +344,7 @@ func (r *View) Draw(screen tcell.Screen) {
 	centerX, centerY := innerX+width/2, innerY+height/2
 
 	centerLatitude, centerLongitude := r.myLocation.GetCoordinates()
-	planeList := r.planes.Sorted(centerLatitude, centerLongitude)
+	planeList := r.planes.Sorted(centerLatitude, centerLongitude, airplanes.WithTrails())
 
 	if toggles.autoScope {
 		r.applyAutoScope(planeList, centerLatitude, centerLongitude)

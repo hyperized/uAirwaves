@@ -147,6 +147,39 @@ func TestSorted(t *testing.T) {
 	}
 }
 
+// TestSortedTrailsOptOut locks the hot-path saving: the default Sorted
+// pass drops position history from every snapshot (the plane list and
+// stats consumers never read it), and WithTrails opts back in for the
+// radar draw that does.
+func TestSortedTrailsOptOut(t *testing.T) {
+	t.Parallel()
+
+	list := airplanes.New()
+	list.Ensure("TRL1")
+
+	plane, _ := list.Get("TRL1")
+	plane.Update(airplane.WithPosition(52.1, 13.1))
+
+	if got := len(plane.GetSnapshot().PositionHistory); got != 1 {
+		t.Fatalf("setup: plane should hold 1 fix, got %d", got)
+	}
+
+	for _, snap := range list.Sorted(52.0, 13.0) {
+		if snap.PositionHistory != nil {
+			t.Errorf("default Sorted: PositionHistory = %v, want nil", snap.PositionHistory)
+		}
+	}
+
+	withTrails := list.Sorted(52.0, 13.0, airplanes.WithTrails())
+	if len(withTrails) != 1 {
+		t.Fatalf("WithTrails Sorted: got %d snapshots, want 1", len(withTrails))
+	}
+
+	if got := len(withTrails[0].PositionHistory); got != 1 {
+		t.Errorf("WithTrails Sorted: history len = %d, want 1 (trail retained)", got)
+	}
+}
+
 func TestHaversineDistance_EdgeCases(t *testing.T) {
 	t.Parallel()
 

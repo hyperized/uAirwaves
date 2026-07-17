@@ -165,6 +165,106 @@ func TestWithPositionClampsExtremes(t *testing.T) {
 	}
 }
 
+// forcePositionAppend rewinds the plane's private lastPositionTime so
+// the next WithPosition call clears the rate gate and actually appends.
+// Living in the internal test file is what lets it touch lastPositionTime.
+func forcePositionAppend(t *testing.T, plane *Airplane) {
+	t.Helper()
+
+	plane.mu.Lock()
+	plane.lastPositionTime = time.Now().Add(-2 * positionHistoryInterval)
+	plane.mu.Unlock()
+}
+
+// TestWithPositionCapsHistory drives more than maxPositionHistory rated
+// fixes through WithPosition and pins the ring behaviour: the slice stops
+// growing at the cap, the oldest fix drops on each further append, and
+// ordering stays newest-last. Without the cap a long-lived contact (a
+// holding pattern, a ground vehicle) would grow positionHistory without
+// bound and leak memory for the session's lifetime.
+func TestWithPositionCapsHistory(t *testing.T) {
+	t.Parallel()
+
+	plane := New("CAP001")
+
+	const overCap = maxPositionHistory + 50
+
+	// Altitude is the per-entry sequence key: WithPosition captures the
+	// current altitude, and unlike lat/lon it is not range-clamped, so
+	// each fix carries a unique, monotonically rising marker.
+	for index := range overCap {
+		forcePositionAppend(t, plane)
+		plane.Update(WithAltitude(float64(index)), WithPosition(52.0, 13.0))
+	}
+
+	history := plane.GetSnapshot().PositionHistory
+	if got := len(history); got != maxPositionHistory {
+		t.Fatalf("len(history) = %d, want %d (capped)", got, maxPositionHistory)
+	}
+
+	// Oldest retained fix is index overCap-maxPositionHistory; every head
+	// entry before it was dropped by the copy-down.
+	wantOldest := float64(overCap - maxPositionHistory)
+	if got := history[0].Altitude; got != wantOldest {
+		t.Errorf("history[0].Altitude = %v, want %v (oldest retained after drop)", got, wantOldest)
+	}
+
+	if got := history[len(history)-1].Altitude; got != float64(overCap-1) {
+		t.Errorf("history[last].Altitude = %v, want %v (newest at tail)", got, float64(overCap-1))
+	}
+
+	// The whole window must stay contiguous and in order — a botched
+	// copy-down would duplicate or reorder entries.
+	for i := 1; i < len(history); i++ {
+		if history[i].Altitude != history[i-1].Altitude+1 {
+			t.Fatalf("history not contiguous at %d: %v then %v",
+				i, history[i-1].Altitude, history[i].Altitude)
+		}
+	}
+}
+
+// TestSnapshotIsolatedFromCapShift proves GetSnapshot's copy keeps an
+// already-taken snapshot immune to the in-place copy-down WithPosition
+// performs once history is at cap. If GetSnapshot aliased the backing
+// array, later appends would silently rewrite a snapshot the UI is still
+// rendering.
+func TestSnapshotIsolatedFromCapShift(t *testing.T) {
+	t.Parallel()
+
+	plane := New("ISO001")
+
+	// Fill to cap, altitude as the unclamped per-entry sequence key.
+	for index := range maxPositionHistory {
+		forcePositionAppend(t, plane)
+		plane.Update(WithAltitude(float64(index)), WithPosition(52.0, 13.0))
+	}
+
+	snap := plane.GetSnapshot()
+	if got := len(snap.PositionHistory); got != maxPositionHistory {
+		t.Fatalf("pre-shift snapshot len = %d, want %d", got, maxPositionHistory)
+	}
+
+	head := snap.PositionHistory[0].Altitude
+	tail := snap.PositionHistory[len(snap.PositionHistory)-1].Altitude
+
+	// Each of these appends does an in-place copy-down on the plane's
+	// backing array — the snapshot taken above must not move.
+	const extraAppends = 10
+
+	for index := maxPositionHistory; index < maxPositionHistory+extraAppends; index++ {
+		forcePositionAppend(t, plane)
+		plane.Update(WithAltitude(float64(index)), WithPosition(52.0, 13.0))
+	}
+
+	if got := snap.PositionHistory[0].Altitude; got != head {
+		t.Errorf("snapshot head mutated to %v, want %v (isolation broken)", got, head)
+	}
+
+	if got := snap.PositionHistory[len(snap.PositionHistory)-1].Altitude; got != tail {
+		t.Errorf("snapshot tail mutated to %v, want %v (isolation broken)", got, tail)
+	}
+}
+
 // TestWithSquawkEmergencyTransitions locks in the C1 fix: the
 // emergency flag must be recomputed on every non-empty squawk
 // update so a transition out of an emergency code (e.g. 7700 to

@@ -100,6 +100,36 @@ func TestAirplane_GetSnapshot(t *testing.T) {
 	}
 }
 
+// TestGetSnapshotWithoutHistory locks the opt-out path: WithoutHistory
+// leaves PositionHistory nil (no allocation, no copy) while every other
+// field is still populated. The plane list and stats panel use this to
+// skip the O(trail) copy they never read.
+func TestGetSnapshotWithoutHistory(t *testing.T) {
+	t.Parallel()
+
+	plane := airplane.New(testICAO)
+	plane.Update(
+		airplane.WithCallsign("DLH123"),
+		airplane.WithAltitude(30000),
+		airplane.WithPosition(52.5, 13.4),
+	)
+
+	// Default snapshot carries the trail.
+	if got := len(plane.GetSnapshot().PositionHistory); got != 1 {
+		t.Fatalf("default GetSnapshot: history len = %d, want 1", got)
+	}
+
+	snap := plane.GetSnapshot(airplane.WithoutHistory())
+
+	if snap.PositionHistory != nil {
+		t.Errorf("WithoutHistory: PositionHistory = %v, want nil", snap.PositionHistory)
+	}
+
+	if snap.Callsign != "DLH123" || snap.Altitude != 30000 || snap.Latitude != 52.5 {
+		t.Errorf("WithoutHistory dropped non-history fields: %+v", snap)
+	}
+}
+
 func TestGetLastUpdate(t *testing.T) {
 	t.Parallel()
 

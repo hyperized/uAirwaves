@@ -21,6 +21,10 @@ const (
 	defaultVertRate         = 0
 	positionHistoryInterval = 10 * time.Second
 
+	// maxPositionHistory caps the trail at 256 fixes: at one fix per
+	// positionHistoryInterval that is ~43 min of history, ~6 KiB per plane.
+	maxPositionHistory = 256
+
 	squawkHijacking        = "7500"
 	squawkRadioFailure     = "7600"
 	squawkGeneralEmergency = "7700"
@@ -92,13 +96,39 @@ type Snapshot struct {
 	PositionHistory []PositionEntry
 }
 
-// GetSnapshot returns all fields in a single lock acquisition.
-func (a *Airplane) GetSnapshot() Snapshot {
+// SnapshotOption tunes what GetSnapshot copies out of the airplane.
+type SnapshotOption func(*snapshotConfig)
+
+type snapshotConfig struct {
+	includeHistory bool
+}
+
+// WithoutHistory leaves Snapshot.PositionHistory nil, skipping the
+// O(history) copy for callers that never read the trail (the plane
+// list and stats panel). GetSnapshot copies the trail by default.
+func WithoutHistory() SnapshotOption {
+	return func(c *snapshotConfig) {
+		c.includeHistory = false
+	}
+}
+
+// GetSnapshot returns all fields in a single lock acquisition. The
+// position history is deep-copied so the snapshot stays isolated from
+// later in-place trail mutation; pass WithoutHistory to skip that copy.
+func (a *Airplane) GetSnapshot(opts ...SnapshotOption) Snapshot {
+	cfg := snapshotConfig{includeHistory: true}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
-	history := make([]PositionEntry, len(a.positionHistory))
-	copy(history, a.positionHistory)
+	var history []PositionEntry
+	if cfg.includeHistory {
+		history = make([]PositionEntry, len(a.positionHistory))
+		copy(history, a.positionHistory)
+	}
 
 	return Snapshot{
 		ICAO:            a.icao,
@@ -261,6 +291,17 @@ func WithPosition(latitude, longitude float64) Option {
 			Longitude: plane.longitude,
 			Altitude:  plane.altitude,
 		}
-		plane.positionHistory = append(plane.positionHistory, entry)
+
+		if len(plane.positionHistory) < maxPositionHistory {
+			plane.positionHistory = append(plane.positionHistory, entry)
+
+			return
+		}
+
+		// At cap: shift the window down one slot in place and store the
+		// newest fix. GetSnapshot copied the old backing array, so prior
+		// snapshots stay isolated from this reuse.
+		copy(plane.positionHistory, plane.positionHistory[1:])
+		plane.positionHistory[len(plane.positionHistory)-1] = entry
 	}
 }

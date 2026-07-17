@@ -64,6 +64,22 @@ func (l *Airplanes) Prune(threshold time.Duration) {
 	}
 }
 
+// SortOption tunes what Sorted copies into each snapshot.
+type SortOption func(*sortConfig)
+
+type sortConfig struct {
+	trails bool
+}
+
+// WithTrails keeps each snapshot's position history. Sorted omits it
+// by default because two of its three consumers (plane list, stats)
+// never read the trail; only the radar draw opts in.
+func WithTrails() SortOption {
+	return func(c *sortConfig) {
+		c.trails = true
+	}
+}
+
 // Sorted returns a thread-safe slice of plane snapshots sorted
 // by:
 //
@@ -75,13 +91,24 @@ func (l *Airplanes) Prune(threshold time.Duration) {
 // the comparator works on value copies and the per-tick total is
 // one RLock per *Airplane (not three: previous shape took a
 // snapshot pair per comparator call). Callers consume snapshots
-// directly — no re-acquire on the hot path.
-func (l *Airplanes) Sorted(receiverLat, receiverLon float64) List {
+// directly — no re-acquire on the hot path. Position history is
+// dropped from the snapshots unless WithTrails is passed.
+func (l *Airplanes) Sorted(receiverLat, receiverLon float64, opts ...SortOption) List {
+	cfg := sortConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	var snapOpts []airplane.SnapshotOption
+	if !cfg.trails {
+		snapOpts = append(snapOpts, airplane.WithoutHistory())
+	}
+
 	l.mu.RLock()
 
 	snapshots := make(List, 0, len(l.planes))
 	for _, p := range l.planes {
-		snapshots = append(snapshots, p.GetSnapshot())
+		snapshots = append(snapshots, p.GetSnapshot(snapOpts...))
 	}
 
 	l.mu.RUnlock()
