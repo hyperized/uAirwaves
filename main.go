@@ -312,7 +312,11 @@ func buildADSBOptions(cfg cliConfig, myLocation *location.Location, selfLocator 
 		return opts
 	}
 
-	opts = append(opts, adsb.WithSourceLabel("SDR"))
+	// Reaching here means neither --replay-iq nor --beast was set, so
+	// this is the local-SDR source: enable reconnect so an unplugged
+	// dongle backs off and retries instead of killing the TUI. Replay
+	// and BEAST return above and never carry this option.
+	opts = append(opts, adsb.WithSourceLabel("SDR"), adsb.WithSDRReconnect())
 
 	if cfg.biasTee {
 		opts = append(opts, adsb.WithReceiverFactory(biasTeeReceiverFactory))

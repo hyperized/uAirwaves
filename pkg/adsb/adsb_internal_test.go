@@ -3,6 +3,7 @@ package adsb
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -254,6 +255,292 @@ func TestStreamReadErrorReturnsWrapped(t *testing.T) {
 	err := stream.Stream(t.Context(), planes)
 	if !errors.Is(err, errSyntheticReceiverRead) {
 		t.Errorf("Stream err = %v, want errSyntheticReceiverRead", err)
+	}
+}
+
+// scriptedReceiverFactory hands out receivers from a queue in order;
+// once the queue drains it returns openErr for every subsequent open.
+// Guarded by a mutex because the streamSDR goroutine calls open while
+// the test goroutine reads callCount.
+type scriptedReceiverFactory struct {
+	mu      sync.Mutex
+	queue   []Receiver
+	openErr error
+	calls   int
+}
+
+//nolint:ireturn // mirrors ReceiverFactory: the interface is the seam Stream consumes.
+func (s *scriptedReceiverFactory) open() (Receiver, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.calls++
+
+	if len(s.queue) == 0 {
+		return nil, s.openErr
+	}
+
+	rcv := s.queue[0]
+	s.queue = s.queue[1:]
+
+	return rcv, nil
+}
+
+func (s *scriptedReceiverFactory) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.calls
+}
+
+// markerDemod emits its canned frames only when the first processed
+// sample byte equals marker, so a scripted receiver can decide which
+// open attempt produces a decodable frame.
+type markerDemod struct {
+	marker byte
+	frames []demod.Frame
+}
+
+func (d *markerDemod) Process(samples []byte) []demod.Frame {
+	if len(samples) > 0 && samples[0] == d.marker {
+		return d.frames
+	}
+
+	return nil
+}
+
+// replayEndReceiver opens fine, then reports ErrReplayEnded on the
+// first read like the file-backed receiver at end of capture.
+type replayEndReceiver struct{ closed int }
+
+func (*replayEndReceiver) Read(context.Context, []byte) (int, error) {
+	return 0, ErrReplayEnded
+}
+
+func (r *replayEndReceiver) Close() error {
+	r.closed++
+
+	return nil
+}
+
+// klm1023IdentFrame is the DF 17 ES identification frame the modes
+// package decodes to callsign "KLM1023" — reused so the reconnect
+// tests can prove a real frame reached the airplanes store.
+func klm1023IdentFrame() demod.Frame {
+	return demod.Frame{
+		Bytes: []byte{
+			0x8D, 0x40, 0x62, 0x1D,
+			0x20, 0x2C, 0xC3, 0x71, 0xC3, 0x2C, 0xE0,
+			0x57, 0x60, 0x98,
+		},
+		DF:       17,
+		CRC:      0,
+		WallTime: time.Now(),
+	}
+}
+
+func TestWithSDRReconnectEnablesFlag(t *testing.T) {
+	t.Parallel()
+
+	if New().sdrReconnect {
+		t.Error("sdrReconnect default = true, want false")
+	}
+
+	if !New(WithSDRReconnect()).sdrReconnect {
+		t.Error("WithSDRReconnect did not set sdrReconnect")
+	}
+}
+
+func TestNewSDRReconnectBackoffDefaults(t *testing.T) {
+	t.Parallel()
+
+	stream := New()
+	if stream.sdrReconnectBase != sdrReconnectBaseDelay {
+		t.Errorf("sdrReconnectBase = %v, want %v", stream.sdrReconnectBase, sdrReconnectBaseDelay)
+	}
+
+	if stream.sdrReconnectMax != sdrReconnectMaxDelay {
+		t.Errorf("sdrReconnectMax = %v, want %v", stream.sdrReconnectMax, sdrReconnectMaxDelay)
+	}
+}
+
+// TestStreamSDRReconnectsToSecondReceiver is the core reconnect case:
+// receiver #1 serves a benign read then errors (a mid-stream USB
+// drop); the factory hands out receiver #2, whose marker read carries
+// the identification frame. The plane registering proves #2's frame
+// flowed, and both receivers being closed once proves per-attempt
+// cleanup ran.
+func TestStreamSDRReconnectsToSecondReceiver(t *testing.T) {
+	t.Parallel()
+
+	rcv1 := &fakeReceiver{reads: []fakeRead{
+		{data: []byte{0x00}},            // benign read, marker mismatch → no frame
+		{err: errSyntheticReceiverRead}, // then the dongle "drops"
+	}}
+	rcv2 := &fakeReceiver{reads: []fakeRead{
+		{data: []byte{0xAA}}, // marker read → demod emits the frame
+	}}
+
+	factory := &scriptedReceiverFactory{queue: []Receiver{rcv1, rcv2}}
+
+	stream := New(
+		WithSDRReconnect(),
+		WithReceiverFactory(factory.open),
+		WithDemodulatorFactory(func() Demodulator {
+			return &markerDemod{marker: 0xAA, frames: []demod.Frame{klm1023IdentFrame()}}
+		}),
+	)
+	stream.sdrReconnectBase = time.Millisecond
+	stream.sdrReconnectMax = time.Millisecond
+
+	planes := airplanes.New()
+
+	if err := stream.Stream(t.Context(), planes); err != nil {
+		t.Fatalf("Stream err = %v, want nil after reconnect", err)
+	}
+
+	if _, ok := planes.Get("40621D"); !ok {
+		t.Error("plane 40621D not registered — frame from the second receiver was not processed")
+	}
+
+	if got := factory.callCount(); got != 2 {
+		t.Errorf("factory calls = %d, want 2 (open #1 + reconnect open #2)", got)
+	}
+
+	if rcv1.closed != 1 || rcv2.closed != 1 {
+		t.Errorf("closed counts = (%d, %d), want (1, 1) — per-attempt cleanup", rcv1.closed, rcv2.closed)
+	}
+}
+
+// TestStreamSDRReconnectCancelsDuringBackoff drives a factory that
+// opens once then fails every re-open, so the loop is stuck cycling
+// the backoff branch. Cancelling the context must return nil promptly
+// rather than stalling out the full 30 s cap.
+func TestStreamSDRReconnectCancelsDuringBackoff(t *testing.T) {
+	t.Parallel()
+
+	rcv1 := &fakeReceiver{reads: []fakeRead{{err: errSyntheticReceiverRead}}}
+	factory := &scriptedReceiverFactory{
+		queue:   []Receiver{rcv1},
+		openErr: errSyntheticReceiverOpen,
+	}
+
+	stream := New(
+		WithSDRReconnect(),
+		WithReceiverFactory(factory.open),
+		WithDemodulatorFactory(func() Demodulator { return &fakeDemodulator{} }),
+	)
+	stream.sdrReconnectBase = time.Millisecond
+	stream.sdrReconnectMax = time.Millisecond
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	done := make(chan error, 1)
+	go func() { done <- stream.Stream(ctx, airplanes.New()) }()
+
+	// Wait until at least one re-open has failed so we know the loop
+	// is cycling through the backoff branch, then cancel.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && factory.callCount() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+
+	if factory.callCount() < 2 {
+		cancel()
+		<-done
+		t.Fatal("factory never attempted a re-open")
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Stream err = %v, want nil on cancel during backoff", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stream did not return promptly after cancel during backoff")
+	}
+}
+
+// TestStreamSDRFirstOpenFailureFatalEvenWithReconnect pins the
+// fatal-fast contract: with reconnect ON, a failure on the very first
+// open still propagates (launching with no dongle is a misconfig), and
+// the factory is not retried.
+func TestStreamSDRFirstOpenFailureFatalEvenWithReconnect(t *testing.T) {
+	t.Parallel()
+
+	factory := &scriptedReceiverFactory{openErr: errSyntheticReceiverOpen} // empty queue → first open fails
+
+	stream := New(
+		WithSDRReconnect(),
+		WithReceiverFactory(factory.open),
+		WithDemodulatorFactory(func() Demodulator { return &fakeDemodulator{} }),
+	)
+	stream.sdrReconnectBase = time.Millisecond
+	stream.sdrReconnectMax = time.Millisecond
+
+	err := stream.Stream(t.Context(), airplanes.New())
+	if !errors.Is(err, errSyntheticReceiverOpen) {
+		t.Errorf("Stream err = %v, want errSyntheticReceiverOpen (first open stays fatal)", err)
+	}
+
+	if got := factory.callCount(); got != 1 {
+		t.Errorf("factory calls = %d, want 1 (no retry on first-open failure)", got)
+	}
+}
+
+// TestStreamSDRReplayEndReturnsNilWithReconnect proves ErrReplayEnded
+// short-circuits to nil before the retry branch even with reconnect
+// ON, and the factory is invoked exactly once.
+func TestStreamSDRReplayEndReturnsNilWithReconnect(t *testing.T) {
+	t.Parallel()
+
+	factory := &scriptedReceiverFactory{
+		queue:   []Receiver{&replayEndReceiver{}},
+		openErr: errSyntheticReceiverOpen,
+	}
+
+	stream := New(
+		WithSDRReconnect(),
+		WithReceiverFactory(factory.open),
+		WithDemodulatorFactory(func() Demodulator { return &fakeDemodulator{} }),
+	)
+	stream.sdrReconnectBase = time.Millisecond
+	stream.sdrReconnectMax = time.Millisecond
+
+	if err := stream.Stream(t.Context(), airplanes.New()); err != nil {
+		t.Errorf("Stream err = %v, want nil on replay end", err)
+	}
+
+	if got := factory.callCount(); got != 1 {
+		t.Errorf("factory calls = %d, want 1 (replay end must not retry)", got)
+	}
+}
+
+// TestStreamSDRReadErrorPropagatesWithoutReconnect is the option-OFF
+// regression: with reconnect left at its default, a read error after a
+// good open propagates unchanged and the factory is not retried.
+func TestStreamSDRReadErrorPropagatesWithoutReconnect(t *testing.T) {
+	t.Parallel()
+
+	factory := &scriptedReceiverFactory{
+		queue:   []Receiver{&fakeReceiver{reads: []fakeRead{{err: errSyntheticReceiverRead}}}},
+		openErr: errSyntheticReceiverOpen,
+	}
+
+	stream := New( // reconnect left OFF (default)
+		WithReceiverFactory(factory.open),
+		WithDemodulatorFactory(func() Demodulator { return &fakeDemodulator{} }),
+	)
+
+	err := stream.Stream(t.Context(), airplanes.New())
+	if !errors.Is(err, errSyntheticReceiverRead) {
+		t.Errorf("Stream err = %v, want errSyntheticReceiverRead", err)
+	}
+
+	if got := factory.callCount(); got != 1 {
+		t.Errorf("factory calls = %d, want 1 (no retry when reconnect is off)", got)
 	}
 }
 

@@ -60,6 +60,16 @@ const (
 	beastReconnectBaseDelay = 1 * time.Second
 	beastReconnectMaxDelay  = 30 * time.Second
 
+	// sdrReconnectBaseDelay and sdrReconnectMaxDelay reuse the same
+	// 1 s base → 30 s cap doubling schedule for the local-SDR
+	// reconnect loop. Parallel constants (rather than sharing the
+	// beast pair) keep the two sources decoupled: the SDR path is
+	// USB-backed, not TCP, and may want its own envelope later. They
+	// seed the per-stream backoff fields so internal tests can shrink
+	// the fields and exercise the reconnect path without real sleeps.
+	sdrReconnectBaseDelay = 1 * time.Second
+	sdrReconnectMaxDelay  = 30 * time.Second
+
 	// beastFrameQueueDepth is the buffer between the BEAST reader
 	// goroutine and the handler goroutine. Sized to 4× the
 	// demod1090 beastsrv default per-client ring (256) so a burst
@@ -110,9 +120,9 @@ type Demodulator interface {
 // the bias-tee TUI surface needs. Kept as its own interface so
 // only the real SDR path satisfies it — the file-backed replay
 // receiver and the BEAST consumer don't implement it, and the
-// type assertion in streamSDR cleanly drops the controller in
-// those modes. Mirrors the sweep.Receiver pattern in the same
-// package.
+// type assertion in installBiasTeeController cleanly drops the
+// controller in those modes. Mirrors the sweep.Receiver pattern in
+// the same package.
 type biasTeeController interface {
 	SetBiasTee(enable bool) error
 	GetBiasTee() (bool, error)
@@ -202,6 +212,26 @@ type ADSB struct {
 	// straight to the stream loop.
 	autoSweep bool
 
+	// sdrReconnect toggles the local-SDR retry loop. Default off so a
+	// read error propagates to the caller unchanged — the historical
+	// contract every existing test relies on. WithSDRReconnect turns
+	// it on for the production local-SDR source, where a mid-stream
+	// USB drop should back off and re-open instead of killing the TUI.
+	sdrReconnect bool
+
+	// sdrReconnectBase and sdrReconnectMax bound the local-SDR retry
+	// backoff. Seeded from sdrReconnectBaseDelay / sdrReconnectMaxDelay
+	// in New; internal tests override them to sub-millisecond so the
+	// reconnect path runs without wall-clock sleeps.
+	sdrReconnectBase time.Duration
+	sdrReconnectMax  time.Duration
+
+	// sweepOnce gates the ~96 s auto-sweep to the first successful
+	// open. A reconnect must reuse the winning gain cell rather than
+	// re-run the sweep, so the guard survives across streamSDROnce
+	// re-entries for the lifetime of one Stream call.
+	sweepOnce sync.Once
+
 	// connected reflects whether the current source is actively
 	// producing frames: true after a successful SDR open / BEAST
 	// connect, false during reconnect backoff or after the stream
@@ -221,11 +251,11 @@ type ADSB struct {
 	// progress (the sweep takes ~96 s with no frames flowing).
 	sweeping atomic.Bool
 
-	// biasMu guards biasTee. The slot is populated by streamSDR
-	// after a successful receiver open (if the receiver implements
-	// biasTeeController) and cleared on stream exit. The UI
-	// goroutine takes biasMu while invoking the controller so the
-	// receiver can't be closed mid-call.
+	// biasMu guards biasTee. The slot is populated by
+	// installBiasTeeController after a successful receiver open (if
+	// the receiver implements biasTeeController) and cleared on stream
+	// exit. The UI goroutine takes biasMu while invoking the
+	// controller so the receiver can't be closed mid-call.
 	biasMu  sync.RWMutex
 	biasTee biasTeeController
 }
@@ -346,6 +376,8 @@ func New(opts ...Option) *ADSB {
 		receiverFactory:    defaultReceiverFactory,
 		demodulatorFactory: defaultDemodulatorFactory,
 		beastDialer:        defaultBeastDialer,
+		sdrReconnectBase:   sdrReconnectBaseDelay,
+		sdrReconnectMax:    sdrReconnectMaxDelay,
 	}
 
 	for _, opt := range opts {
@@ -515,6 +547,23 @@ func WithAutoSweep() Option {
 	return func(a *ADSB) { a.autoSweep = true }
 }
 
+// WithSDRReconnect turns on the local-SDR reconnect loop. After the
+// first successful open, a read error or a failed re-open backs off
+// (1 s base, doubling, 30 s cap) and retries instead of propagating —
+// so unplugging the dongle mid-stream shows "reconnecting" rather than
+// killing the TUI, matching how BEAST and gpsd already behave.
+//
+// The first open stays fatal: launching with no dongle is a
+// misconfiguration that should fail fast. ctx cancellation and
+// ErrReplayEnded still return nil, so quit and replay-exhaustion
+// terminate cleanly regardless of this option.
+//
+// Default off; only the production local-SDR source (not BEAST, not
+// replay) enables it.
+func WithSDRReconnect() Option {
+	return func(a *ADSB) { a.sdrReconnect = true }
+}
+
 // Stream drives the configured ingest source and updates planes
 // as decoded frames arrive. Two paths:
 //
@@ -550,7 +599,10 @@ func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
 	return a.streamSDR(ctx, planes)
 }
 
-// cleanupReceiver is streamSDR's defer body. Responsible for:
+// cleanupReceiver is streamSDROnce's defer body, run once per open
+// attempt so a reconnect closes the failed receiver and flips
+// connected → false during the backoff gap (the header dot goes red)
+// before the next open flips it back. Responsible for:
 //
 //  1. Powering down the bias-tee on every exit path (clean
 //     shutdown, error return, panic-recover). The RTL2832U holds
@@ -563,7 +615,7 @@ func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
 //  3. Flipping connected → false.
 //  4. Closing the receiver.
 //
-// Extracted out of streamSDR so the read-loop function's
+// Extracted out of streamSDROnce so the read-loop function's
 // cognitive complexity stays inside revive's gate.
 func (a *ADSB) cleanupReceiver(receiver Receiver, controller biasTeeController) {
 	if controller != nil {
@@ -583,34 +635,116 @@ func (a *ADSB) cleanupReceiver(receiver Receiver, controller biasTeeController) 
 	}
 }
 
-// streamSDR runs the historical receiver+demodulator loop. Held
-// in its own method so Stream can pick between SDR and BEAST
-// without an inline branch obscuring the read-loop shape.
+// streamSDR drives the local receiver + demodulator loop. Without
+// WithSDRReconnect it runs streamSDROnce exactly once and returns its
+// result — the historical contract where any read error propagates.
+//
+// With WithSDRReconnect it keeps the source alive across transient
+// failures: after the first successful open, every read error and
+// every failed re-open backs off (1 s base, doubling, 30 s cap) and
+// retries. The first open stays fatal so a missing dongle fails fast.
+// ctx cancellation and ErrReplayEnded return nil before the retry
+// branch, so replay always terminates cleanly and the operator's quit
+// is honoured even when reconnect is on.
 func (a *ADSB) streamSDR(ctx context.Context, planes *airplanes.Airplanes) error {
+	backoff := a.sdrReconnectBase
+
+	var opened bool
+
+	for {
+		justOpened, err := a.streamSDROnce(ctx, planes)
+		if justOpened {
+			opened = true
+			backoff = a.sdrReconnectBase // reset envelope after a good open
+		}
+
+		if err == nil {
+			return nil
+		}
+
+		if !opened || !a.sdrReconnect {
+			return err
+		}
+
+		slog.Warn("adsb: sdr stream error, reconnecting",
+			slog.Any("error", err),
+			slog.Duration("delay", backoff),
+		)
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+			backoff = min(backoff*2, a.sdrReconnectMax)
+		}
+	}
+}
+
+// streamSDROnce opens the receiver, runs the gain sweep at most once
+// per stream, and reads until the stream errors or the context
+// cancels. The bool reports whether the receiver opened — streamSDR
+// relies on it to keep a first-open failure fatal while retrying
+// anything after a good open.
+func (a *ADSB) streamSDROnce(ctx context.Context, planes *airplanes.Airplanes) (bool, error) {
 	receiver, err := a.receiverFactory()
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	a.connected.Store(true)
 
-	var controller biasTeeController
-	if c, ok := receiver.(biasTeeController); ok {
-		controller = c
-
-		a.biasMu.Lock()
-		a.biasTee = controller
-		a.biasMu.Unlock()
-	}
-
+	controller := a.installBiasTeeController(receiver)
 	defer a.cleanupReceiver(receiver, controller)
 
 	demodulator := a.demodulatorFactory()
 
-	if a.autoSweep {
-		a.runAutoSweep(ctx, receiver, demodulator)
+	a.maybeAutoSweep(ctx, receiver, demodulator)
+
+	return true, a.readLoop(ctx, receiver, demodulator, planes)
+}
+
+// maybeAutoSweep runs the gain sweep on the first successful open and
+// never again for the same stream. Reconnects reuse the winning cell
+// instead of paying the ~96 s sweep cost on every re-open. The
+// once-guard fires whether or not autoSweep is set, so a later open
+// can never re-trigger it.
+func (a *ADSB) maybeAutoSweep(ctx context.Context, receiver Receiver, demodulator Demodulator) {
+	a.sweepOnce.Do(func() {
+		if a.autoSweep {
+			a.runAutoSweep(ctx, receiver, demodulator)
+		}
+	})
+}
+
+// installBiasTeeController caches the receiver as the bias-tee
+// controller when it implements the optional interface (the real
+// RTL-SDR path) and returns it so cleanupReceiver can power the chip
+// down on exit. Non-SDR receivers (file replay, test fakes) don't
+// satisfy the interface, so the slot stays nil and the bias-tee UI
+// surface keeps reporting ErrBiasTeeUnsupported.
+//
+//nolint:ireturn // the bias-tee controller is inherently optional; nil means the source can't drive it.
+func (a *ADSB) installBiasTeeController(receiver Receiver) biasTeeController {
+	controller, ok := receiver.(biasTeeController)
+	if !ok {
+		return nil
 	}
 
+	a.biasMu.Lock()
+	a.biasTee = controller
+	a.biasMu.Unlock()
+
+	return controller
+}
+
+// readLoop pulls IQ chunks from the receiver, demodulates them, and
+// feeds decoded frames to planes until the context cancels or the
+// replay ends (both return nil), or a read fails (returns the wrapped
+// error). Extracted from streamSDROnce so both stay under revive's
+// cognitive-complexity gate.
+func (a *ADSB) readLoop(
+	ctx context.Context, receiver Receiver, demodulator Demodulator, planes *airplanes.Airplanes,
+) error {
 	iqBuf := make([]byte, readChunkSize)
 
 	for {
