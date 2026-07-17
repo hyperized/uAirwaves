@@ -111,8 +111,8 @@ type fakeBias struct {
 func (f *fakeBias) ToggleBiasTee() { f.toggles++ }
 
 // fakeBiasReader implements ui.BiasTeeReader for footer tests.
-// supportedVal toggles the n/a branch; enabledVal drives the
-// on/off render.
+// supportedVal toggles whether the Bias-T segment renders at all;
+// enabledVal drives the on/off text when it does.
 type fakeBiasReader struct {
 	supportedVal bool
 	enabledVal   bool
@@ -526,8 +526,8 @@ func TestUpdateFooterReadsRadarState(t *testing.T) {
 		t.Errorf("UpdateFooter text = %q, want substring 'Airports (l): true'", got)
 	}
 
-	if !strings.Contains(got, "Bias-T (b): n/a") {
-		t.Errorf("UpdateFooter text = %q, want substring 'Bias-T (b): n/a' (unsupported reader)", got)
+	if strings.Contains(got, "Bias-T") {
+		t.Errorf("UpdateFooter text = %q, want no 'Bias-T' segment for an unsupported reader", got)
 	}
 }
 
@@ -684,7 +684,8 @@ func TestUpdateStatsPanelWritesText(t *testing.T) {
 // TestFormatFooter pins the exact rendered footer string for a
 // fully-populated FooterState — this is the single line shown
 // across the bottom of the UI, so any format drift is visible.
-// Three rows so every bias-tee branch (on / off / n/a) is pinned.
+// Three rows pin every bias-tee outcome: segment absent when
+// unsupported, on, and off.
 func TestFormatFooter(t *testing.T) {
 	t.Parallel()
 
@@ -694,7 +695,7 @@ func TestFormatFooter(t *testing.T) {
 		want  string
 	}{
 		{
-			name: "bias-tee unsupported",
+			name: "bias-tee unsupported omits the segment",
 			state: ui.FooterState{
 				ScopeRange:       50,
 				HeadingEnabled:   true,
@@ -705,7 +706,7 @@ func TestFormatFooter(t *testing.T) {
 			},
 			want: "[::b]Range (+/-): 50 nm - [::b]Heading (h): true - " +
 				"[::b]Trail (t): off - [::b]Heat (m): true - [::b]Autoscope (a): false - " +
-				"[::b]Airports (l): true - [::b]Bias-T (b): n/a",
+				"[::b]Airports (l): true",
 		},
 		{
 			name: "bias-tee on",

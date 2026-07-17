@@ -486,35 +486,45 @@ type FooterState struct {
 }
 
 // FormatFooter renders a FooterState into the tview-coloured
-// command line shown across the bottom of the UI.
+// command line shown across the bottom of the UI. The Bias-T
+// segment is shown only when the active source can drive the
+// bias-tee (the local SDR); under BEAST/replay the toggle is inert,
+// so the cell is dropped rather than shown as a dead "n/a".
+//
+// Side effect on the local-SDR path: the cached supported bit clears
+// during a reconnect gap (adsb.cleanupReceiver) and re-seeds on
+// re-open, so the segment vanishes while no dongle is open — exactly
+// when the b toggle is inert, and the header dot already shows the
+// source disconnected.
 func FormatFooter(state FooterState) string {
-	return fmt.Sprintf(
+	footer := fmt.Sprintf(
 		"[::b]Range (+/-): %0.0f nm - [::b]Heading (h): %t - "+
 			"[::b]Trail (t): %s - [::b]Heat (m): %t - [::b]Autoscope (a): %t - "+
-			"[::b]Airports (l): %t - [::b]Bias-T (b): %s",
+			"[::b]Airports (l): %t",
 		state.ScopeRange,
 		state.HeadingEnabled,
 		state.TrailMode,
 		state.HeatEnabled,
 		state.AutoScopeEnabled,
 		state.AirportsEnabled,
-		formatBiasTee(state),
 	)
+
+	if !state.BiasTeeSupported {
+		return footer
+	}
+
+	return footer + " - [::b]Bias-T (b): " + formatBiasTee(state)
 }
 
-// formatBiasTee renders the bias-tee footer cell. Sources without
-// a controllable bias-tee (BEAST, replay) show n/a so the operator
-// knows the toggle is inert; the local-SDR path shows the live
-// on/off bit read from the chip.
+// formatBiasTee renders the on/off state of the bias-tee footer
+// cell. Only reached when the cell is shown (BiasTeeSupported true),
+// so there is no unsupported arm.
 func formatBiasTee(state FooterState) string {
-	switch {
-	case !state.BiasTeeSupported:
-		return "n/a"
-	case state.BiasTeeEnabled:
+	if state.BiasTeeEnabled {
 		return "on"
-	default:
-		return "off"
 	}
+
+	return "off"
 }
 
 func footerStateFromRadar(radarPanel *radar.View, biasTee BiasTeeReader) FooterState {
