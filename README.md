@@ -6,7 +6,7 @@ A terminal radar for aircraft. Plug in an RTL-SDR dongle, point an antenna at th
 
 It was built for the [uConsole](https://www.clockworkpi.com/uconsole) with the HackerGadgets All-In-One board (SDR, GPS, LoRa, RTC), but any Linux machine with an RTL-SDR works.
 
-uAirwaves is also the top of a four-part, pure-Go SDR stack: a USB driver, a demodulator, a decoder, and this radar on top. Every layer works as a standalone tool with its own view of the signal, so you can follow a transmission all the way from raw samples to a blip on the scope. If you want to learn how ADS-B reception actually works, that is the point of the whole stack. See [How it works](#how-it-works).
+uAirwaves is also the top of a four-part, pure-Go SDR stack: [a USB driver](https://github.com/hyperized/rtl2832u), [a demodulator](https://github.com/hyperized/demod1090), [a decoder](https://github.com/hyperized/modes), and this radar on top. Every layer works as a standalone tool with its own view of the signal, so you can follow a transmission all the way from raw samples to a blip on the scope. If you want to learn how ADS-B reception actually works, that is the point of the whole stack. See [How it works](#how-it-works).
 
 ## What you need
 
@@ -28,7 +28,7 @@ That opens the dongle and starts the TUI. Planes should appear within a minute i
 
 The process needs read/write access to the dongle's USB device node. Run it as root, or give your user access with a udev rule for the device under `/dev/bus/usb/`. The kernel's DVB driver is detached automatically, so there is nothing to blacklist or unbind first.
 
-No dongle on this machine? Point it at a remote receiver, or replay a capture:
+No dongle on this machine? Point it at a remote [demod1090](https://github.com/hyperized/demod1090), or replay a capture:
 
 ```sh
 ./uAirwaves --beast 192.168.1.50:30005    # remote demod1090 --beast-listen
@@ -85,7 +85,7 @@ Everything is a flag and everything is optional. `--help` prints the full list.
 
 | Flag | Default | Effect |
 |------|---------|--------|
-| `--beast HOST:PORT` | unset | Read Mode-S Beast frames from a remote demodulator instead of the local dongle. |
+| `--beast HOST:PORT` | unset | Read Mode-S Beast frames from a remote [demod1090](https://github.com/hyperized/demod1090) (or [beastmux](https://github.com/hyperized/beastmux)) instead of the local dongle. |
 | `--replay-iq PATH` | unset | Decode a captured IQ file instead of live radio. Takes precedence over `--beast`. |
 | `--auto-sweep` | off | Spend ~96 s trying 64 gain combinations before starting, then keep the best. Local SDR only, once per session. |
 | `--bias-t` | off | Power an external amplifier through the antenna coax from the moment the dongle opens. |
@@ -107,9 +107,9 @@ Exit codes: `0` thresholds met, `1` thresholds failed (the JSON names which), `2
 
 The pipeline is four separate projects, stacked. Each is pure Go, each runs on its own, and each can show you what it is doing. That is deliberate: the usual SDR receiver is a black box that turns antenna voltage into a web page, and this stack exists to let you open that box one layer at a time.
 
-1. [rtl2832u](https://github.com/hyperized/rtl2832u) drives the dongle over USB and produces raw IQ samples. Its `rtl-probe` tool opens the tuner, reports signal statistics, and captures IQ to a file.
+1. [rtl2832u](https://github.com/hyperized/rtl2832u) drives the dongle over USB and produces raw IQ samples. Its [`rtl-probe`](https://github.com/hyperized/rtl2832u/tree/main/cmd/rtl-probe) tool opens the tuner, reports signal statistics, and captures IQ to a file.
 2. [demod1090](https://github.com/hyperized/demod1090) turns IQ into validated Mode S frames: magnitude, preamble detection, bit decisions, CRC. It has its own TUI, replays captured IQ, and serves frames over TCP in the Beast format.
-3. [modes](https://github.com/hyperized/modes) turns frames into meaning: message types, callsigns, altitudes, CPR position resolution (ICAO Annex 10 / DO-260B). Its `modes-decode` reads hex frames on stdin and prints one decoded line per frame.
+3. [modes](https://github.com/hyperized/modes) turns frames into meaning: message types, callsigns, altitudes, CPR position resolution (ICAO Annex 10 / DO-260B). Its [`modes-decode`](https://github.com/hyperized/modes/tree/main/cmd/modes-decode) reads hex frames on stdin and prints one decoded line per frame.
 4. **uAirwaves** draws the radar and adds everything stateful: aircraft tracking, GPS, self-locate, the coverage picture.
 
 Every boundary between layers is a format you can capture, inspect, and replay: IQ files between the driver and the demodulator, hex frames or Beast TCP between the demodulator and the decoder. Break the chain wherever you are curious, look at what flows through, and feed it back in. Captured IQ replayed through `--replay-iq` decodes the same way every time, which is also how the stack tests itself on real recordings.
