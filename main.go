@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -107,22 +108,56 @@ func main() {
 		return ui.HandleKeyInput(event, ctrls)
 	})
 
-	if err := uic.app.SetRoot(uic.grid, true).EnableMouse(true).Run(); err != nil {
-		slog.Error("tview error", slog.Any("error", err))
-	}
+	restoreLog := func() { slog.SetDefault(originalSlog) }
+
+	code := runWithRecover(
+		func() error { return uic.app.SetRoot(uic.grid, true).EnableMouse(true).Run() },
+		restoreLog,
+	)
 
 	uic.cancel()
 	uic.waitGroup.Wait()
 
 	// Restore the original (stderr-backed) handler so the
 	// shutdown messages below land on the terminal again.
-	slog.SetDefault(originalSlog)
+	// Idempotent: the panic path inside runWithRecover already
+	// restored it, so a second call is a harmless no-op.
+	restoreLog()
 
 	slog.Info("Well, that was some experience...")
 	slog.Info("Now just let me adjust the spacial controls...")
 	slog.Info("And we'll move to another observation point.")
 
-	os.Exit(0)
+	os.Exit(code)
+}
+
+// runWithRecover runs the tview event loop and guards the graceful
+// shutdown tail: a panic in any render closure is recovered, the log
+// handler restored, and the panic logged with its stack, so main's
+// cancel/Wait/farewell still run instead of the process aborting.
+// Returns the exit code — 1 on a recovered panic, 0 otherwise.
+//
+//nolint:nonamedreturns // exitCode is set from the deferred recover.
+func runWithRecover(run func() error, restoreLog func()) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			restoreLog()
+			slog.Error("Recovered from panic in tview event loop",
+				slog.Any("panic", r),
+				slog.String("stack", string(debug.Stack())),
+			)
+
+			exitCode = 1
+		}
+	}()
+
+	if err := run(); err != nil {
+		slog.Error("tview error", slog.Any("error", err))
+
+		return 0
+	}
+
+	return 0
 }
 
 // Left-column page names — used by the Pages widget that swaps
