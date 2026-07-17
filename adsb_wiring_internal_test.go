@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,7 +31,7 @@ func TestBuildADSBOptionsSelectsSource(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			stream := adsb.New(buildADSBOptions(testCase.cfg, location.New(), nil)...)
+			stream := adsb.New(buildADSBOptions(testCase.cfg, location.New(), nil, nil, nil)...)
 			if got := stream.Source().Label; got != testCase.want {
 				t.Errorf("Source().Label = %q, want %q", got, testCase.want)
 			}
@@ -67,7 +68,7 @@ func TestBuildADSBOptionsSDRBranchEnablesReconnect(t *testing.T) {
 	t.Parallel()
 
 	opts := append(
-		buildADSBOptions(cliConfig{}, location.New(), nil),
+		buildADSBOptions(cliConfig{}, location.New(), nil, nil, nil),
 		adsb.WithReceiverFactory(func() (adsb.Receiver, error) { return failAfterOpenReceiver{}, nil }),
 	)
 
@@ -94,5 +95,73 @@ func TestBuildADSBOptionsSDRBranchEnablesReconnect(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Stream did not return after cancel")
+	}
+}
+
+// TestBuildADSBOptionsWiresSpawnerOnEverySource proves the worker
+// spawner is threaded onto every ingest branch (local SDR, BEAST,
+// replay), because Stream launches its three helper goroutines before
+// it forks to any source. Options are opaque funcs with no public
+// read-back, so the wiring is observed by count: with a WaitGroup and
+// error channel supplied, each branch must carry exactly one extra
+// option — the spawner — over the same branch built without them.
+func TestBuildADSBOptionsWiresSpawnerOnEverySource(t *testing.T) {
+	t.Parallel()
+
+	waitGroup := &sync.WaitGroup{}
+	errChan := make(chan error, 1)
+
+	for _, testCase := range []struct {
+		name string
+		cfg  cliConfig
+	}{
+		{"local SDR", cliConfig{}},
+		{"beast", cliConfig{beastAddress: "192.168.1.5:30005"}},
+		{"replay", cliConfig{replayIQPath: "/tmp/capture.iq"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			withSpawner := buildADSBOptions(testCase.cfg, location.New(), nil, waitGroup, errChan)
+			withoutSpawner := buildADSBOptions(testCase.cfg, location.New(), nil, nil, nil)
+
+			if len(withSpawner) != len(withoutSpawner)+1 {
+				t.Errorf("options with spawner = %d, without = %d; want exactly one more (the spawner)",
+					len(withSpawner), len(withoutSpawner))
+			}
+		})
+	}
+}
+
+// errWiringSpawnBoom is the panic a spawned task raises to prove the
+// adapter forwards a recovered panic to errChan.
+var errWiringSpawnBoom = errors.New("wiring spawner boom")
+
+// TestADSBWorkerSpawnerForwardsPanic confirms a panic in a task handed
+// to the wired spawner lands on errChan joined with
+// errADSBWorkerRecover — the ui.LaunchWorker contract every other
+// worker relies on, now extended to Stream's helper goroutines.
+func TestADSBWorkerSpawnerForwardsPanic(t *testing.T) {
+	t.Parallel()
+
+	waitGroup := &sync.WaitGroup{}
+	errChan := make(chan error, 1)
+
+	spawn := adsbWorkerSpawner(waitGroup, errChan)
+	spawn(func() { panic(errWiringSpawnBoom) })
+
+	waitGroup.Wait()
+
+	select {
+	case got := <-errChan:
+		if !errors.Is(got, errADSBWorkerRecover) {
+			t.Errorf("errChan = %v, want joined with errADSBWorkerRecover", got)
+		}
+
+		if !errors.Is(got, errWiringSpawnBoom) {
+			t.Errorf("errChan = %v, want joined with the original panic error", got)
+		}
+	default:
+		t.Fatal("spawner did not forward the recovered panic to errChan")
 	}
 }

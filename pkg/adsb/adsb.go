@@ -145,6 +145,16 @@ type ADSB struct {
 	receiverFactory    ReceiverFactory
 	demodulatorFactory DemodulatorFactory
 
+	// spawn launches Stream's three long-lived helper goroutines
+	// (stale-plane prune, CPR-cache cleanup, ICAO-filter cleanup).
+	// The default, defaultSpawn, runs each in a bare goroutine under
+	// a panic-recovering wrapper that logs and lets the process live
+	// — enough for library consumers and the non-TUI check mode. main
+	// overrides it via WithWorkerSpawner so the helpers join the
+	// process WaitGroup and forward panics to errChan like every
+	// other supervised worker.
+	spawn func(task func())
+
 	// beastAddress, when non-empty, switches Stream away from
 	// the SDR pipeline and into the BEAST-over-TCP path: dial,
 	// read framed Mode S messages from a remote demodulator,
@@ -176,8 +186,8 @@ type ADSB struct {
 	// when no reference position is available. Stored as a
 	// pointer so the embedded sync.Mutex is never copied (e.g.
 	// if ADSB itself is ever moved by value) — go vet copylocks
-	// would otherwise flag the implicit address-take in
-	// `go a.cpr.runCleanup(...)`.
+	// would otherwise flag the implicit address-take when the
+	// cleanup goroutine captures a.cpr.
 	cpr *cprCache
 
 	// icaoFilter is the address-parity phantom suppressor: only
@@ -423,6 +433,7 @@ func New(opts ...Option) *ADSB {
 		beastDialer:        defaultBeastDialer,
 		sdrReconnectBase:   sdrReconnectBaseDelay,
 		sdrReconnectMax:    sdrReconnectMaxDelay,
+		spawn:              defaultSpawn,
 	}
 
 	for _, opt := range opts {
@@ -430,6 +441,25 @@ func New(opts ...Option) *ADSB {
 	}
 
 	return stream
+}
+
+// defaultSpawn is the library default for Stream's helper goroutines:
+// a bare goroutine wrapped in a panic-recovering defer that logs the
+// failure at ERROR and lets the process keep running. It is strictly
+// safer than a raw `go` for library consumers and the check mode, but
+// it makes no WaitGroup claims — the TUI injects a WaitGroup-aware
+// spawner via WithWorkerSpawner so shutdown can join these helpers.
+func defaultSpawn(task func()) {
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				slog.Error("adsb: recovered panic in stream helper goroutine",
+					slog.Any("panic", recovered))
+			}
+		}()
+
+		task()
+	}()
 }
 
 // defaultReceiverFactory opens a real RTL-SDR via the rtl2832u
@@ -609,6 +639,31 @@ func WithSDRReconnect() Option {
 	return func(a *ADSB) { a.sdrReconnect = true }
 }
 
+// WithWorkerSpawner overrides how Stream launches its three
+// long-lived helper goroutines: the stale-plane prune, the CPR-cache
+// cleanup, and the ICAO-filter cleanup. The default (defaultSpawn)
+// runs each in a bare goroutine guarded by a panic-recovering wrapper
+// that logs and lets the process live — enough for library consumers
+// and the non-TUI check mode, but it makes no WaitGroup claims.
+//
+// main injects a spawner that routes each helper through
+// ui.LaunchWorker, so a recovered panic reaches errChan tagged with a
+// sentinel and wg.Wait() at shutdown blocks on the helpers too —
+// matching how every other background worker is supervised.
+//
+// The injected spawner MUST run tasks that return when the Stream ctx
+// is cancelled. All three helpers select on ctx.Done, so a spawner
+// that registers them with a WaitGroup is safe; a spawner whose task
+// never returns would hang the caller's WaitGroup at shutdown. nil is
+// ignored, keeping the default in force.
+func WithWorkerSpawner(spawn func(task func())) Option {
+	return func(a *ADSB) {
+		if spawn != nil {
+			a.spawn = spawn
+		}
+	}
+}
+
 // Stream drives the configured ingest source and updates planes
 // as decoded frames arrive. Two paths:
 //
@@ -618,9 +673,12 @@ func WithSDRReconnect() Option {
 //   - SDR mode (default): drive the receiver + demodulator
 //     factories, processing IQ chunks into frames.
 //
-// Both paths share the prune + CPR-cleanup goroutines started
-// here, so callers don't see different lifecycle semantics across
-// modes.
+// Both paths share the prune + CPR-cleanup + ICAO-cleanup
+// goroutines started here, so callers don't see different lifecycle
+// semantics across modes. All three are launched through the
+// configured spawner (WithWorkerSpawner): the default recovers and
+// logs a panic, while main's spawner additionally joins them to the
+// process WaitGroup and forwards panics to errChan.
 //
 // Returns:
 //
@@ -633,9 +691,9 @@ func WithSDRReconnect() Option {
 //     errOpenReplay for missing replay files.
 //   - a wrapped read error for anything else.
 func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
-	go a.prune(ctx, planes)
-	go a.cpr.runCleanup(ctx, cprCacheCleanupInterval)
-	go a.icaoFilter.RunCleanup(ctx, icaoTrustCleanupInterval)
+	a.spawn(func() { a.prune(ctx, planes) })
+	a.spawn(func() { a.cpr.runCleanup(ctx, cprCacheCleanupInterval) })
+	a.spawn(func() { a.icaoFilter.RunCleanup(ctx, icaoTrustCleanupInterval) })
 
 	if a.beastAddress != "" {
 		return a.streamBeast(ctx, planes)

@@ -31,9 +31,19 @@ var (
 	errBatteryRecover    = errors.New("recovered in battery goroutine")
 	errGPSRecover        = errors.New("recovered in gps goroutine")
 	errADSBRecover       = errors.New("recovered in adsb goroutine")
+	errADSBWorkerRecover = errors.New("recovered in adsb helper goroutine")
 	errSelfLocateRecover = errors.New("recovered in self-locate goroutine")
 	errBiasTeeRecover    = errors.New("recovered in bias-tee goroutine")
 )
+
+// workerErrChanDepth sizes the shared worker error channel. The UI
+// updater consumes exactly one error before it tears the app down, so
+// the buffer must absorb a panic-send from every other background
+// goroutine without blocking wg.Wait() at shutdown: the four named
+// workers (battery, GPS, ADSB, self-locate), the three Stream helper
+// goroutines routed through adsbWorkerSpawner, and one in-flight
+// bias-tee toggle.
+const workerErrChanDepth = 8
 
 const (
 	uiUpdateInterval = 1 * time.Second
@@ -224,6 +234,11 @@ func configureUI(cfg cliConfig) *uiComponents {
 	myLocation := location.New()
 	selfLocator := selflocate.New()
 	gpsLastFix := &atomic.Pointer[time.Time]{}
+	// waitGroup and errChan are built here (rather than inline in the
+	// struct literal) so buildADSBOptions can hand Stream's helper
+	// goroutines the same supervision every other worker gets.
+	waitGroup := &sync.WaitGroup{}
+	errChan := make(chan error, workerErrChanDepth)
 	clock := configureClock()
 	statusBar := configureStatusbar()
 	commands := configureCommands()
@@ -244,11 +259,11 @@ func configureUI(cfg cliConfig) *uiComponents {
 		ctx:                ctx,
 		cancel:             cancel,
 		app:                tview.NewApplication(),
-		errChan:            make(chan error, 4), //nolint:mnd // buffered for the four background workers.
+		errChan:            errChan,
 		myLocation:         myLocation,
-		waitGroup:          &sync.WaitGroup{},
+		waitGroup:          waitGroup,
 		planeList:          planeList,
-		adsbStream:         adsb.New(buildADSBOptions(cfg, myLocation, selfLocator)...),
+		adsbStream:         adsb.New(buildADSBOptions(cfg, myLocation, selfLocator, waitGroup, errChan)...),
 		statsTracker:       ui.NewStatsTracker(),
 		batteryStatus:      battery.NewStatus(),
 		clock:              clock,
@@ -285,8 +300,25 @@ func configureUI(cfg cliConfig) *uiComponents {
 //
 // Replay wins over BEAST so a developer can always replay a
 // captured IQ even on a host that also sets --beast.
-func buildADSBOptions(cfg cliConfig, myLocation *location.Location, selfLocator *selflocate.Locator) []adsb.Option {
+//
+// waitGroup and errChan supervise Stream's three helper goroutines
+// via adsbWorkerSpawner; the spawner is threaded onto every source
+// branch because Stream launches those helpers before it forks to
+// the SDR / BEAST / replay path. Both nil (the check mode, whose
+// WaitGroup lives inside check.Run) leaves Stream on its default
+// recover-and-log spawner.
+func buildADSBOptions(
+	cfg cliConfig,
+	myLocation *location.Location,
+	selfLocator *selflocate.Locator,
+	waitGroup *sync.WaitGroup,
+	errChan chan<- error,
+) []adsb.Option {
 	opts := []adsb.Option{adsb.WithLocation(myLocation)}
+
+	if waitGroup != nil && errChan != nil {
+		opts = append(opts, adsb.WithWorkerSpawner(adsbWorkerSpawner(waitGroup, errChan)))
+	}
 
 	if selfLocator != nil {
 		opts = append(opts, adsb.WithPositionObserver(selfLocator.Observe))
@@ -336,6 +368,24 @@ func buildADSBOptions(cfg cliConfig, myLocation *location.Location, selfLocator 
 	}
 
 	return opts
+}
+
+// adsbWorkerSpawner adapts adsb.Stream's helper-goroutine launch to
+// the process WaitGroup and shared error channel. Stream starts three
+// long-lived helpers (stale-plane prune, CPR-cache cleanup,
+// ICAO-filter cleanup); routing each through ui.LaunchWorker gives
+// them the same guarantees every other worker has — a recovered panic
+// is joined with errADSBWorkerRecover and forwarded to errChan, and
+// wg.Wait() at shutdown blocks until they return. All three exit on
+// ctx.Done, so they honour WithWorkerSpawner's ctx-aware contract.
+func adsbWorkerSpawner(waitGroup *sync.WaitGroup, errChan chan<- error) func(task func()) {
+	return func(task func()) {
+		ui.LaunchWorker(waitGroup, errChan, errADSBWorkerRecover, func() error {
+			task()
+
+			return nil
+		})
+	}
 }
 
 // biasTeeReceiverFactory opens the RTL-SDR with the bias-tee
@@ -492,7 +542,12 @@ func runCheckMode(cfg cliConfig) int {
 	// diagnostic window is well below the time it takes the
 	// horizon-circle intersection to converge, and the JSON
 	// output already reports gpsd state explicitly.
-	stream := adsb.New(buildADSBOptions(cfg, myLocation, nil)...)
+	//
+	// nil WaitGroup + errChan leave Stream's helper goroutines on the
+	// default recover-and-log spawner: check.Run owns its own
+	// WaitGroup and a 1:1-sized errChan, so wiring the helpers through
+	// it would change that channel's sizing contract.
+	stream := adsb.New(buildADSBOptions(cfg, myLocation, nil, nil, nil)...)
 
 	report, passed, runErr := check.Run(context.Background(), check.Options{
 		Duration:   duration,
