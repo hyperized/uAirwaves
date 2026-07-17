@@ -4,6 +4,8 @@ A terminal radar for aircraft. Plug in an RTL-SDR dongle, point an antenna at th
 
 It was built for the [uConsole](https://www.clockworkpi.com/uconsole) with the HackerGadgets All-In-One board (SDR, GPS, LoRa, RTC), but any Linux machine with an RTL-SDR works.
 
+uAirwaves is also the top of a four-part, pure-Go SDR stack: a USB driver, a demodulator, a decoder, and this radar on top. Every layer works as a standalone tool with its own view of the signal, so you can follow a transmission all the way from raw samples to a blip on the scope. If you want to learn how ADS-B reception actually works, that is the point of the whole stack. See [How it works](#how-it-works).
+
 ## What you need
 
 - An RTL-SDR dongle (RTL2832U with an R820T2 or R860 tuner) and an antenna for 1090 MHz. Alternatively, a remote receiver that serves Mode-S Beast frames over TCP, or a captured IQ file to replay.
@@ -101,7 +103,16 @@ Exit codes: `0` thresholds met, `1` thresholds failed (the JSON names which), `2
 
 ## How it works
 
-The whole pipeline runs in-process, in pure Go. USB reads, demodulation, Mode S decoding and the UI are one binary; there is no `readsb` or `dump1090` behind it.
+The pipeline is four separate projects, stacked. Each is pure Go, each runs on its own, and each can show you what it is doing. That is deliberate: the usual SDR receiver is a black box that turns antenna voltage into a web page, and this stack exists to let you open that box one layer at a time.
+
+1. [rtl2832u](https://github.com/hyperized/rtl2832u) drives the dongle over USB and produces raw IQ samples. Its `rtl-probe` tool opens the tuner, reports signal statistics, and captures IQ to a file.
+2. [demod1090](https://github.com/hyperized/demod1090) turns IQ into validated Mode S frames: magnitude, preamble detection, bit decisions, CRC. It has its own TUI, replays captured IQ, and serves frames over TCP in the Beast format.
+3. [modes](https://github.com/hyperized/modes) turns frames into meaning: message types, callsigns, altitudes, CPR position resolution (ICAO Annex 10 / DO-260B). Its `modes-decode` reads hex frames on stdin and prints one decoded line per frame.
+4. **uAirwaves** draws the radar and adds everything stateful: aircraft tracking, GPS, self-locate, the coverage picture.
+
+Every boundary between layers is a format you can capture, inspect, and replay: IQ files between the driver and the demodulator, hex frames or Beast TCP between the demodulator and the decoder. Break the chain wherever you are curious, look at what flows through, and feed it back in. Captured IQ replayed through `--replay-iq` decodes the same way every time, which is also how the stack tests itself on real recordings.
+
+When you run uAirwaves normally, all four layers run inside the one binary; there is no `readsb` or `dump1090` behind it.
 
 ```
                                 ┌──────────────────────────────────┐
@@ -140,7 +151,7 @@ A few pieces deserve a word:
 
 **Position without waiting.** With a known receiver position, a single position broadcast resolves to latitude and longitude immediately, instead of waiting to pair the two frame variants aircraft alternate between.
 
-Built on: [rtl2832u](https://github.com/hyperized/rtl2832u) (pure-Go RTL-SDR driver), [demod1090](https://github.com/hyperized/demod1090) (demodulator, Beast wire format, phantom filter), [modes](https://github.com/hyperized/modes) (ICAO Annex 10 / DO-260B decoder), [tview](https://github.com/rivo/tview) (TUI), and [go-gpsd](https://github.com/stratoberry/go-gpsd).
+Outside the stack itself, the TUI is drawn with [tview](https://github.com/rivo/tview) and GPS comes in through [go-gpsd](https://github.com/stratoberry/go-gpsd).
 
 ## Hacking on it
 
