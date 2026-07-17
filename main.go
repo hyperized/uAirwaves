@@ -32,6 +32,7 @@ var (
 	errGPSRecover        = errors.New("recovered in gps goroutine")
 	errADSBRecover       = errors.New("recovered in adsb goroutine")
 	errSelfLocateRecover = errors.New("recovered in self-locate goroutine")
+	errBiasTeeRecover    = errors.New("recovered in bias-tee goroutine")
 )
 
 const (
@@ -97,7 +98,11 @@ func main() {
 	startUIUpdater(uic)
 
 	// Input capture for global shortcuts.
-	biasTee := &biasTeeAdapter{stream: uic.adsbStream}
+	biasTee := &biasTeeAdapter{
+		stream:    uic.adsbStream,
+		waitGroup: uic.waitGroup,
+		errChan:   uic.errChan,
+	}
 	ctrls := ui.NewKeyControllers(
 		uic.app, uic.radarPanel, uic.flightDetailsMini,
 		uic.notifications, biasTee,
@@ -904,46 +909,74 @@ func configureClock() *tview.TextView {
 }
 
 // biasTeeStream is the slice of *adsb.ADSB the bias-tee adapter
-// drives. Hoisted to an interface so newBiasTeeAdapter is testable
-// against a fake without spinning up a real Stream.
+// drives. Hoisted to an interface so the adapter is testable
+// against a fake without spinning up a real Stream. BiasTeeState is
+// the USB-free cached read; SetBiasTee is the control transfer the
+// worker runs off the event loop.
 type biasTeeStream interface {
-	BiasTeeSupported() bool
-	BiasTeeEnabled() (bool, error)
+	BiasTeeState() (supported, enabled bool)
 	SetBiasTee(enable bool) error
 }
 
 // biasTeeAdapter bridges the 'b' keybind dispatch to the ADSB
-// stream. Read-then-toggle: poll the chip, flip the bit, log the
-// outcome through slog so the notification bar surfaces it. The
-// UI footer's own poll renders the new state on the next tick —
-// no in-adapter cache is kept so a third-party flipping the bit
-// (rtl_biast, another process) stays visible.
+// stream. The flip is a USB control transfer, so it must not run on
+// the tview event loop where the dispatcher fires: a wedged dongle
+// (an unplug or bus reset mid-write) would freeze every redraw and
+// keypress. ToggleBiasTee therefore hands the read-modify-write to a
+// background worker via ui.LaunchWorker and returns immediately;
+// inFlight collapses a burst of key presses to one in-flight toggle.
+//
+// The target state is computed from the cached adsb.BiasTeeState
+// rather than a live poll, so no read transfer happens on press
+// either. Trade-off: a flip performed outside this process (an
+// external rtl_biast run) is not observed — the cached bit re-syncs
+// at the next (re)open and on the next in-app toggle.
 type biasTeeAdapter struct {
-	stream biasTeeStream
+	stream    biasTeeStream
+	waitGroup *sync.WaitGroup
+	errChan   chan<- error
+	inFlight  atomic.Bool
 }
 
-// ToggleBiasTee implements ui.BiasTeeController. Reads the chip,
-// flips the bit, and slog-logs the outcome. Unsupported sources
-// surface a one-line warn; the key press is otherwise inert.
+// ToggleBiasTee implements ui.BiasTeeController. Runs on the tview
+// event loop, so it does no USB work itself: it claims the in-flight
+// guard and dispatches the actual flip to a background worker. A
+// press while a toggle is already running is a logged no-op — the
+// GPIO write is not worth queueing.
 func (a *biasTeeAdapter) ToggleBiasTee() {
-	if !a.stream.BiasTeeSupported() {
-		slog.Warn("bias-tee: not available on the active source (BEAST / replay mode)")
+	if !a.inFlight.CompareAndSwap(false, true) {
+		slog.Info("bias-tee: toggle already in progress")
 
 		return
 	}
 
-	enabled, err := a.stream.BiasTeeEnabled()
-	if err != nil {
-		slog.Warn("bias-tee: read failed", slog.Any("error", err))
+	ui.LaunchWorker(a.waitGroup, a.errChan, errBiasTeeRecover, a.toggle)
+}
 
-		return
+// toggle performs the read-modify-write off the event loop: read the
+// cached state, drive the SetBiasTee control transfer, log the
+// outcome, and clear the in-flight guard. It returns nil even when
+// the flip fails — a bias-tee write failure must not tear down the
+// app through errChan, so the sentinel exists only to tag a
+// recovered panic. The defer clears inFlight on every exit path,
+// including a panic, so the next press can start a fresh worker.
+func (a *biasTeeAdapter) toggle() error {
+	defer a.inFlight.Store(false)
+
+	supported, enabled := a.stream.BiasTeeState()
+	if !supported {
+		slog.Warn("bias-tee: not available on the active source (BEAST / replay mode)")
+
+		return nil
 	}
 
 	if err := a.stream.SetBiasTee(!enabled); err != nil {
 		slog.Warn("bias-tee: set failed", slog.Any("error", err))
 
-		return
+		return nil
 	}
 
 	slog.Info("bias-tee toggled", slog.Bool("enabled", !enabled))
+
+	return nil
 }

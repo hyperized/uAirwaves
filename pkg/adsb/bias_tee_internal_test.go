@@ -81,6 +81,10 @@ func TestBiasTeeBeforeStreamUnsupported(t *testing.T) {
 		t.Error("BiasTeeSupported = true before stream, want false")
 	}
 
+	if supported, enabled := stream.BiasTeeState(); supported || enabled {
+		t.Errorf("BiasTeeState = (%v, %v) before stream, want (false, false)", supported, enabled)
+	}
+
 	if _, err := stream.BiasTeeEnabled(); !errors.Is(err, ErrBiasTeeUnsupported) {
 		t.Errorf("BiasTeeEnabled err = %v, want ErrBiasTeeUnsupported", err)
 	}
@@ -168,6 +172,10 @@ func TestBiasTeeStreamLifecycle(t *testing.T) {
 		t.Error("BiasTeeSupported = true after Stream exit, want false")
 	}
 
+	if supported, enabled := stream.BiasTeeState(); supported || enabled {
+		t.Errorf("BiasTeeState after exit = (%v, %v), want (false, false)", supported, enabled)
+	}
+
 	if _, err := stream.BiasTeeEnabled(); !errors.Is(err, ErrBiasTeeUnsupported) {
 		t.Errorf("BiasTeeEnabled after exit err = %v, want ErrBiasTeeUnsupported", err)
 	}
@@ -196,9 +204,12 @@ func exerciseMidStreamBiasTee(t *testing.T, stream *ADSB, rcv *blockingBiasRecei
 		t.Fatalf("SetBiasTee mid-stream: %v", err)
 	}
 
+	// getCalls == 2: the one seed transfer at controller install plus
+	// the explicit BiasTeeEnabled poll above. setCalls == 1: the
+	// SetBiasTee(true).
 	setCalls, getCalls := rcv.snapshot()
-	if setCalls != 1 || getCalls != 1 {
-		t.Errorf("rcv snapshot = (set %d, get %d), want (1, 1)", setCalls, getCalls)
+	if setCalls != 1 || getCalls != 2 {
+		t.Errorf("rcv snapshot = (set %d, get %d), want (1, 2)", setCalls, getCalls)
 	}
 }
 
@@ -318,6 +329,114 @@ func waitForSupported(t *testing.T, stream *ADSB) bool {
 	}
 
 	return false
+}
+
+// biasStateReadIterations is how many BiasTeeState reads
+// TestBiasTeeStateReadsCacheNotController fires to prove the render
+// path never reaches the controller. Named so mnd doesn't flag the
+// loop bound as a magic number.
+const biasStateReadIterations = 50
+
+// TestBiasTeeStateReadsCacheNotController asserts BiasTeeState never
+// reaches the controller: after the single seed transfer at install,
+// any number of BiasTeeState reads add zero USB calls. This is the
+// property that keeps the footer render off the USB control path.
+func TestBiasTeeStateReadsCacheNotController(t *testing.T) {
+	t.Parallel()
+
+	rcv := &blockingBiasReceiver{}
+	stream := newRunningStream(t, rcv)
+
+	// Baseline: install seeds exactly one GetBiasTee, zero sets.
+	setBefore, getBefore := rcv.snapshot()
+	if setBefore != 0 || getBefore != 1 {
+		t.Fatalf("post-install snapshot = (set %d, get %d), want (0, 1) seed", setBefore, getBefore)
+	}
+
+	for range biasStateReadIterations {
+		if supported, _ := stream.BiasTeeState(); !supported {
+			t.Fatal("BiasTeeState supported = false mid-stream, want true")
+		}
+	}
+
+	setAfter, getAfter := rcv.snapshot()
+	if setAfter != setBefore || getAfter != getBefore {
+		t.Errorf("controller calls after %d BiasTeeState reads = (set %d, get %d), want unchanged (%d, %d)",
+			biasStateReadIterations, setAfter, getAfter, setBefore, getBefore)
+	}
+}
+
+// TestBiasTeeStateSeededOnInstall asserts the install-time seed
+// copies the chip's live bit into the cache: a dongle that boots
+// with bias-tee already on reports enabled=true from BiasTeeState
+// with no further poll.
+func TestBiasTeeStateSeededOnInstall(t *testing.T) {
+	t.Parallel()
+
+	rcv := &blockingBiasReceiver{biasFakeReceiver: biasFakeReceiver{state: true}}
+	stream := newRunningStream(t, rcv)
+
+	if supported, enabled := stream.BiasTeeState(); !supported || !enabled {
+		t.Errorf("BiasTeeState = (%v, %v) after install, want (true, true) seeded from chip", supported, enabled)
+	}
+}
+
+// TestBiasTeeStateSeedErrorDefaultsOff covers the seed-read failure
+// branch in installBiasTeeController: the controller still installs
+// (support flips true) but the cached bit defaults to off.
+func TestBiasTeeStateSeedErrorDefaultsOff(t *testing.T) {
+	t.Parallel()
+
+	rcv := &blockingBiasReceiver{biasFakeReceiver: biasFakeReceiver{getErr: errSyntheticBiasGet}}
+	stream := newRunningStream(t, rcv)
+
+	if supported, enabled := stream.BiasTeeState(); !supported || enabled {
+		t.Errorf("BiasTeeState = (%v, %v) after failed seed, want (true, false)", supported, enabled)
+	}
+}
+
+// TestBiasTeeSetUpdatesCache asserts a successful SetBiasTee writes
+// through to the cache both directions, so the next BiasTeeState
+// reflects the flip without a live poll.
+func TestBiasTeeSetUpdatesCache(t *testing.T) {
+	t.Parallel()
+
+	rcv := &blockingBiasReceiver{}
+	stream := newRunningStream(t, rcv)
+
+	if err := stream.SetBiasTee(true); err != nil {
+		t.Fatalf("SetBiasTee(true): %v", err)
+	}
+
+	if supported, enabled := stream.BiasTeeState(); !supported || !enabled {
+		t.Errorf("BiasTeeState = (%v, %v) after SetBiasTee(true), want (true, true)", supported, enabled)
+	}
+
+	if err := stream.SetBiasTee(false); err != nil {
+		t.Fatalf("SetBiasTee(false): %v", err)
+	}
+
+	if supported, enabled := stream.BiasTeeState(); !supported || enabled {
+		t.Errorf("BiasTeeState = (%v, %v) after SetBiasTee(false), want (true, false)", supported, enabled)
+	}
+}
+
+// TestBiasTeeSetFailureLeavesCache asserts a failed SetBiasTee does
+// not disturb the cached bit: the control transfer errored, so the
+// render state must keep the last-known-good value.
+func TestBiasTeeSetFailureLeavesCache(t *testing.T) {
+	t.Parallel()
+
+	rcv := &blockingBiasReceiver{biasFakeReceiver: biasFakeReceiver{setErr: errSyntheticBiasSet}}
+	stream := newRunningStream(t, rcv)
+
+	if err := stream.SetBiasTee(true); !errors.Is(err, errSyntheticBiasSet) {
+		t.Fatalf("SetBiasTee err = %v, want wrapping errSyntheticBiasSet", err)
+	}
+
+	if supported, enabled := stream.BiasTeeState(); !supported || enabled {
+		t.Errorf("BiasTeeState = (%v, %v) after failed set, want (true, false) unchanged", supported, enabled)
+	}
 }
 
 // TestSweepingFlagDefaults asserts a freshly-constructed stream

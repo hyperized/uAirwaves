@@ -251,13 +251,26 @@ type ADSB struct {
 	// progress (the sweep takes ~96 s with no frames flowing).
 	sweeping atomic.Bool
 
-	// biasMu guards biasTee. The slot is populated by
-	// installBiasTeeController after a successful receiver open (if
-	// the receiver implements biasTeeController) and cleared on stream
-	// exit. The UI goroutine takes biasMu while invoking the
-	// controller so the receiver can't be closed mid-call.
+	// biasMu guards biasTee and the biasSupported / biasEnabled
+	// cache. The slot is populated by installBiasTeeController after a
+	// successful receiver open (if the receiver implements
+	// biasTeeController) and cleared on stream exit. SetBiasTee /
+	// BiasTeeEnabled take biasMu while invoking the controller so the
+	// receiver can't be closed mid-call.
 	biasMu  sync.RWMutex
 	biasTee biasTeeController
+
+	// biasSupported and biasEnabled cache the bias-tee state so the UI
+	// render path (BiasTeeState) reads it with no USB control transfer
+	// — a wedged dongle must never stall the tview event loop. Seeded
+	// from one GetBiasTee at controller install, updated on every
+	// successful SetBiasTee, cleared in cleanupReceiver.
+	//
+	// Trade-off: a bias-tee flip performed outside this process (an
+	// external rtl_biast run) is not reflected here; the cached bit
+	// re-syncs at the next (re)open and on the next in-app toggle.
+	biasSupported bool
+	biasEnabled   bool
 }
 
 // Stats reports the ingest counters since process start.
@@ -320,11 +333,28 @@ func (a *ADSB) BiasTeeSupported() bool {
 	return a.biasTee != nil
 }
 
-// BiasTeeEnabled polls the chip for the live bias-tee bit state.
-// Returns ErrBiasTeeUnsupported when no controller is installed
-// (BEAST, replay, or stream not running). One USB control transfer
-// per call; safe to invoke at UI-tick cadence while sample
-// streaming is in progress.
+// BiasTeeState returns the cached bias-tee support and enabled bits
+// without touching the receiver. No USB control transfer, no
+// blocking call — safe to invoke at UI-tick cadence on the tview
+// event loop. The cache is seeded at controller install, updated on
+// every successful SetBiasTee, and cleared on stream exit.
+//
+// This is the render path's read; BiasTeeEnabled is the live-poll
+// diagnostic that actually hits the chip.
+//
+//nolint:nonamedreturns // (supported, enabled) reads clearer named at this signature.
+func (a *ADSB) BiasTeeState() (supported, enabled bool) {
+	a.biasMu.RLock()
+	defer a.biasMu.RUnlock()
+
+	return a.biasSupported, a.biasEnabled
+}
+
+// BiasTeeEnabled polls the chip for the live bias-tee bit state —
+// one USB control transfer per call. This is the diagnostic path;
+// the UI render path reads BiasTeeState instead so a wedged dongle
+// can't stall the event loop. Returns ErrBiasTeeUnsupported when no
+// controller is installed (BEAST, replay, or stream not running).
 func (a *ADSB) BiasTeeEnabled() (bool, error) {
 	a.biasMu.RLock()
 	defer a.biasMu.RUnlock()
@@ -341,21 +371,36 @@ func (a *ADSB) BiasTeeEnabled() (bool, error) {
 	return enabled, nil
 }
 
-// SetBiasTee drives the dongle's bias-tee GPIO. Returns
-// ErrBiasTeeUnsupported when no controller is installed. Safe to
-// call while sample streaming is in progress — the underlying
-// rtl2832u writes go through a separate control endpoint.
+// SetBiasTee drives the dongle's bias-tee GPIO and updates the
+// render-path cache on success. Returns ErrBiasTeeUnsupported when
+// no controller is installed. Safe to call while sample streaming is
+// in progress — the underlying rtl2832u writes go through a separate
+// control endpoint. main's bias-tee toggle drives this from a
+// background worker, never the tview event loop.
+//
+// The controller call stays under RLock so cleanupReceiver (which
+// takes the write lock before Close) can't tear the receiver down
+// mid-transfer.
 func (a *ADSB) SetBiasTee(enable bool) error {
 	a.biasMu.RLock()
-	defer a.biasMu.RUnlock()
 
 	if a.biasTee == nil {
+		a.biasMu.RUnlock()
+
 		return ErrBiasTeeUnsupported
 	}
 
-	if err := a.biasTee.SetBiasTee(enable); err != nil {
+	err := a.biasTee.SetBiasTee(enable)
+
+	a.biasMu.RUnlock()
+
+	if err != nil {
 		return fmt.Errorf("adsb: set bias-tee: %w", err)
 	}
+
+	a.biasMu.Lock()
+	a.biasEnabled = enable
+	a.biasMu.Unlock()
 
 	return nil
 }
@@ -609,9 +654,9 @@ func (a *ADSB) Stream(ctx context.Context, planes *airplanes.Airplanes) error {
 //     its register state across Close(), so without this an
 //     external LNA / SAW filter stays powered after the app
 //     exits — the symptom users hit when running with --bias-t.
-//  2. Clearing the cached controller so post-exit UI calls
-//     return ErrBiasTeeUnsupported instead of dereferencing a
-//     closed receiver.
+//  2. Clearing the cached controller and render-path state so
+//     post-exit UI calls return ErrBiasTeeUnsupported / (false,
+//     false) instead of dereferencing a closed receiver.
 //  3. Flipping connected → false.
 //  4. Closing the receiver.
 //
@@ -626,6 +671,8 @@ func (a *ADSB) cleanupReceiver(receiver Receiver, controller biasTeeController) 
 
 	a.biasMu.Lock()
 	a.biasTee = nil
+	a.biasSupported = false
+	a.biasEnabled = false
 	a.biasMu.Unlock()
 
 	a.connected.Store(false)
@@ -730,8 +777,21 @@ func (a *ADSB) installBiasTeeController(receiver Receiver) biasTeeController {
 		return nil
 	}
 
+	// Seed the render-path cache with one control transfer here, on
+	// the stream goroutine (off the tview event loop) so BiasTeeState
+	// reads never pay USB latency. A read failure defaults to off; the
+	// next in-app toggle re-syncs the cached bit.
+	enabled, err := controller.GetBiasTee()
+	if err != nil {
+		slog.Warn("adsb: seed bias-tee state", slog.Any("error", err))
+
+		enabled = false
+	}
+
 	a.biasMu.Lock()
 	a.biasTee = controller
+	a.biasSupported = true
+	a.biasEnabled = enabled
 	a.biasMu.Unlock()
 
 	return controller

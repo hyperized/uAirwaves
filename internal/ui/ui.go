@@ -82,11 +82,11 @@ type NotificationController interface {
 }
 
 // BiasTeeController abstracts the bias-tee toggle the key
-// dispatcher fires on 'b'. The implementation in main.go reads
-// the live chip state via adsb.BiasTeeEnabled, flips it via
-// adsb.SetBiasTee, and surfaces failures as slog.Warn so the
-// notification bar renders them. Unsupported sources (BEAST,
-// replay) should log a one-line warn and otherwise no-op.
+// dispatcher fires on 'b'. The implementation in main.go dispatches
+// the flip to a background worker so the USB control transfer never
+// runs on this event-loop goroutine; failures surface as slog.Warn
+// so the notification bar renders them. Unsupported sources (BEAST,
+// replay) log a one-line warn and otherwise no-op.
 type BiasTeeController interface {
 	ToggleBiasTee()
 }
@@ -446,12 +446,13 @@ func UpdateStatsPanel(
 }
 
 // BiasTeeReader is the read-only slice of *adsb.ADSB the footer
-// needs: whether the active source supports bias-tee, and the
-// live chip state when it does. Hoisted so UpdateFooter is
-// testable with a stub.
+// needs: the cached bias-tee support and enabled bits. The single
+// method returns both with no USB control transfer, so the footer
+// renders at UI-tick cadence on the tview event loop without risking
+// a stall on a wedged dongle. Hoisted so UpdateFooter is testable
+// with a stub.
 type BiasTeeReader interface {
-	BiasTeeSupported() bool
-	BiasTeeEnabled() (bool, error)
+	BiasTeeState() (supported, enabled bool)
 }
 
 // UpdateFooter rewrites the footer command/status line. Pulled
@@ -510,28 +511,8 @@ func formatBiasTee(state FooterState) string {
 	}
 }
 
-// readBiasTeeState polls the BiasTeeReader for the live chip state.
-// A read error while supported=true is suppressed (footer falls
-// back to "off") — the next tick will either recover or the stream
-// will exit and flip supported=false on its own.
-//
-//nolint:nonamedreturns // (supported, enabled) reads clearer named at this signature.
-func readBiasTeeState(biasTee BiasTeeReader) (supported, enabled bool) {
-	supported = biasTee.BiasTeeSupported()
-	if !supported {
-		return false, false
-	}
-
-	got, err := biasTee.BiasTeeEnabled()
-	if err != nil {
-		return true, false
-	}
-
-	return true, got
-}
-
 func footerStateFromRadar(radarPanel *radar.View, biasTee BiasTeeReader) FooterState {
-	supported, enabled := readBiasTeeState(biasTee)
+	supported, enabled := biasTee.BiasTeeState()
 
 	return FooterState{
 		ScopeRange:       radarPanel.GetScopeRange(),

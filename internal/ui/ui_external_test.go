@@ -1,7 +1,6 @@
 package ui_test
 
 import (
-	"errors"
 	"strings"
 	"testing"
 
@@ -14,12 +13,6 @@ import (
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/radar"
 )
-
-// errSyntheticBiasRead is the static sentinel for the
-// "BiasTeeReader.BiasTeeEnabled errored" branch in
-// footerStateFromRadar; err113 forbids ad-hoc errors.New in test
-// bodies because identity-based assertions are fragile.
-var errSyntheticBiasRead = errors.New("synthetic bias-tee read failure")
 
 // Repeated test fixtures: kept package-private so the goconst
 // linter doesn't keep flagging the same literals across cases.
@@ -119,19 +112,13 @@ func (f *fakeBias) ToggleBiasTee() { f.toggles++ }
 
 // fakeBiasReader implements ui.BiasTeeReader for footer tests.
 // supportedVal toggles the n/a branch; enabledVal drives the
-// on/off render; readErr exercises the "supported but read
-// failed" fallback (footer should treat it as off).
+// on/off render.
 type fakeBiasReader struct {
 	supportedVal bool
 	enabledVal   bool
-	readErr      error
 }
 
-func (f fakeBiasReader) BiasTeeSupported() bool { return f.supportedVal }
-
-func (f fakeBiasReader) BiasTeeEnabled() (bool, error) {
-	return f.enabledVal, f.readErr
-}
+func (f fakeBiasReader) BiasTeeState() (bool, bool) { return f.supportedVal, f.enabledVal }
 
 // keyDispatchCase pins one row of the HandleKeyInput dispatch
 // table. Each int is the expected per-method call count for the
@@ -545,9 +532,8 @@ func TestUpdateFooterReadsRadarState(t *testing.T) {
 }
 
 // TestUpdateFooterReadsBiasTeeState exercises the supported
-// branches of footerStateFromRadar — both on and off. The reader's
-// readErr path drives the "supported but read failed" fallback,
-// which footerStateFromRadar treats as off.
+// branches of footerStateFromRadar — both on and off — through the
+// cached BiasTeeState read.
 func TestUpdateFooterReadsBiasTeeState(t *testing.T) {
 	t.Parallel()
 
@@ -558,15 +544,6 @@ func TestUpdateFooterReadsBiasTeeState(t *testing.T) {
 	}{
 		{name: "supported on", reader: fakeBiasReader{supportedVal: true, enabledVal: true}, want: "Bias-T (b): on"},
 		{name: "supported off", reader: fakeBiasReader{supportedVal: true, enabledVal: false}, want: "Bias-T (b): off"},
-		{
-			name: "supported but read failed",
-			reader: fakeBiasReader{
-				supportedVal: true,
-				enabledVal:   true, // ignored when readErr != nil
-				readErr:      errSyntheticBiasRead,
-			},
-			want: "Bias-T (b): off",
-		},
 	}
 
 	for _, testCase := range tests {
