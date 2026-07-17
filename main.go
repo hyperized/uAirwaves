@@ -593,6 +593,12 @@ func startUIUpdater(components *uiComponents) {
 
 		currentInterval := uiUpdateInterval
 
+		// drawInFlight coalesces redraws and keeps the enqueue off
+		// this WaitGroup-tracked goroutine: TryQueueUpdateDraw skips
+		// a tick whose predecessor's draw has not yet run, so Stop()
+		// stranding an update can never wedge wg.Wait() on exit.
+		var drawInFlight atomic.Bool
+
 		for {
 			select {
 			case appErr := <-components.errChan:
@@ -604,49 +610,74 @@ func startUIUpdater(components *uiComponents) {
 			case <-components.ctx.Done():
 				return
 			case <-ticker.C:
-				// Adapt the redraw cadence to the SDR state: a
-				// running gain sweep needs ~4 Hz to animate the
-				// radar's loading spinner one cell per tick, but
-				// the idle UI is plenty at 1 Hz. Reset only fires
-				// when the desired cadence changes so a Reset call
-				// every tick is avoided.
-				desired := uiUpdateInterval
-				if components.adsbStream.Sweeping() {
-					desired = sweepUpdateInterval
-				}
-
-				if desired != currentInterval {
-					ticker.Reset(desired)
-
-					currentInterval = desired
-				}
-
-				components.app.QueueUpdateDraw(func() {
-					components.clock.SetText("Local: " + time.Now().Format(time.TimeOnly) + " UTC: " +
-						time.Now().UTC().Format(time.TimeOnly))
-					components.statusBar.SetText("Battery: " + components.batteryStatus.String())
-
-					ui.UpdateHeaderColor(
-						components.batteryStatus.GetPercentage(),
-						components.clock,
-						components.statusBar,
-					)
-
-					ui.UpdatePlaneList(components.planeListPanel, components.myLocation, components.planeList,
-						components.selection)
-					ui.UpdateStatsPanel(components.statsPanel, components.adsbStream, components.statsTracker,
-						components.myLocation, components.planeList)
-					ui.UpdateFooter(components.commands, components.radarPanel, components.adsbStream)
-					ui.UpdateSourceStatus(components.sourceStatus, components.adsbStream)
-					components.gpsStatus.SetText("GPS: " + components.myLocation.String())
-					renderFlightDetails(components)
-					ui.RenderNotificationBar(
-						components.grid, components.bottomSection, components.notificationBar, components.notifications,
-					)
-				})
+				currentInterval = tickUI(components, ticker, currentInterval, &drawInFlight)
 			}
 		}
 	})
+}
+
+// tickUI adapts the redraw cadence to the SDR state and, unless
+// shutdown has begun, enqueues one coalesced redraw. It returns the
+// (possibly changed) ticker interval so the caller tracks cadence
+// transitions across ticks.
+//
+// A running gain sweep needs ~4 Hz to animate the radar spinner one
+// cell per tick; the idle UI is plenty at 1 Hz. Reset only fires
+// when the desired cadence changes so a Reset every tick is avoided.
+func tickUI(
+	components *uiComponents, ticker *time.Ticker, current time.Duration, drawInFlight *atomic.Bool,
+) time.Duration {
+	desired := uiUpdateInterval
+	if components.adsbStream.Sweeping() {
+		desired = sweepUpdateInterval
+	}
+
+	if desired != current {
+		ticker.Reset(desired)
+
+		current = desired
+	}
+
+	// A tick that fires during shutdown must not enqueue: the event
+	// loop is tearing down and the draw would strand with nothing
+	// left to run it.
+	if components.ctx.Err() != nil {
+		return current
+	}
+
+	ui.TryQueueUpdateDraw(components.app, drawInFlight, func() {
+		renderUI(components)
+	})
+
+	return current
+}
+
+// renderUI paints one frame of the TUI from the current domain
+// snapshots. It runs on the tview event loop (enqueued by tickUI),
+// never directly from the ticker goroutine, so every widget mutation
+// here is serialised with tview's own Draw.
+func renderUI(components *uiComponents) {
+	components.clock.SetText("Local: " + time.Now().Format(time.TimeOnly) + " UTC: " +
+		time.Now().UTC().Format(time.TimeOnly))
+	components.statusBar.SetText("Battery: " + components.batteryStatus.String())
+
+	ui.UpdateHeaderColor(
+		components.batteryStatus.GetPercentage(),
+		components.clock,
+		components.statusBar,
+	)
+
+	ui.UpdatePlaneList(components.planeListPanel, components.myLocation, components.planeList,
+		components.selection)
+	ui.UpdateStatsPanel(components.statsPanel, components.adsbStream, components.statsTracker,
+		components.myLocation, components.planeList)
+	ui.UpdateFooter(components.commands, components.radarPanel, components.adsbStream)
+	ui.UpdateSourceStatus(components.sourceStatus, components.adsbStream)
+	components.gpsStatus.SetText("GPS: " + components.myLocation.String())
+	renderFlightDetails(components)
+	ui.RenderNotificationBar(
+		components.grid, components.bottomSection, components.notificationBar, components.notifications,
+	)
 }
 
 // renderFlightDetails reconciles the left-column page (radar vs.
