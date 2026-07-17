@@ -2,6 +2,8 @@
 
 A terminal radar for aircraft. Plug in an RTL-SDR dongle, point an antenna at the sky, and uAirwaves shows you every plane it can hear: a live radar scope, a plane list sorted by distance, flight details, and a running picture of how well your antenna is actually doing. One binary, no daemons, no internet connection needed.
 
+![uAirwaves tracking traffic over the Netherlands: the radar scope with airport markers, the plane list, stats, and the coverage cone, running off a remote BEAST feed with a self-located position](example.png)
+
 It was built for the [uConsole](https://www.clockworkpi.com/uconsole) with the HackerGadgets All-In-One board (SDR, GPS, LoRa, RTC), but any Linux machine with an RTL-SDR works.
 
 uAirwaves is also the top of a four-part, pure-Go SDR stack: a USB driver, a demodulator, a decoder, and this radar on top. Every layer works as a standalone tool with its own view of the signal, so you can follow a transmission all the way from raw samples to a blip on the scope. If you want to learn how ADS-B reception actually works, that is the point of the whole stack. See [How it works](#how-it-works).
