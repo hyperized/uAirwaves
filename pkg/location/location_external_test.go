@@ -7,7 +7,10 @@ import (
 	"github.com/hyperized/uAirwaves/pkg/location"
 )
 
-const fix3D = "3D fix"
+const (
+	fix3D     = "3D fix"
+	noFixMode = "no fix"
+)
 
 func TestNew(t *testing.T) {
 	t.Parallel()
@@ -28,7 +31,7 @@ func TestNew(t *testing.T) {
 		t.Errorf("expected longitude 13.4, got %f", lon)
 	}
 
-	expectedString := "lat 52.500000000, lon 13.400000000 100.5000m 3D fix"
+	expectedString := "GPS lat 52.500000000, lon 13.400000000 100.5000m 3D fix"
 	if got := loc.String(); got != expectedString {
 		t.Errorf("expected string %q, got %q", expectedString, got)
 	}
@@ -54,7 +57,7 @@ func TestUpdate(t *testing.T) {
 		t.Errorf("expected longitude 20.0, got %f", lon)
 	}
 
-	expectedString := "lat 10.000000000, lon 20.000000000 30.0000m 2D fix"
+	expectedString := "GPS lat 10.000000000, lon 20.000000000 30.0000m 2D fix"
 	if got := loc.String(); got != expectedString {
 		t.Errorf("expected string %q, got %q", expectedString, got)
 	}
@@ -109,15 +112,18 @@ func TestHasFix(t *testing.T) {
 func TestFixModes(t *testing.T) {
 	t.Parallel()
 
+	// The GPS/no-source form substitutes an empty mode (unknown or
+	// out-of-range) with "no fix" so the cold-start header reads as
+	// "GPS present, not yet locked" instead of trailing a blank.
 	tests := []struct {
 		mode int
 		want string
 	}{
-		{0, ""},
-		{1, "no fix"},
+		{0, noFixMode},
+		{1, noFixMode},
 		{2, "2D fix"},
-		{3, "3D fix"},
-		{4, ""}, // Out of range should return empty string if map doesn't have it
+		{3, fix3D},
+		{4, noFixMode}, // Out of range: not in the map, so it renders as "no fix".
 	}
 
 	for _, testCase := range tests {
@@ -127,9 +133,98 @@ func TestFixModes(t *testing.T) {
 			loc := location.New(location.WithMode(testCase.mode))
 			got := loc.String()
 
-			expected := "lat 0.000000000, lon 0.000000000 0.0000m " + testCase.want
+			expected := "GPS lat 0.000000000, lon 0.000000000 0.0000m " + testCase.want
 			if got != expected {
 				t.Errorf("String() = %q, want %q", got, expected)
+			}
+		})
+	}
+}
+
+// TestSourceAndConfidenceRadius pins the new provenance accessors:
+// the cold-start defaults, and the values set through the matching
+// options.
+func TestSourceAndConfidenceRadius(t *testing.T) {
+	t.Parallel()
+
+	defaults := location.New()
+	if got := defaults.Source(); got != location.SourceNone {
+		t.Errorf("default Source() = %d, want SourceNone (%d)", got, location.SourceNone)
+	}
+
+	if got := defaults.ConfidenceRadiusNm(); got != 0 {
+		t.Errorf("default ConfidenceRadiusNm() = %f, want 0", got)
+	}
+
+	loc := location.New(
+		location.WithSource(location.SourceInferred),
+		location.WithConfidenceRadiusNm(18.0),
+	)
+
+	if got := loc.Source(); got != location.SourceInferred {
+		t.Errorf("Source() = %d, want SourceInferred (%d)", got, location.SourceInferred)
+	}
+
+	if got := loc.ConfidenceRadiusNm(); got != 18.0 {
+		t.Errorf("ConfidenceRadiusNm() = %f, want 18.0", got)
+	}
+}
+
+// TestStringBySource pins the exact header line for every source:
+// full-precision GPS, the cold-start unset form, and the reduced-
+// precision inferred estimate with and without a confidence radius.
+func TestStringBySource(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		opts []location.Option
+		want string
+	}{
+		{
+			name: "gps fix",
+			opts: []location.Option{
+				location.WithSource(location.SourceGPS),
+				location.WithLatitude(52.5),
+				location.WithLongitude(13.4),
+				location.WithAltitude(100.5),
+				location.WithMode(3),
+			},
+			want: "GPS lat 52.500000000, lon 13.400000000 100.5000m 3D fix",
+		},
+		{
+			name: "unset cold start",
+			opts: nil,
+			want: "GPS lat 0.000000000, lon 0.000000000 0.0000m no fix",
+		},
+		{
+			name: "inferred with radius",
+			opts: []location.Option{
+				location.WithSource(location.SourceInferred),
+				location.WithLatitude(52.31),
+				location.WithLongitude(4.92),
+				location.WithConfidenceRadiusNm(18.0),
+			},
+			want: "EST lat 52.31, lon 4.92 (inferred ±18 nm)",
+		},
+		{
+			name: "inferred without radius",
+			opts: []location.Option{
+				location.WithSource(location.SourceInferred),
+				location.WithLatitude(52.31),
+				location.WithLongitude(4.92),
+			},
+			want: "EST lat 52.31, lon 4.92 (inferred)",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			loc := location.New(testCase.opts...)
+			if got := loc.String(); got != testCase.want {
+				t.Errorf("String() = %q, want %q", got, testCase.want)
 			}
 		})
 	}

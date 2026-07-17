@@ -410,7 +410,12 @@ func TestBuildTPVHandlerModeChangeAndFix(t *testing.T) {
 
 	prevMode.Store(-1)
 
-	myLoc := location.New()
+	// Seed a stale self-locate estimate so the GPS update must both
+	// stamp SourceGPS and clear the inferred confidence radius.
+	myLoc := location.New(
+		location.WithSource(location.SourceInferred),
+		location.WithConfidenceRadiusNm(25),
+	)
 	handler := buildTPVHandler(myLoc, &lastTPV, &prevMode, gpsInstance.onFix)
 
 	// First report: mode 1 (no fix), no position. Seeds prevMode
@@ -432,6 +437,14 @@ func TestBuildTPVHandlerModeChangeAndFix(t *testing.T) {
 
 	if lat, lon := myLoc.GetCoordinates(); lat != 52.5 || lon != 13.4 {
 		t.Errorf("location = (%f, %f), want (52.5, 13.4)", lat, lon)
+	}
+
+	if got := myLoc.Source(); got != location.SourceGPS {
+		t.Errorf("Source() = %d, want SourceGPS (%d)", got, location.SourceGPS)
+	}
+
+	if got := myLoc.ConfidenceRadiusNm(); got != 0 {
+		t.Errorf("ConfidenceRadiusNm() = %f after GPS fix, want 0 (stale radius cleared)", got)
 	}
 }
 

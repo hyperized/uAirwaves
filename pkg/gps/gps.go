@@ -224,6 +224,10 @@ func buildTPVHandler(
 		}
 
 		myLocation.Update(
+			location.WithSource(location.SourceGPS),
+			// Clear any stale self-locate radius: once gpsd speaks,
+			// this position is a GPS fix, not an inferred estimate.
+			location.WithConfidenceRadiusNm(0),
 			location.WithMode(int(tpvReport.Mode)),
 			location.WithLatitude(tpvReport.Lat),
 			location.WithLongitude(tpvReport.Lon),

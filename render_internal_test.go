@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/hyperized/uAirwaves/pkg/location"
 	"github.com/hyperized/uAirwaves/pkg/radar"
 )
 
@@ -118,6 +119,33 @@ func TestRenderFlightDetailsTrackedPlane(t *testing.T) {
 
 	if body := uic.flightDetailsText.GetText(true); strings.Contains(body, "no longer tracked") {
 		t.Errorf("details text shows the pruned placeholder for a tracked plane: %q", body)
+	}
+}
+
+// TestRenderUIGpsStatusShowsInferredMarker drives a full renderUI frame
+// with a self-locate position in myLocation and asserts the header
+// renders it as an explicit estimate — "EST … (inferred …)" — and never
+// as GPS coordinates, so a tens-of-nm guess can't be read as a fix.
+func TestRenderUIGpsStatusShowsInferredMarker(t *testing.T) {
+	t.Parallel()
+
+	uic := newRenderableUIC(t)
+	uic.myLocation.Update(
+		location.WithSource(location.SourceInferred),
+		location.WithConfidenceRadiusNm(22.0),
+		location.WithLatitude(52.31),
+		location.WithLongitude(4.92),
+	)
+
+	renderUI(uic)
+
+	got := uic.gpsStatus.GetText(true)
+	if !strings.Contains(got, "EST") || !strings.Contains(got, "inferred") {
+		t.Errorf("gpsStatus = %q, want an inferred estimate marker", got)
+	}
+
+	if strings.HasPrefix(got, "GPS ") {
+		t.Errorf("gpsStatus = %q, an inferred position must not render as GPS coordinates", got)
 	}
 }
 

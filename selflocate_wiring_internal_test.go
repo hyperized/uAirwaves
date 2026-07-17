@@ -132,6 +132,15 @@ func TestRunSelfLocateAppliesEstimateWhenGPSStale(t *testing.T) {
 			cancel()
 			<-done
 
+			if got := loc.Source(); got != location.SourceInferred {
+				t.Errorf("Source() = %d after self-locate push, want SourceInferred (%d)",
+					got, location.SourceInferred)
+			}
+
+			if got := loc.ConfidenceRadiusNm(); got <= 0 {
+				t.Errorf("ConfidenceRadiusNm() = %f after self-locate push, want > 0", got)
+			}
+
 			return
 		}
 

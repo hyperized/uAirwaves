@@ -703,6 +703,8 @@ func runSelfLocate(
 			}
 
 			loc.Update(
+				location.WithSource(location.SourceInferred),
+				location.WithConfidenceRadiusNm(fix.ConfidenceRadiusNm),
 				location.WithLatitude(fix.Latitude),
 				location.WithLongitude(fix.Longitude),
 			)
@@ -850,7 +852,7 @@ func renderUI(components *uiComponents) {
 	ui.UpdateFooter(components.commands, components.radarPanel, components.adsbStream,
 		components.coverageView.Mode())
 	ui.UpdateSourceStatus(components.sourceStatus, components.adsbStream)
-	components.gpsStatus.SetText("GPS: " + components.myLocation.String())
+	components.gpsStatus.SetText(components.myLocation.String())
 	renderFlightDetails(components)
 	ui.RenderNotificationBar(
 		components.grid, components.bottomSection, components.notificationBar, components.notifications,
