@@ -1,5 +1,7 @@
-Makefile
+.env
 uAirwaves*
 coverage*
 dist/
+cad/
 .cad-venv/
+CLAUDE.md
