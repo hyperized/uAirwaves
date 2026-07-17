@@ -1,6 +1,7 @@
 .env
 uAirwaves*
-coverage*
+coverage.out
+coverage.html
 dist/
 cad/
 .cad-venv/

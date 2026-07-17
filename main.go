@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -20,6 +21,7 @@ import (
 	"github.com/hyperized/uAirwaves/pkg/adsb"
 	"github.com/hyperized/uAirwaves/pkg/airplanes"
 	"github.com/hyperized/uAirwaves/pkg/battery"
+	"github.com/hyperized/uAirwaves/pkg/coverage"
 	"github.com/hyperized/uAirwaves/pkg/gps"
 	"github.com/hyperized/uAirwaves/pkg/location"
 	"github.com/hyperized/uAirwaves/pkg/radar"
@@ -113,10 +115,15 @@ func main() {
 		waitGroup: uic.waitGroup,
 		errChan:   uic.errChan,
 	}
+	coverageCtrl := &coverageController{
+		view:        uic.coverageView,
+		rightColumn: uic.rightColumn,
+		panel:       uic.coveragePanel,
+	}
 	ctrls := ui.NewKeyControllers(
 		uic.app, uic.radarPanel, uic.flightDetailsMini,
 		uic.notifications, biasTee,
-		uic.selection, uic.planeListPanel,
+		uic.selection, uic.planeListPanel, coverageCtrl,
 	)
 
 	uic.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
@@ -204,6 +211,9 @@ type uiComponents struct {
 	radarPanel         *radar.View
 	planeListPanel     *tview.List
 	statsPanel         *tview.TextView
+	coveragePanel      *tview.TextView
+	coverageTracker    *coverage.Tracker
+	coverageView       *ui.CoverageView
 	rightColumn        *tview.Flex
 	commands           *tview.TextView
 	gpsStatus          *tview.TextView
@@ -233,6 +243,8 @@ func configureUI(cfg cliConfig) *uiComponents {
 	planeList := airplanes.New()
 	myLocation := location.New()
 	selfLocator := selflocate.New()
+	coverageTracker := coverage.New()
+	coverageView := ui.NewCoverageView()
 	gpsLastFix := &atomic.Pointer[time.Time]{}
 	// waitGroup and errChan are built here (rather than inline in the
 	// struct literal) so buildADSBOptions can hand Stream's helper
@@ -246,6 +258,7 @@ func configureUI(cfg cliConfig) *uiComponents {
 	sourceStatus := configureSourceStatus()
 	planeListPanel := configurePlaneList()
 	statsPanel := configureStatsPanel()
+	coveragePanel := configureCoveragePanel()
 	headerPanel := configureHeader(clock, gpsStatus, sourceStatus, statusBar)
 	notifications := ui.NewNotifications()
 	notificationBar := configureNotificationBar()
@@ -254,6 +267,10 @@ func configureUI(cfg cliConfig) *uiComponents {
 		AddItem(footer, 1, 0, false).
 		AddItem(notificationBar, 0, 0, false)
 	detailsText, detailsMini, detailsPanel := configureFlightDetailsPanel(myLocation)
+	// One observer fans each CPR fix out to the self-locate estimator and
+	// the antenna-coverage tracker; buildADSBOptions installs it as the
+	// single adsb.PositionObserver.
+	observer := positionObserver(myLocation, selfLocator, coverageTracker)
 
 	return &uiComponents{
 		ctx:                ctx,
@@ -263,7 +280,7 @@ func configureUI(cfg cliConfig) *uiComponents {
 		myLocation:         myLocation,
 		waitGroup:          waitGroup,
 		planeList:          planeList,
-		adsbStream:         adsb.New(buildADSBOptions(cfg, myLocation, selfLocator, waitGroup, errChan)...),
+		adsbStream:         adsb.New(buildADSBOptions(cfg, myLocation, observer, waitGroup, errChan)...),
 		statsTracker:       ui.NewStatsTracker(),
 		batteryStatus:      battery.NewStatus(),
 		clock:              clock,
@@ -274,7 +291,10 @@ func configureUI(cfg cliConfig) *uiComponents {
 		bottomSection:      bottomSection,
 		planeListPanel:     planeListPanel,
 		statsPanel:         statsPanel,
-		rightColumn:        configureRightColumn(planeListPanel, statsPanel),
+		coveragePanel:      coveragePanel,
+		coverageTracker:    coverageTracker,
+		coverageView:       coverageView,
+		rightColumn:        configureRightColumn(planeListPanel, statsPanel, coveragePanel),
 		commands:           commands,
 		gpsStatus:          gpsStatus,
 		sourceStatus:       sourceStatus,
@@ -310,7 +330,7 @@ func configureUI(cfg cliConfig) *uiComponents {
 func buildADSBOptions(
 	cfg cliConfig,
 	myLocation *location.Location,
-	selfLocator *selflocate.Locator,
+	observer adsb.PositionObserver,
 	waitGroup *sync.WaitGroup,
 	errChan chan<- error,
 ) []adsb.Option {
@@ -320,8 +340,8 @@ func buildADSBOptions(
 		opts = append(opts, adsb.WithWorkerSpawner(adsbWorkerSpawner(waitGroup, errChan)))
 	}
 
-	if selfLocator != nil {
-		opts = append(opts, adsb.WithPositionObserver(selfLocator.Observe))
+	if observer != nil {
+		opts = append(opts, adsb.WithPositionObserver(observer))
 	}
 
 	if cfg.replayIQPath != "" {
@@ -385,6 +405,48 @@ func adsbWorkerSpawner(waitGroup *sync.WaitGroup, errChan chan<- error) func(tas
 
 			return nil
 		})
+	}
+}
+
+// positionObserver builds the adsb.PositionObserver that fans one
+// CPR-decoded fix out to the self-locate estimator and the antenna-
+// coverage tracker. It runs on the ADSB ingest goroutine, so it stays
+// allocation-free and non-blocking: GetCoordinates takes a read lock, the
+// distance/bearing helpers are pure, and Tracker.Observe is a single
+// mutex. Coverage fixes are dropped until a receiver position is known
+// (both coordinates zero) because distance and bearing are meaningless
+// without it, and the HaversineDistance sentinel is guarded so a
+// null-island plane never lands in the last bin. Returns nil when neither
+// consumer is wired (check mode), so no hook is installed at all.
+func positionObserver(
+	myLocation *location.Location,
+	selfLocator *selflocate.Locator,
+	tracker *coverage.Tracker,
+) adsb.PositionObserver {
+	if selfLocator == nil && tracker == nil {
+		return nil
+	}
+
+	return func(lat, lon, altFt float64) {
+		if selfLocator != nil {
+			selfLocator.Observe(lat, lon, altFt)
+		}
+
+		if tracker == nil {
+			return
+		}
+
+		receiverLat, receiverLon := myLocation.GetCoordinates()
+		if receiverLat == 0 && receiverLon == 0 {
+			return
+		}
+
+		distance := airplanes.HaversineDistance(receiverLat, receiverLon, lat, lon)
+		if distance == math.MaxFloat64 {
+			return
+		}
+
+		tracker.Observe(distance, ui.FlightBearing(receiverLat, receiverLon, lat, lon), altFt)
 	}
 }
 
@@ -784,7 +846,9 @@ func renderUI(components *uiComponents) {
 		components.selection)
 	ui.UpdateStatsPanel(components.statsPanel, components.adsbStream, components.statsTracker,
 		components.myLocation, components.planeList)
-	ui.UpdateFooter(components.commands, components.radarPanel, components.adsbStream)
+	renderCoverage(components)
+	ui.UpdateFooter(components.commands, components.radarPanel, components.adsbStream,
+		components.coverageView.Mode())
 	ui.UpdateSourceStatus(components.sourceStatus, components.adsbStream)
 	components.gpsStatus.SetText("GPS: " + components.myLocation.String())
 	renderFlightDetails(components)
@@ -857,6 +921,20 @@ func fitFlightDetailsText(components *uiComponents) {
 	components.flightDetailsPanel.ResizeItem(components.flightDetailsText, lines, 0)
 }
 
+// renderCoverage repaints the coverage panel from a fresh tracker snapshot
+// unless the panel is off, in which case it is collapsed (the 'c' handler
+// already resized it to zero) and there is nothing to draw. Runs on the
+// tview event loop via renderUI, so the coverageView read is serialised
+// with the 'c' key handler's write.
+func renderCoverage(components *uiComponents) {
+	mode := components.coverageView.Mode()
+	if mode == ui.CoverageOff {
+		return
+	}
+
+	ui.UpdateCoveragePanel(components.coveragePanel, mode, components.coverageTracker.Snapshot())
+}
+
 // configureFooter configures the footer panel.
 func configureFooter(commands *tview.TextView) *tview.Flex {
 	return tview.NewFlex().SetDirection(tview.FlexColumn).
@@ -908,10 +986,33 @@ func configureStatsPanel() *tview.TextView {
 	return statsPanel
 }
 
-// configureRightColumn stacks the plane list (top ~5/6) and the
-// stats panel (bottom ~1/6) into a single column so the existing
-// grid slot can host both.
-func configureRightColumn(planeListPanel *tview.List, statsPanel *tview.TextView) *tview.Flex {
+// configureCoveragePanel configures the antenna-coverage panel that sits
+// below the stats panel in the right column. Same styling as the stats
+// panel: bordered, dynamic colours, wrap disabled so the ASCII plot is
+// never reflowed.
+func configureCoveragePanel() *tview.TextView {
+	coveragePanel := tview.NewTextView().SetDynamicColors(true).SetWrap(false)
+	coveragePanel.SetBorder(true).SetTitle("Coverage").
+		SetTitleColor(tcell.ColorGreen).
+		SetBorderPadding(0, 0, 1, 1)
+
+	return coveragePanel
+}
+
+// coverageWeight is the right-column Flex weight the coverage panel gets
+// when visible. Toggling the panel off resizes the item to 0 so the plane
+// list reclaims the rows. Package-level because both configureRightColumn
+// (the initial layout) and applyCoverageVisibility (the runtime toggle)
+// reference it.
+const coverageWeight = 2
+
+// configureRightColumn stacks the plane list (top), the stats panel, and
+// the antenna-coverage panel into a single column so the existing grid
+// slot hosts all three. The coverage panel starts visible (cone default);
+// the 'c' key collapses it to hand its rows back to the plane list.
+func configureRightColumn(
+	planeListPanel *tview.List, statsPanel, coveragePanel *tview.TextView,
+) *tview.Flex {
 	const (
 		planeListWeight = 5
 		statsWeight     = 1
@@ -919,7 +1020,8 @@ func configureRightColumn(planeListPanel *tview.List, statsPanel *tview.TextView
 
 	return tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(planeListPanel, 0, planeListWeight, true).
-		AddItem(statsPanel, 0, statsWeight, false)
+		AddItem(statsPanel, 0, statsWeight, false).
+		AddItem(coveragePanel, 0, coverageWeight, false)
 }
 
 // Header flex weights. The source pill carries the widest content
@@ -1048,4 +1150,35 @@ func (a *biasTeeAdapter) toggle() error {
 	slog.Info("bias-tee toggled", slog.Bool("enabled", !enabled))
 
 	return nil
+}
+
+// coverageController bridges the 'c' keybind to the coverage panel. It
+// cycles the view's mode and resizes the right-column Flex so the panel
+// collapses to zero height when off, handing its rows back to the plane
+// list. It runs on the tview event loop (the key dispatcher fires it), so
+// the Flex mutation and the CoverageView write are both safe there.
+type coverageController struct {
+	view        *ui.CoverageView
+	rightColumn *tview.Flex
+	panel       *tview.TextView
+}
+
+// CycleCoverage implements ui.CoverageController: advance the mode, then
+// apply the matching panel visibility.
+func (c *coverageController) CycleCoverage() {
+	c.view.Cycle()
+	applyCoverageVisibility(c.rightColumn, c.panel, c.view.Mode())
+}
+
+// applyCoverageVisibility resizes the coverage panel inside the right
+// column: collapsed to zero when off, restored to its weight otherwise.
+// Extracted so the show/hide decision is testable without the event loop.
+func applyCoverageVisibility(rightColumn *tview.Flex, panel *tview.TextView, mode ui.CoverageMode) {
+	if mode == ui.CoverageOff {
+		rightColumn.ResizeItem(panel, 0, 0)
+
+		return
+	}
+
+	rightColumn.ResizeItem(panel, 0, coverageWeight)
 }

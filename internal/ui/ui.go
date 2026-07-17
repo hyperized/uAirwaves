@@ -97,6 +97,16 @@ type BiasTeeController interface {
 	ToggleBiasTee()
 }
 
+// CoverageController abstracts the coverage-panel mode cycle the
+// key dispatcher fires on 'c'. The implementation in main.go
+// cycles cone -> shadows -> off and resizes the right-column Flex
+// so the panel collapses when off, handing its rows back to the
+// plane list. Runs on the tview event loop like every other
+// dispatch target.
+type CoverageController interface {
+	CycleCoverage()
+}
+
 // SelectionController abstracts the flight-details selection
 // state HandleKeyInput consults on Esc (to dismiss the details
 // panel instead of quitting the app) and on Enter (to open the
@@ -139,6 +149,7 @@ type KeyControllers struct {
 	BiasTee   BiasTeeController
 	Selection SelectionController
 	PlaneList PlaneListController
+	Coverage  CoverageController
 }
 
 // HandleKeyInput is the global key dispatcher: Esc/q stop the
@@ -185,6 +196,7 @@ func NewKeyControllers(
 	biasTee BiasTeeController,
 	selection SelectionController,
 	planeList PlaneListController,
+	coverage CoverageController,
 ) KeyControllers {
 	return KeyControllers{
 		App:       app,
@@ -194,6 +206,7 @@ func NewKeyControllers(
 		BiasTee:   biasTee,
 		Selection: selection,
 		PlaneList: planeList,
+		Coverage:  coverage,
 	}
 }
 
@@ -219,6 +232,8 @@ func dispatchRune(pressed rune, ctrls KeyControllers) {
 		ctrls.Radar.ToggleHeatIndicator()
 	case 'l':
 		ctrls.Radar.ToggleAirportIndicator()
+	case 'c':
+		ctrls.Coverage.CycleCoverage()
 	case 'q':
 		ctrls.App.Stop()
 	case 'x':
@@ -464,8 +479,10 @@ type BiasTeeReader interface {
 // UpdateFooter rewrites the footer command/status line. Pulled
 // out to internal/ui so the footer string format is testable
 // against a fake radar source.
-func UpdateFooter(commands *tview.TextView, radarPanel *radar.View, biasTee BiasTeeReader) {
-	commands.SetText(FormatFooter(footerStateFromRadar(radarPanel, biasTee)))
+func UpdateFooter(
+	commands *tview.TextView, radarPanel *radar.View, biasTee BiasTeeReader, coverage CoverageMode,
+) {
+	commands.SetText(FormatFooter(footerStateFromRadar(radarPanel, biasTee, coverage)))
 }
 
 // FooterState is the snapshot of UI settings the footer line
@@ -481,6 +498,7 @@ type FooterState struct {
 	HeatEnabled      bool
 	AutoScopeEnabled bool
 	AirportsEnabled  bool
+	Coverage         CoverageMode
 	BiasTeeSupported bool
 	BiasTeeEnabled   bool
 }
@@ -500,13 +518,14 @@ func FormatFooter(state FooterState) string {
 	footer := fmt.Sprintf(
 		"[::b]Range (+/-): %0.0f nm - [::b]Heading (h): %t - "+
 			"[::b]Trail (t): %s - [::b]Heat (m): %t - [::b]Autoscope (a): %t - "+
-			"[::b]Airports (l): %t",
+			"[::b]Airports (l): %t - [::b]Coverage (c): %s",
 		state.ScopeRange,
 		state.HeadingEnabled,
 		state.TrailMode,
 		state.HeatEnabled,
 		state.AutoScopeEnabled,
 		state.AirportsEnabled,
+		state.Coverage,
 	)
 
 	if !state.BiasTeeSupported {
@@ -527,7 +546,7 @@ func formatBiasTee(state FooterState) string {
 	return "off"
 }
 
-func footerStateFromRadar(radarPanel *radar.View, biasTee BiasTeeReader) FooterState {
+func footerStateFromRadar(radarPanel *radar.View, biasTee BiasTeeReader, coverage CoverageMode) FooterState {
 	supported, enabled := biasTee.BiasTeeState()
 
 	return FooterState{
@@ -537,6 +556,7 @@ func footerStateFromRadar(radarPanel *radar.View, biasTee BiasTeeReader) FooterS
 		HeatEnabled:      radarPanel.GetHeatIndicatorEnabled(),
 		AutoScopeEnabled: radarPanel.GetAutoScopeEnabled(),
 		AirportsEnabled:  radarPanel.GetAirportIndicatorEnabled(),
+		Coverage:         coverage,
 		BiasTeeSupported: supported,
 		BiasTeeEnabled:   enabled,
 	}

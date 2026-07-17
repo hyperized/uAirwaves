@@ -110,6 +110,14 @@ type fakeBias struct {
 
 func (f *fakeBias) ToggleBiasTee() { f.toggles++ }
 
+// fakeCoverage implements CoverageController and counts CycleCoverage
+// invocations so the dispatch table can assert the 'c' key fired.
+type fakeCoverage struct {
+	cycles int
+}
+
+func (f *fakeCoverage) CycleCoverage() { f.cycles++ }
+
 // fakeBiasReader implements ui.BiasTeeReader for footer tests.
 // supportedVal toggles whether the Bias-T segment renders at all;
 // enabledVal drives the on/off text when it does.
@@ -137,6 +145,7 @@ type keyDispatchCase struct {
 	wantDismissFront int
 	wantDismissAll   int
 	wantBiasToggles  int
+	wantCoverage     int
 }
 
 // keyDispatchCases is the HandleKeyInput dispatch table. Hoisted
@@ -173,6 +182,10 @@ var keyDispatchCases = []keyDispatchCase{
 		name: "b toggles bias-tee", event: tcell.NewEventKey(tcell.KeyRune, 'b', tcell.ModNone),
 		wantBiasToggles: 1,
 	},
+	{
+		name: "c cycles coverage", event: tcell.NewEventKey(tcell.KeyRune, 'c', tcell.ModNone),
+		wantCoverage: 1,
+	},
 	{name: "unrecognised rune is no-op", event: tcell.NewEventKey(tcell.KeyRune, 'z', tcell.ModNone)},
 }
 
@@ -201,10 +214,11 @@ func assertKeyDispatch(t *testing.T, testCase keyDispatchCase) {
 	rdr := &fakeRadar{}
 	nts := &fakeNotifs{}
 	bia := &fakeBias{}
+	cov := &fakeCoverage{}
 
 	returned := ui.HandleKeyInput(
 		testCase.event,
-		ui.NewKeyControllers(app, rdr, nil, nts, bia, nil, nil),
+		ui.NewKeyControllers(app, rdr, nil, nts, bia, nil, nil, cov),
 	)
 	if returned != testCase.event {
 		t.Errorf("HandleKeyInput should return event unchanged; got %v want %v", returned, testCase.event)
@@ -222,6 +236,7 @@ func assertKeyDispatch(t *testing.T, testCase keyDispatchCase) {
 		wantDismissFront: nts.dismissFronts,
 		wantDismissAll:   nts.dismissAll,
 		wantBiasToggles:  bia.toggles,
+		wantCoverage:     cov.cycles,
 	}
 
 	if got != (keyDispatchCase{
@@ -236,6 +251,7 @@ func assertKeyDispatch(t *testing.T, testCase keyDispatchCase) {
 		wantDismissFront: testCase.wantDismissFront,
 		wantDismissAll:   testCase.wantDismissAll,
 		wantBiasToggles:  testCase.wantBiasToggles,
+		wantCoverage:     testCase.wantCoverage,
 	}) {
 		t.Errorf("dispatch counts mismatch\n got: %+v\nwant: %+v", got, testCase)
 	}
@@ -515,7 +531,7 @@ func TestUpdateFooterReadsRadarState(t *testing.T) {
 
 	commands := tview.NewTextView()
 
-	ui.UpdateFooter(commands, radarPanel, fakeBiasReader{})
+	ui.UpdateFooter(commands, radarPanel, fakeBiasReader{}, ui.CoverageShadows)
 
 	got := commands.GetText(true)
 	if !strings.Contains(got, "Range (+/-): 25 nm") {
@@ -524,6 +540,10 @@ func TestUpdateFooterReadsRadarState(t *testing.T) {
 
 	if !strings.Contains(got, "Airports (l): true") {
 		t.Errorf("UpdateFooter text = %q, want substring 'Airports (l): true'", got)
+	}
+
+	if !strings.Contains(got, "Coverage (c): shadows") {
+		t.Errorf("UpdateFooter text = %q, want substring 'Coverage (c): shadows'", got)
 	}
 
 	if strings.Contains(got, "Bias-T") {
@@ -555,7 +575,7 @@ func TestUpdateFooterReadsBiasTeeState(t *testing.T) {
 			radarPanel := radar.New(planeList, myLocation, nil)
 
 			commands := tview.NewTextView()
-			ui.UpdateFooter(commands, radarPanel, testCase.reader)
+			ui.UpdateFooter(commands, radarPanel, testCase.reader, ui.CoverageCone)
 
 			if got := commands.GetText(true); !strings.Contains(got, testCase.want) {
 				t.Errorf("UpdateFooter text = %q, want substring %q", got, testCase.want)
@@ -695,7 +715,7 @@ func TestFormatFooter(t *testing.T) {
 		want  string
 	}{
 		{
-			name: "bias-tee unsupported omits the segment",
+			name: "bias-tee unsupported omits the segment, coverage cone",
 			state: ui.FooterState{
 				ScopeRange:       50,
 				HeadingEnabled:   true,
@@ -703,32 +723,35 @@ func TestFormatFooter(t *testing.T) {
 				HeatEnabled:      true,
 				AutoScopeEnabled: false,
 				AirportsEnabled:  true,
+				Coverage:         ui.CoverageCone,
 			},
 			want: "[::b]Range (+/-): 50 nm - [::b]Heading (h): true - " +
 				"[::b]Trail (t): off - [::b]Heat (m): true - [::b]Autoscope (a): false - " +
-				"[::b]Airports (l): true",
+				"[::b]Airports (l): true - [::b]Coverage (c): cone",
 		},
 		{
-			name: "bias-tee on",
+			name: "bias-tee on, coverage shadows",
 			state: ui.FooterState{
 				TrailMode:        radar.TrailShort,
+				Coverage:         ui.CoverageShadows,
 				BiasTeeSupported: true,
 				BiasTeeEnabled:   true,
 			},
 			want: "[::b]Range (+/-): 0 nm - [::b]Heading (h): false - " +
 				"[::b]Trail (t): short - [::b]Heat (m): false - [::b]Autoscope (a): false - " +
-				"[::b]Airports (l): false - [::b]Bias-T (b): on",
+				"[::b]Airports (l): false - [::b]Coverage (c): shadows - [::b]Bias-T (b): on",
 		},
 		{
-			name: "bias-tee off",
+			name: "bias-tee off, coverage off",
 			state: ui.FooterState{
 				TrailMode:        radar.TrailLong,
+				Coverage:         ui.CoverageOff,
 				BiasTeeSupported: true,
 				BiasTeeEnabled:   false,
 			},
 			want: "[::b]Range (+/-): 0 nm - [::b]Heading (h): false - " +
 				"[::b]Trail (t): long - [::b]Heat (m): false - [::b]Autoscope (a): false - " +
-				"[::b]Airports (l): false - [::b]Bias-T (b): off",
+				"[::b]Airports (l): false - [::b]Coverage (c): off - [::b]Bias-T (b): off",
 		},
 	}
 
@@ -782,7 +805,7 @@ func TestHandleKeyInputEscClosesDetailsWhenOpen(t *testing.T) {
 
 	event := tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone)
 
-	ui.HandleKeyInput(event, ui.NewKeyControllers(app, rdr, nil, nts, bia, sel, lst))
+	ui.HandleKeyInput(event, ui.NewKeyControllers(app, rdr, nil, nts, bia, sel, lst, nil))
 
 	if app.stops != 0 {
 		t.Errorf("Esc with details open should NOT stop the app, stops = %d", app.stops)
@@ -808,7 +831,7 @@ func TestHandleKeyInputEscQuitsWhenDetailsClosed(t *testing.T) {
 
 	event := tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone)
 
-	ui.HandleKeyInput(event, ui.NewKeyControllers(app, rdr, nil, nts, bia, sel, lst))
+	ui.HandleKeyInput(event, ui.NewKeyControllers(app, rdr, nil, nts, bia, sel, lst, nil))
 
 	if app.stops != 1 {
 		t.Errorf("Esc with details closed should stop the app, stops = %d", app.stops)
@@ -897,7 +920,7 @@ func assertScopeRouting(t *testing.T, selectionOpen bool) (*fakeRadar, *fakeMini
 	sel := &fakeSelection{openVal: selectionOpen}
 	lst := &fakePlaneList{}
 
-	ctrls := ui.NewKeyControllers(app, rdr, mini, nts, bia, sel, lst)
+	ctrls := ui.NewKeyControllers(app, rdr, mini, nts, bia, sel, lst, nil)
 
 	for _, pressed := range []rune{'+', '-', 'a'} {
 		ui.HandleKeyInput(tcell.NewEventKey(tcell.KeyRune, pressed, tcell.ModNone), ctrls)
@@ -920,7 +943,7 @@ func TestHandleKeyInputEnterOpensSelection(t *testing.T) {
 
 	event := tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone)
 
-	ui.HandleKeyInput(event, ui.NewKeyControllers(app, rdr, nil, nts, bia, sel, lst))
+	ui.HandleKeyInput(event, ui.NewKeyControllers(app, rdr, nil, nts, bia, sel, lst, nil))
 
 	if sel.openCalls != 1 {
 		t.Errorf("Enter should call Selection.OpenAt once, got %d", sel.openCalls)

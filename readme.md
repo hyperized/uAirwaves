@@ -17,6 +17,7 @@ A single-binary TUI for the uConsole with a HackerGadgets Antenna board (GPS / S
 - **Airport overlay** — ~310 major civil airports (sourced from the OurAirports public-domain dataset) render as dim cyan `⊕ ICAO` markers on the scope, filtered to those inside the current range. Toggle with `l`.
 - **Flight details** — press `Enter` on the right-column plane list to open a detail panel for the highlighted contact: identity, altitude (with FL), heading, velocity (kt + km/h), vertical rate, position, distance + great-circle bearing from the receiver, age, message count, plus a single-flight mini-scope inset centred on the plane (not the receiver) that auto-fits to the full known trail. The mini scope also draws the receiver as a regular `X` crosshair when its position falls inside the rendered range. While the details panel is open the `+/-` (zoom) and `a` (autoscope) keys redirect from the main radar to the mini view so the operator can dig in without leaving the panel. `Esc` returns to the radar.
 - **Stats panel** — running tally of tracked / positioned contacts, nearest/farthest/highest with session peaks, frames-per-second with a session-peak appendix, and the rolling callsign-decode ratio.
+- **Coverage panel** — a session-only picture of the antenna's real reception pattern, built from the distance and bearing of every resolved fix. Two ASCII views cycle with `c`: a density **cone** (distance on X, altitude band on Y, cell shading by detection count) that shows the low-elevation skirt and the overhead cone-of-silence, and a top-down **shadows** silhouette that fills each bearing sector out to its farthest detection so antenna nulls read as missing wedges. A third press hides the block and returns the rows to the plane list. Data lives in memory only — nothing is persisted.
 - **Battery + system status** — secondary panels. Battery reads are cross-platform: sysfs `power_supply` on Linux (auto-discovered, not pinned to the uConsole's `axp20x-battery`) and `pmset` on macOS.
 
 ## Architecture
@@ -99,6 +100,7 @@ gitignored `.env` next to the Makefile (`DEVICE = user@uconsole-host`,
 | `t` | Cycle trail length: short (default, last ~100 s) → long (every fix until the plane is pruned) → off |
 | `m` | Toggle heatmap overlay (off by default) |
 | `l` | Toggle airport overlay (on by default) |
+| `c` | Cycle the coverage panel: cone (density heatmap, default) → shadows (top-down silhouette) → off (collapses the block) |
 | `b` | Toggle bias-tee on the SDR (powered off automatically on app shutdown) |
 | `x` / `X` | Dismiss the current / all queued notification-bar messages |
 
@@ -157,6 +159,7 @@ internal/ui/            — pure UI helpers extracted out of main for testabilit
    selection.go           — picked-plane state for the details panel (index → ICAO mapping)
    notifications.go       — in-app notification queue + slog handler + bar renderer
    stats.go               — stats panel aggregation
+   coverage.go            — coverage-panel mode (cone/shadows/off) + ASCII formatters
    worker.go              — LaunchWorker (panic recovery + WaitGroup wiring)
 pkg/adsb/               — Receiver/Demodulator factories, frame dispatch, CPR resolution
    adsb.go                — Stream() branches between SDR and BEAST paths; bias-tee
@@ -171,6 +174,9 @@ pkg/airports/           — embedded ~310-airport overlay set (CC0 OurAirports d
                           ICAO list)
 pkg/battery/            — cross-platform battery watcher: sysfs power_supply (Linux,
                           auto-discovered) / pmset (macOS), resilient to transient read errors
+pkg/coverage/           — thread-safe reception-pattern tracker: bins each fix by
+                          distance/altitude/bearing into fixed-size grids; Snapshot()
+                          for lock-free rendering
 pkg/gps/                — gpsd client with reconnect-on-hangup + 30 s TPV watchdog
 pkg/location/           — receiver lat/lon
 pkg/radar/              — scope, plane rendering, heatmap, altitude-coloured trails,
