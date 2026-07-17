@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -81,7 +82,7 @@ func newReaderFrom(root string) reader {
 func discoverBattery(root string) (string, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("battery: read power_supply dir: %w", err)
 	}
 
 	for _, entry := range entries {
@@ -105,7 +106,7 @@ func discoverBattery(root string) (string, error) {
 func readUevent(path string) (reading, error) {
 	file, err := os.Open(filepath.Clean(path))
 	if err != nil {
-		return reading{}, err
+		return reading{}, fmt.Errorf("battery: open uevent: %w", err)
 	}
 
 	defer func() { _ = file.Close() }()
@@ -123,7 +124,7 @@ func readUevent(path string) (reading, error) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return reading{}, err
+		return reading{}, fmt.Errorf("battery: scan uevent: %w", err)
 	}
 
 	return result, nil
@@ -140,5 +141,6 @@ func applyUeventPair(result *reading, key, value string) {
 		if v, err := strconv.ParseInt(value, 10, 8); err == nil {
 			result.percentage = int8(v)
 		}
+	default: // unknown keys are ignored, per the doc comment
 	}
 }

@@ -26,7 +26,9 @@ func TestWatchWithInterval_TempUevent(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "uevent")
-	if err := os.WriteFile(path, []byte("POWER_SUPPLY_STATUS=Discharging\nPOWER_SUPPLY_CAPACITY=50\n"), 0o600); err != nil {
+
+	discharging := []byte("POWER_SUPPLY_STATUS=Discharging\nPOWER_SUPPLY_CAPACITY=50\n")
+	if err := os.WriteFile(path, discharging, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -42,7 +44,8 @@ func TestWatchWithInterval_TempUevent(t *testing.T) {
 		t.Fatalf("expected 50, got %d", status.GetPercentage())
 	}
 
-	if err := os.WriteFile(path, []byte("POWER_SUPPLY_STATUS=Charging\nPOWER_SUPPLY_CAPACITY=60\n"), 0o600); err != nil {
+	charging := []byte("POWER_SUPPLY_STATUS=Charging\nPOWER_SUPPLY_CAPACITY=60\n")
+	if err := os.WriteFile(path, charging, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
