@@ -1,0 +1,26 @@
+# Dependabot version updates. No auto-merge: the maintainer reviews every PR.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      go-modules:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build
