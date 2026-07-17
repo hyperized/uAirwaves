@@ -66,6 +66,32 @@ func TestSelectionCloseDoesNotForgetICAO(t *testing.T) {
 	}
 }
 
+func TestSelectionICAOAtIndexReturnsMappedICAO(t *testing.T) {
+	t.Parallel()
+
+	sel := ui.NewSelection()
+	sel.SetICAOs([]string{icaoFixtureA, icaoFixtureB, icaoFixtureC})
+
+	if got := sel.ICAOAtIndex(1); got != icaoFixtureB {
+		t.Errorf("ICAOAtIndex(1) = %q, want %q", got, icaoFixtureB)
+	}
+}
+
+func TestSelectionICAOAtIndexOutOfRangeReturnsEmpty(t *testing.T) {
+	t.Parallel()
+
+	sel := ui.NewSelection()
+	sel.SetICAOs([]string{icaoFixtureA})
+
+	if got := sel.ICAOAtIndex(5); got != "" {
+		t.Errorf("ICAOAtIndex past end = %q, want empty", got)
+	}
+
+	if got := sel.ICAOAtIndex(-1); got != "" {
+		t.Errorf("ICAOAtIndex(-1) = %q, want empty", got)
+	}
+}
+
 func TestSelectionConcurrentAccess(t *testing.T) {
 	t.Parallel()
 

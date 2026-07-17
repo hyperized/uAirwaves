@@ -1,6 +1,7 @@
 package airplanes_test
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -214,4 +215,51 @@ func TestConcurrency(t *testing.T) {
 	go worker()
 
 	waitGroup.Wait()
+}
+
+// BenchmarkSorted measures Sorted's per-call cost across a 200-plane
+// fleet, with and without WithTrails (the option that additionally
+// copies each snapshot's position history). Each plane here carries one
+// real position fix rather than block 3a's full 256-entry trail:
+// WithPosition's history append is gated behind a real 10s-per-fix
+// interval kept on the private *airplane.Airplane, and that field is
+// inaccessible from this package (block 3a's forcePositionAppend lives
+// in pkg/airplane's own internal test file, which is off-limits across
+// a package boundary). Sequential or concurrent, driving 256 real fixes
+// through the public API costs ~256 * 10s regardless of plane count, so
+// it is not viable in a benchmark that has to run quickly. One fix per
+// plane still exercises the WithTrails() copy branch and the per-plane
+// RLock/snapshot allocation Sorted's hot path is otherwise dominated by.
+func BenchmarkSorted(b *testing.B) {
+	const benchPlaneCount = 200
+
+	list := airplanes.New()
+
+	for index := range benchPlaneCount {
+		icao := fmt.Sprintf("BN%04d", index)
+		list.Ensure(icao)
+
+		plane, _ := list.Get(icao)
+		plane.Update(airplane.WithPosition(52.0+float64(index)*0.01, 13.0))
+	}
+
+	const receiverLat, receiverLon = 52.0, 13.0
+
+	b.Run("default", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for range b.N {
+			_ = list.Sorted(receiverLat, receiverLon)
+		}
+	})
+
+	b.Run("WithTrails", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for range b.N {
+			_ = list.Sorted(receiverLat, receiverLon, airplanes.WithTrails())
+		}
+	})
 }

@@ -137,14 +137,9 @@ func writePositionBlock(builder *strings.Builder, snap airplane.Snapshot, receiv
 		return
 	}
 
+	// Both (0,0) sentinels are handled above, so HaversineDistance
+	// cannot return its MaxFloat64 marker here.
 	distance := airplanes.HaversineDistance(receiverLat, receiverLon, snap.Latitude, snap.Longitude)
-	if distance == math.MaxFloat64 {
-		builder.WriteString("[::b]Distance[::-]   [gray]—[white]\n")
-		builder.WriteString("[::b]Bearing[::-]    [gray]—[white]\n")
-
-		return
-	}
-
 	fmt.Fprintf(builder, "[::b]Distance[::-]   %.1f nm\n", distance)
 	fmt.Fprintf(builder, "[::b]Bearing[::-]    %s\n",
 		formatBearing(FlightBearing(receiverLat, receiverLon, snap.Latitude, snap.Longitude)))

@@ -132,6 +132,19 @@ type biasTeeController interface {
 // ReceiverFactory.
 type DemodulatorFactory func() Demodulator
 
+// sweepFunc runs the LNA × Mix × VGA gain walk. It defaults to
+// sweep.Run; internal tests inject a fast stand-in so the
+// apply-and-log tail of runAutoSweep runs without walking the
+// ~96 s production grid.
+type sweepFunc func(
+	ctx context.Context,
+	rcv sweep.Receiver,
+	processor sweep.Processor,
+	cfg sweep.Config,
+	metrics *sweep.Metrics,
+	logger *slog.Logger,
+) (sweep.Result, error)
+
 // ADSB is the SDR-driven ADS-B ingest. The shape mirrors the
 // original (TCP) implementation so main.go does not change:
 // `adsb.New(opts...).Stream(ctx, planes)`.
@@ -241,6 +254,11 @@ type ADSB struct {
 	// re-run the sweep, so the guard survives across streamSDROnce
 	// re-entries for the lifetime of one Stream call.
 	sweepOnce sync.Once
+
+	// sweepRun performs the gain walk. Defaults to sweep.Run; tests
+	// override it to return a canned Result so runAutoSweep's apply
+	// and log branches run without the production grid's wall-clock.
+	sweepRun sweepFunc
 
 	// connected reflects whether the current source is actively
 	// producing frames: true after a successful SDR open / BEAST
@@ -434,6 +452,7 @@ func New(opts ...Option) *ADSB {
 		sdrReconnectBase:   sdrReconnectBaseDelay,
 		sdrReconnectMax:    sdrReconnectMaxDelay,
 		spawn:              defaultSpawn,
+		sweepRun:           sweep.Run,
 	}
 
 	for _, opt := range opts {
@@ -922,7 +941,7 @@ func (a *ADSB) runAutoSweep(ctx context.Context, receiver Receiver, demodulator 
 
 	silentLogger := slog.New(slog.DiscardHandler)
 
-	result, err := sweep.Run(ctx, sweepRcv, demodulator, sweep.Default(), &sweep.Metrics{}, silentLogger)
+	result, err := a.sweepRun(ctx, sweepRcv, demodulator, sweep.Default(), &sweep.Metrics{}, silentLogger)
 	if err != nil {
 		slog.Warn("adsb: auto-sweep failed; continuing with current gain settings",
 			slog.Any("error", err))

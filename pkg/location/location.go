@@ -1,3 +1,7 @@
+// Package location holds the receiver's thread-safe current position: a
+// GPS fix from gpsd, or an ADS-B-derived self-locate fallback when GPS is
+// unavailable. State is set through functional options and read back
+// through small locked accessors.
 package location
 
 import (

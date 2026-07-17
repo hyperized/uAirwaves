@@ -1,3 +1,8 @@
+// Package gps connects to a gpsd daemon and feeds TPV position
+// reports into a shared location. It reconnects with exponential
+// backoff on dial failures, server hangups, and stalled sockets, and
+// can fire a callback on every report that carries a real fix so
+// callers can gate a GPS-freshness fallback.
 package gps
 
 import (

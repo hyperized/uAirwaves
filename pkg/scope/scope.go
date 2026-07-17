@@ -1,3 +1,6 @@
+// Package scope tracks the radar's current display range in nautical
+// miles. Range changes are clamped to [min, max] and step by a fixed
+// increment, so the +/- controls can only ever land on an in-range value.
 package scope
 
 import "sync"

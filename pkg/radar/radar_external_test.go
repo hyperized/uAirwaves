@@ -1,6 +1,7 @@
 package radar_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -132,6 +133,31 @@ func TestView_Toggles(t *testing.T) {
 
 	if view.GetHeatIndicatorEnabled() {
 		t.Error("ToggleHeatIndicator() failed to flip back to disabled")
+	}
+}
+
+// TestView_AirportIndicatorToggle pins the airport-overlay toggle
+// and its getter: New() enables it by default, and each toggle
+// flips the state the footer renderer reads back.
+func TestView_AirportIndicatorToggle(t *testing.T) {
+	t.Parallel()
+
+	view := radar.New(airplanes.New(), location.New(), nil)
+
+	if !view.GetAirportIndicatorEnabled() {
+		t.Error("airport indicator should default to enabled")
+	}
+
+	view.ToggleAirportIndicator()
+
+	if view.GetAirportIndicatorEnabled() {
+		t.Error("ToggleAirportIndicator should flip to disabled")
+	}
+
+	view.ToggleAirportIndicator()
+
+	if !view.GetAirportIndicatorEnabled() {
+		t.Error("ToggleAirportIndicator should flip back to enabled")
 	}
 }
 
@@ -680,4 +706,63 @@ func testPlaneWithCallsign(t *testing.T, loc *location.Location, screen tcell.Sc
 
 		testView.Draw(screen)
 	})
+}
+
+// BenchmarkRadarDraw measures a full View.Draw over a busy scope:
+// 50 positioned planes, each with a one-fix trail, heading lines
+// pinned on, and a fixed scope so every iteration renders the same
+// workload. The public airplane API appends one position-history
+// entry per positionHistoryInterval (10 s), so a single WithPosition
+// is the most trail the ingest path yields inside a benchmark
+// setup; the bare setters then move the live marker off the trail
+// entry so drawTrail and drawPlane touch distinct cells.
+func BenchmarkRadarDraw(b *testing.B) {
+	const (
+		planeCount = 50
+		boxWidth   = 120
+		boxHeight  = 40
+		scopeNm    = 60.0
+	)
+
+	loc := location.New(location.WithLatitude(52.0), location.WithLongitude(13.0))
+	planes := airplanes.New()
+	view := radar.New(planes, loc, nil)
+
+	view.ToggleAutoScope()         // pin the scope so the per-iteration workload is constant
+	view.SetScopeRange(scopeNm)    // every plane stays inside this range
+	view.SetHeadingBlinking(false) // keep heading lines drawn every frame (no wall-clock blink)
+	view.SetRect(0, 0, boxWidth, boxHeight)
+
+	for index := range planeCount {
+		icao := fmt.Sprintf("BENCH%02d", index)
+		planes.Ensure(icao)
+
+		plane, _ := planes.Get(icao)
+		trailLat := 52.0 + float64(index)*0.01
+		trailLon := 13.0 + float64(index%10)*0.02
+
+		plane.Update(airplane.WithPosition(trailLat, trailLon))
+		plane.Update(
+			airplane.WithLatitude(trailLat+0.02),
+			airplane.WithLongitude(trailLon+0.01),
+			airplane.WithAltitude(float64(1000*(index%40))),
+			airplane.WithHeading(float64((index*7)%360)),
+			airplane.WithVertRate(float64((index%3-1)*800)),
+			airplane.WithCallsign(icao),
+		)
+	}
+
+	screen := tcell.NewSimulationScreen("")
+	if err := screen.Init(); err != nil {
+		b.Fatal(err)
+	}
+
+	screen.SetSize(boxWidth, boxHeight)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for range b.N {
+		view.Draw(screen)
+	}
 }

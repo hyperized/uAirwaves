@@ -1,3 +1,7 @@
+// Package airplanes is the thread-safe collection of tracked aircraft,
+// keyed by ICAO. It handles upsert and staleness pruning, and sorts the
+// fleet by Haversine distance to the receiver, then recency, then ICAO —
+// with an unknown (0,0) position sorting last via the MaxFloat64 sentinel.
 package airplanes
 
 import (

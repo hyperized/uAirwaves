@@ -679,40 +679,54 @@ func gpsIsFresh(slot *atomic.Pointer[time.Time], window time.Duration) bool {
 
 func startUIUpdater(components *uiComponents) {
 	components.waitGroup.Go(func() {
-		defer func() {
-			if r := recover(); r != nil {
-				components.cancel()
-				components.app.Stop()
-				slog.Error("Recovered in main goroutine:", slog.Any("error", r))
-			}
-		}()
-
-		ticker := time.NewTicker(uiUpdateInterval)
-		defer ticker.Stop()
-
-		currentInterval := uiUpdateInterval
-
-		// drawInFlight coalesces redraws and keeps the enqueue off
-		// this WaitGroup-tracked goroutine: TryQueueUpdateDraw skips
-		// a tick whose predecessor's draw has not yet run, so Stop()
-		// stranding an update can never wedge wg.Wait() on exit.
-		var drawInFlight atomic.Bool
-
-		for {
-			select {
-			case appErr := <-components.errChan:
-				components.cancel()
-				components.app.Stop()
-				slog.Error("Caught error in errChan:", slog.Any("error", appErr))
-
-				return
-			case <-components.ctx.Done():
-				return
-			case <-ticker.C:
-				currentInterval = tickUI(components, ticker, currentInterval, &drawInFlight)
-			}
-		}
+		runUIUpdateLoop(components, uiUpdateInterval)
 	})
+}
+
+// runUIUpdateLoop is the redraw pump the UI-updater goroutine runs.
+// It watches the shared error channel and context alongside the
+// redraw ticker: an error tears the app down, a cancelled context
+// returns cleanly, and every tick hands off to tickUI. A panic in
+// any render path is recovered here so a single bad frame stops the
+// app gracefully instead of aborting the process.
+//
+// The interval is a parameter (production always passes
+// uiUpdateInterval) so internal tests can drive the tick and recover
+// paths on a millisecond cadence without a wall-clock second.
+func runUIUpdateLoop(components *uiComponents, interval time.Duration) {
+	defer func() {
+		if r := recover(); r != nil {
+			components.cancel()
+			components.app.Stop()
+			slog.Error("Recovered in main goroutine:", slog.Any("error", r))
+		}
+	}()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	currentInterval := interval
+
+	// drawInFlight coalesces redraws and keeps the enqueue off
+	// this WaitGroup-tracked goroutine: TryQueueUpdateDraw skips
+	// a tick whose predecessor's draw has not yet run, so Stop()
+	// stranding an update can never wedge wg.Wait() on exit.
+	var drawInFlight atomic.Bool
+
+	for {
+		select {
+		case appErr := <-components.errChan:
+			components.cancel()
+			components.app.Stop()
+			slog.Error("Caught error in errChan:", slog.Any("error", appErr))
+
+			return
+		case <-components.ctx.Done():
+			return
+		case <-ticker.C:
+			currentInterval = tickUI(components, ticker, currentInterval, &drawInFlight)
+		}
+	}
 }
 
 // tickUI adapts the redraw cadence to the SDR state and, unless

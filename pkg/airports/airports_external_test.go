@@ -6,6 +6,13 @@ import (
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airports"
 )
 
+const (
+	minLatitude  = -90
+	maxLatitude  = 90
+	minLongitude = -180
+	maxLongitude = 180
+)
+
 // TestAllNonEmpty pins the contract that the embedded dataset is
 // not empty. A broken codegen step (e.g. a generate.sh regression
 // that filters out everything) would otherwise ship a silent
@@ -99,4 +106,83 @@ func TestKnownAnchorAirports(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAirportDataInvariants pins the structural invariants the embedded
+// table must hold regardless of which rows the generator emits: every
+// entry identifies itself and sits at a coordinate a GPS could actually
+// report, and no two entries share an ICAO identifier (Sorted overlay
+// lookups and any future by-ICAO index would silently collide otherwise).
+func TestAirportDataInvariants(t *testing.T) {
+	t.Parallel()
+
+	all := airports.All()
+
+	testNonEmptyIdentAndName(t, all)
+	testLatitudeInRange(t, all)
+	testLongitudeInRange(t, all)
+	testUniqueIdents(t, all)
+}
+
+func testNonEmptyIdentAndName(t *testing.T, all []airports.Airport) {
+	t.Helper()
+	t.Run("NonEmptyIdentAndName", func(t *testing.T) {
+		t.Parallel()
+
+		for _, airport := range all {
+			if airport.ICAO == "" {
+				t.Errorf("entry has empty ICAO: %+v", airport)
+			}
+
+			if airport.Name == "" {
+				t.Errorf("%s has empty Name", airport.ICAO)
+			}
+		}
+	})
+}
+
+func testLatitudeInRange(t *testing.T, all []airports.Airport) {
+	t.Helper()
+	t.Run("LatitudeInRange", func(t *testing.T) {
+		t.Parallel()
+
+		for _, airport := range all {
+			if airport.Latitude < minLatitude || airport.Latitude > maxLatitude {
+				t.Errorf("%s has out-of-range Latitude %v, want [%v, %v]",
+					airport.ICAO, airport.Latitude, minLatitude, maxLatitude)
+			}
+		}
+	})
+}
+
+func testLongitudeInRange(t *testing.T, all []airports.Airport) {
+	t.Helper()
+	t.Run("LongitudeInRange", func(t *testing.T) {
+		t.Parallel()
+
+		for _, airport := range all {
+			if airport.Longitude < minLongitude || airport.Longitude > maxLongitude {
+				t.Errorf("%s has out-of-range Longitude %v, want [%v, %v]",
+					airport.ICAO, airport.Longitude, minLongitude, maxLongitude)
+			}
+		}
+	})
+}
+
+func testUniqueIdents(t *testing.T, all []airports.Airport) {
+	t.Helper()
+	t.Run("UniqueIdents", func(t *testing.T) {
+		t.Parallel()
+
+		seen := make(map[string]int, len(all))
+		for _, airport := range all {
+			seen[airport.ICAO]++
+		}
+
+		for icao, count := range seen {
+			if count > 1 {
+				t.Errorf("ICAO %s appears %d times, want 1", icao, count)
+			}
+		}
+	})
 }

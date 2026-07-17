@@ -3,11 +3,13 @@ package adsb
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/hyperized/demod1090/demod"
+	"github.com/hyperized/demod1090/sweep"
 	"github.com/hyperized/modes"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
@@ -173,6 +175,12 @@ func (d *fakeDemodulator) Process(_ []byte) []demod.Frame {
 type sweepCapableFakeReceiver struct {
 	fakeReceiver
 
+	// gainErr, when set, is returned by SetLNAGain so the
+	// Result.Apply failure branch in runAutoSweep is reachable.
+	// Zero value (nil) keeps the setters succeeding, so the
+	// existing sweep tests see the historical behaviour.
+	gainErr error
+
 	lnaCalls int
 	mixCalls int
 	vgaCalls int
@@ -181,7 +189,7 @@ type sweepCapableFakeReceiver struct {
 func (s *sweepCapableFakeReceiver) SetLNAGain(uint8) error {
 	s.lnaCalls++
 
-	return nil
+	return s.gainErr
 }
 
 func (s *sweepCapableFakeReceiver) SetMixerGain(uint8) error {
@@ -203,6 +211,11 @@ var errSyntheticReceiverOpen = errors.New("synthetic receiver open failure")
 // errSyntheticReceiverRead is the static sentinel for a non-cancel
 // receiver Read error driving Stream's error-return branch.
 var errSyntheticReceiverRead = errors.New("synthetic receiver read failure")
+
+// errSyntheticGainWrite is the static sentinel a sweep-capable fake
+// returns from SetLNAGain to drive runAutoSweep's Result.Apply
+// failure branch.
+var errSyntheticGainWrite = errors.New("synthetic gain-write failure")
 
 func TestStreamReceiverFactoryError(t *testing.T) {
 	t.Parallel()
@@ -1823,5 +1836,168 @@ func TestStreamAutoSweepInvokesGainSettersWhenCapable(t *testing.T) {
 
 	if rcv.lnaCalls == 0 {
 		t.Error("auto-sweep was wired but never called SetLNAGain")
+	}
+}
+
+// airbornePositionFrame builds a DF 17 TC 11 barometric airborne-
+// position frame for ICAO 123456 with the altitude Q-bit set (so
+// AltitudeError decodes to nil). It matches the byte layout
+// TestApplyAirbornePositionWithLocationAppliesLatLon relies on, and
+// is shared with BenchmarkHandleFrame. Both drive it through
+// resolveCPR, which resolves from a single frame only when the
+// stream carries a WithLocation reference.
+func airbornePositionFrame() demod.Frame {
+	bytes := make([]byte, modes.LongFrameBytes)
+	bytes[0] = byte(modes.DFExtendedSquitter) << 3
+	bytes[1] = 0x12
+	bytes[2] = 0x34
+	bytes[3] = 0x56
+	bytes[4] = byte(11 << 3) // TC 11 barometric airborne position
+	bytes[5] = 0x81          // altitude with Q-bit set → AltitudeError nil
+	bytes[6] = 0x10
+
+	return demod.Frame{Bytes: bytes, DF: uint8(modes.DFExtendedSquitter), WallTime: time.Now()}
+}
+
+// TestWithPositionObserverSetsAndClearsHook covers WithPositionObserver:
+// the default stream has no observer, the option installs one, and
+// passing nil clears it again (self-locate wiring toggles the hook
+// this way).
+func TestWithPositionObserverSetsAndClearsHook(t *testing.T) {
+	t.Parallel()
+
+	if New().positionObserver != nil {
+		t.Error("positionObserver default = non-nil, want nil")
+	}
+
+	installed := New(WithPositionObserver(func(float64, float64, float64) {}))
+	if installed.positionObserver == nil {
+		t.Error("WithPositionObserver did not install the hook")
+	}
+
+	cleared := New(WithPositionObserver(nil))
+	if cleared.positionObserver != nil {
+		t.Error("WithPositionObserver(nil) did not clear the hook")
+	}
+}
+
+// TestApplyAirbornePositionInvokesPositionObserver reaches the
+// observer branch in applyAirbornePosition: a CPR-resolved airborne
+// frame that also carries a valid altitude must feed the registered
+// observer the plane's lat/lon and altitude. WithLocation forces a
+// single-frame CPR resolve so the branch fires deterministically.
+func TestApplyAirbornePositionInvokesPositionObserver(t *testing.T) {
+	t.Parallel()
+
+	var (
+		captureMu sync.Mutex
+		gotLat    float64
+		gotLon    float64
+		gotAlt    float64
+		gotCalls  int
+	)
+
+	observer := func(lat, lon, altFt float64) {
+		captureMu.Lock()
+		defer captureMu.Unlock()
+
+		gotLat, gotLon, gotAlt = lat, lon, altFt
+		gotCalls++
+	}
+
+	planes := streamSingleFrame(t, airbornePositionFrame(),
+		WithLocation(newLocationAt(52.31, 4.77)),
+		WithPositionObserver(observer),
+	)
+
+	if _, ok := planes.Get("123456"); !ok {
+		t.Fatal("plane not registered")
+	}
+
+	captureMu.Lock()
+	defer captureMu.Unlock()
+
+	if gotCalls == 0 {
+		t.Fatal("position observer never fired on a CPR-resolved airborne frame")
+	}
+
+	if gotLat == 0 && gotLon == 0 {
+		t.Errorf("observer got zero position: lat=%v lon=%v", gotLat, gotLon)
+	}
+
+	if gotAlt == 0 {
+		t.Error("observer got zero altitude; the alt-present guard was mis-plumbed")
+	}
+}
+
+// TestRunAutoSweepAppliesWinningCellOnSuccess drives runAutoSweep's
+// success tail: with the sweep runner stubbed to a winning cell, the
+// stream must apply it to the receiver's gain setters and clear the
+// sweeping flag. The stub keeps the ~96 s production grid out of the
+// unit path.
+func TestRunAutoSweepAppliesWinningCellOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	rcv := &sweepCapableFakeReceiver{}
+	stream := New()
+	stream.sweepRun = func(
+		context.Context, sweep.Receiver, sweep.Processor,
+		sweep.Config, *sweep.Metrics, *slog.Logger,
+	) (sweep.Result, error) {
+		return sweep.Result{LNA: 5, Mix: 10, VGA: 15, Yield: 42}, nil
+	}
+
+	stream.runAutoSweep(t.Context(), rcv, &fakeDemodulator{})
+
+	if rcv.lnaCalls == 0 || rcv.mixCalls == 0 || rcv.vgaCalls == 0 {
+		t.Errorf("winning cell not applied: lna=%d mix=%d vga=%d",
+			rcv.lnaCalls, rcv.mixCalls, rcv.vgaCalls)
+	}
+
+	if stream.Sweeping() {
+		t.Error("sweeping flag not cleared after runAutoSweep returned")
+	}
+}
+
+// TestRunAutoSweepWarnsWhenApplyFails drives runAutoSweep's apply-
+// failure branch: the runner returns a winning cell, but the
+// receiver rejects the gain write. runAutoSweep must swallow the
+// error (warn + return) and still clear the sweeping flag.
+func TestRunAutoSweepWarnsWhenApplyFails(t *testing.T) {
+	t.Parallel()
+
+	rcv := &sweepCapableFakeReceiver{gainErr: errSyntheticGainWrite}
+	stream := New()
+	stream.sweepRun = func(
+		context.Context, sweep.Receiver, sweep.Processor,
+		sweep.Config, *sweep.Metrics, *slog.Logger,
+	) (sweep.Result, error) {
+		return sweep.Result{LNA: 5, Mix: 10, VGA: 15, Yield: 42}, nil
+	}
+
+	stream.runAutoSweep(t.Context(), rcv, &fakeDemodulator{})
+
+	if rcv.lnaCalls == 0 {
+		t.Error("apply path never attempted the gain write")
+	}
+
+	if stream.Sweeping() {
+		t.Error("sweeping flag not cleared after apply failure")
+	}
+}
+
+// BenchmarkHandleFrame measures the per-frame hot path: modes decode,
+// ICAO admit, plane ensure/update, and CPR resolution. WithLocation
+// makes every airborne frame resolve locally from a single frame, so
+// the position + observer-free apply branch is exercised each pass.
+func BenchmarkHandleFrame(b *testing.B) {
+	frame := airbornePositionFrame()
+	stream := New(WithLocation(newLocationAt(52.31, 4.77)))
+	planes := airplanes.New()
+
+	b.ReportAllocs()
+
+	for b.Loop() {
+		stream.handleFrame(frame, planes)
 	}
 }

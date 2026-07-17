@@ -1,3 +1,11 @@
+// Package radar draws the live ADS-B picture as a text-mode
+// plan-position indicator. The main scope centres on the receiver
+// and carries range rings, altitude-coloured plane markers and
+// their trails; a plane-centred MiniView insets a single selected
+// contact. Terminal cells run about 2:1 tall-to-wide, so vertical
+// offsets are scaled by terminalCharacterRatio to keep rings
+// circular, and screen Y is inverted so northward offsets subtract
+// from the centre row.
 package radar
 
 import (

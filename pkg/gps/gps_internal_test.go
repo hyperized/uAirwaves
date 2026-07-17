@@ -385,6 +385,56 @@ func testInvalidReportType(t *testing.T) {
 	})
 }
 
+// TestBuildTPVHandlerModeChangeAndFix drives the handler closure
+// across two TPV reports to reach the branches a single-report Watch
+// never touches: the mode-transition log (needs a real from→to where
+// the previous mode is not the -1 sentinel) and the fix callback
+// (needs a non-nil onFix plus a report carrying a real position). The
+// first report seeds prevMode from the sentinel and carries no
+// position, so it must neither log a transition nor fire the callback;
+// the second flips the mode and carries a fix, so it must do both.
+func TestBuildTPVHandlerModeChangeAndFix(t *testing.T) {
+	t.Parallel()
+
+	var fired atomic.Int32
+
+	gpsInstance := New(WithFixCallback(func(time.Time) { fired.Add(1) }))
+	if gpsInstance.onFix == nil {
+		t.Fatal("WithFixCallback did not set onFix")
+	}
+
+	var (
+		lastTPV  atomic.Int64
+		prevMode atomic.Int32
+	)
+
+	prevMode.Store(-1)
+
+	myLoc := location.New()
+	handler := buildTPVHandler(myLoc, &lastTPV, &prevMode, gpsInstance.onFix)
+
+	// First report: mode 1 (no fix), no position. Seeds prevMode
+	// off the -1 sentinel (so no transition log) and must leave the
+	// callback untouched because lat/lon are zero.
+	handler(&gpsd.TPVReport{Mode: 1, Lat: 0, Lon: 0})
+
+	if got := fired.Load(); got != 0 {
+		t.Errorf("onFix fired %d times on zero-position report, want 0", got)
+	}
+
+	// Second report: mode flips 1→3 and carries a real position, so
+	// both the transition log and the callback must run.
+	handler(&gpsd.TPVReport{Mode: 3, Lat: 52.5, Lon: 13.4})
+
+	if got := fired.Load(); got != 1 {
+		t.Errorf("onFix fired %d times after positioned fix, want 1", got)
+	}
+
+	if lat, lon := myLoc.GetCoordinates(); lat != 52.5 || lon != 13.4 {
+		t.Errorf("location = (%f, %f), want (52.5, 13.4)", lat, lon)
+	}
+}
+
 func TestNew(t *testing.T) {
 	t.Parallel()
 

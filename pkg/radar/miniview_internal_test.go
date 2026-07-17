@@ -4,6 +4,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/gdamore/tcell/v2"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
 	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
 )
@@ -194,6 +195,75 @@ func TestScopeForFrameRespectsAutoScopeFlag(t *testing.T) {
 	if floor != miniMinScopeNm {
 		t.Errorf("auto-on no-snap = %v, want floor %v", floor, miniMinScopeNm)
 	}
+}
+
+// TestDrawMiniReceiverBranches pins the three drawMiniReceiver
+// paths directly: an unresolved (0,0) receiver and an out-of-scope
+// receiver both paint nothing, while a resolved receiver inside
+// the scope paints the 'X' crosshair. Driving the helper directly
+// makes the two skip branches deterministic without orchestrating
+// receiver-vs-centre geometry through the full Draw pipeline.
+func TestDrawMiniReceiverBranches(t *testing.T) {
+	t.Parallel()
+
+	const (
+		centerX, centerY = 40, 20
+		scale            = 4.0
+	)
+
+	cases := []struct {
+		name       string
+		recvLat    float64
+		recvLon    float64
+		scopeRange float64
+		wantX      bool
+	}{
+		{name: "unresolved receiver skips", recvLat: 0, recvLon: 0, scopeRange: 20, wantX: false},
+		{name: "out-of-scope receiver skips", recvLat: 53.0, recvLon: 13.0, scopeRange: 5, wantX: false},
+		{name: "in-scope receiver draws X", recvLat: 52.05, recvLon: 13.0, scopeRange: 20, wantX: true},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			screen := tcell.NewSimulationScreen("UTF-8")
+			if err := screen.Init(); err != nil {
+				t.Fatalf("screen.Init: %v", err)
+			}
+
+			screen.SetSize(80, 40)
+			drawMiniReceiver(screen, testCase.recvLat, testCase.recvLon, airportFrame{
+				centerX: centerX, centerY: centerY,
+				xScale: scale, yScale: scale,
+				centerLat: 52.0, centerLon: 13.0,
+				scopeRange: testCase.scopeRange,
+			})
+			screen.Show()
+
+			if got := anyCellHasRune(screen, 'X'); got != testCase.wantX {
+				t.Errorf("receiver X present = %v, want %v", got, testCase.wantX)
+			}
+		})
+	}
+}
+
+// anyCellHasRune reports whether any cell on the simulation screen
+// holds want as its leading rune. Scans the public GetContents()
+// buffer so it dodges the deprecated Screen.GetContent.
+func anyCellHasRune(screen tcell.SimulationScreen, want rune) bool {
+	cells, width, height := screen.GetContents()
+
+	for row := range height {
+		for col := range width {
+			cell := cells[row*width+col]
+			if len(cell.Runes) > 0 && cell.Runes[0] == want {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func TestMiniViewSetSnapshotAndClearAreThreadSafe(t *testing.T) {

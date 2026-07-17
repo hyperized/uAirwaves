@@ -168,8 +168,11 @@ func TestWithPositionClampsExtremes(t *testing.T) {
 // forcePositionAppend rewinds the plane's private lastPositionTime so
 // the next WithPosition call clears the rate gate and actually appends.
 // Living in the internal test file is what lets it touch lastPositionTime.
-func forcePositionAppend(t *testing.T, plane *Airplane) {
-	t.Helper()
+// Takes testing.TB (not *testing.T) so BenchmarkGetSnapshot can reuse it
+// to build a full-history fixture without sleeping through the real
+// 10s-per-fix gate.
+func forcePositionAppend(tb testing.TB, plane *Airplane) {
+	tb.Helper()
 
 	plane.mu.Lock()
 	plane.lastPositionTime = time.Now().Add(-2 * positionHistoryInterval)
@@ -302,4 +305,40 @@ func TestWithSquawkEmergencyTransitions(t *testing.T) {
 			}
 		})
 	}
+}
+
+// BenchmarkGetSnapshot measures the per-call cost of GetSnapshot with and
+// without the position-history copy, at the trail's full 256-entry cap —
+// the worst case the default (history-included) path ever copies.
+// WithoutHistory exists specifically so hot-path callers (plane list,
+// stats panel) can skip that copy; the two sub-benchmarks quantify what
+// it buys them. Lives here rather than the external test file because
+// building a full-cap trail through the public API means waiting out
+// maxPositionHistory real 10s rate-gate intervals; forcePositionAppend
+// needs the internal lastPositionTime field to build the fixture instantly.
+func BenchmarkGetSnapshot(b *testing.B) {
+	plane := New("BENCH01")
+
+	for index := range maxPositionHistory {
+		forcePositionAppend(b, plane)
+		plane.Update(WithAltitude(float64(index)), WithPosition(52.0, 13.0))
+	}
+
+	b.Run("default", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for range b.N {
+			_ = plane.GetSnapshot()
+		}
+	})
+
+	b.Run("WithoutHistory", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for range b.N {
+			_ = plane.GetSnapshot(WithoutHistory())
+		}
+	})
 }

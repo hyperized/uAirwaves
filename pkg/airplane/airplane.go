@@ -1,3 +1,8 @@
+// Package airplane models the state of a single tracked aircraft. State is
+// mutated through functional options and read through point-in-time
+// snapshots taken under one lock, so callers never hold a lock while
+// rendering. Position fixes accumulate in a capped history trail used for
+// radar trail drawing.
 package airplane
 
 import (

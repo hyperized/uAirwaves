@@ -520,6 +520,29 @@ func TestSetHeadingBlinkingMutesPhase(t *testing.T) {
 	}
 }
 
+// TestSnapshotTogglesDropsHeadingInOffPhase covers the blink
+// off-slice branch of snapshotToggles: with the indicator on and
+// blinking enabled, heading must read false during the off phase
+// of the wall-clock period. time.Now() isn't injectable here, so
+// we sample across a full period — the off slice is 500 ms of
+// every 1500 ms, so a hit is guaranteed within one period.
+func TestSnapshotTogglesDropsHeadingInOffPhase(t *testing.T) {
+	t.Parallel()
+
+	view := &View{headingIndicator: true, headingBlinking: true}
+	deadline := time.Now().Add(2 * headingBlinkPeriod)
+
+	for time.Now().Before(deadline) {
+		if !view.snapshotToggles().heading {
+			return // observed the off-slice dropping heading to false
+		}
+
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	t.Fatal("heading never dropped across a full blink period; off-phase branch unreached")
+}
+
 // TestMiniTogglesFollowsBlinkPhase confirms the miniView toggle
 // helper inherits the same on/off cycle as the main radar — the
 // projected dots pulse in sync rather than each view picking its

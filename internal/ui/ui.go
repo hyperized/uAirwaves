@@ -1,3 +1,9 @@
+// Package ui builds and drives the tview layer of the TUI: the radar
+// scope, plane list, flight-details panel, footer, and notification
+// bar. It dispatches key presses to the right widget, launches the
+// background workers that feed those widgets, and marshals every
+// redraw through the tview event loop so worker goroutines never touch
+// widgets directly.
 package ui
 
 import (
