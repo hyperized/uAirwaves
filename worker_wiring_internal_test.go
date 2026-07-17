@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 	"github.com/hyperized/uAirwaves/pkg/location"
 	"github.com/hyperized/uAirwaves/pkg/selflocate"
+	"github.com/rivo/tview"
 )
 
 const (

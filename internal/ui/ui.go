@@ -11,12 +11,12 @@ import (
 	"math"
 
 	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 	"github.com/hyperized/uAirwaves/pkg/adsb"
 	"github.com/hyperized/uAirwaves/pkg/airplane"
 	"github.com/hyperized/uAirwaves/pkg/airplanes"
 	"github.com/hyperized/uAirwaves/pkg/location"
 	"github.com/hyperized/uAirwaves/pkg/radar"
+	"github.com/rivo/tview"
 )
 
 // Battery threshold percentages used by UpdateHeaderColor.

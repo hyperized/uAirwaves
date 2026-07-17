@@ -15,7 +15,6 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/hyperized/rtl2832u"
-	"github.com/rivo/tview"
 	"github.com/hyperized/uAirwaves/internal/check"
 	"github.com/hyperized/uAirwaves/internal/ui"
 	"github.com/hyperized/uAirwaves/pkg/adsb"
@@ -25,6 +24,7 @@ import (
 	"github.com/hyperized/uAirwaves/pkg/location"
 	"github.com/hyperized/uAirwaves/pkg/radar"
 	"github.com/hyperized/uAirwaves/pkg/selflocate"
+	"github.com/rivo/tview"
 )
 
 var (

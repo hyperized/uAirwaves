@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/stratoberry/go-gpsd"
 	"github.com/hyperized/uAirwaves/pkg/location"
+	"github.com/stratoberry/go-gpsd"
 )
 
 var (

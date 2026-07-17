@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rivo/tview"
 	"github.com/hyperized/uAirwaves/pkg/airplane"
 	"github.com/hyperized/uAirwaves/pkg/airplanes"
+	"github.com/rivo/tview"
 )
 
 const (

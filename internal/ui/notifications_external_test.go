@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 	"github.com/hyperized/uAirwaves/internal/ui"
+	"github.com/rivo/tview"
 )
 
 const (
