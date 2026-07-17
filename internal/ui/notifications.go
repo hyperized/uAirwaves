@@ -20,16 +20,26 @@ type Notification struct {
 	Timestamp time.Time
 }
 
+// maxQueuedNotifications caps the pending queue. The TUI routes
+// all slog output here, so an unattended session with a flapping
+// upstream (a Warn per reconnect attempt) would otherwise grow
+// the slice without bound. At the cap the oldest entry is dropped
+// in place and counted for the bar to surface.
+const maxQueuedNotifications = 50
+
 // Notifications is a thread-safe FIFO of pending notifications.
 // The slog handler appends to it; the UI thread reads via Front
 // for rendering and DismissFront / DismissAll for keybinds.
 //
 // The lock guards a small slice copy on every operation — the
 // queue is expected to stay short (operator-relevant messages,
-// not a frame firehose) so this is cheap.
+// not a frame firehose) so this is cheap. Push holds it at
+// maxQueuedNotifications; dropped counts entries shed at the cap
+// since the last DismissAll.
 type Notifications struct {
-	mu    sync.RWMutex
-	items []Notification
+	mu      sync.RWMutex
+	items   []Notification
+	dropped int
 }
 
 // NewNotifications returns an empty queue.
@@ -37,16 +47,29 @@ func NewNotifications() *Notifications {
 	return &Notifications{}
 }
 
-// Push appends a notification to the back of the queue.
+// Push appends a notification to the back of the queue. At
+// maxQueuedNotifications it drops the oldest by copying the tail
+// down within the same backing array and counts the loss, so a
+// flapping upstream can't grow the slice without bound.
 func (n *Notifications) Push(level slog.Level, message string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	n.items = append(n.items, Notification{
+	item := Notification{
 		Level:     level,
 		Message:   message,
 		Timestamp: time.Now(),
-	})
+	}
+
+	if len(n.items) >= maxQueuedNotifications {
+		copy(n.items, n.items[1:])
+		n.items[len(n.items)-1] = item
+		n.dropped++
+
+		return
+	}
+
+	n.items = append(n.items, item)
 }
 
 // Front returns the oldest pending notification plus true, or a
@@ -64,22 +87,27 @@ func (n *Notifications) Front() (Notification, bool) {
 }
 
 // DismissFront removes the oldest notification. No-op when the
-// queue is empty.
+// queue is empty. Copies the tail down in place and truncates so
+// the backing array stops creeping forward on repeated dismisses.
 func (n *Notifications) DismissFront() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	if len(n.items) > 0 {
-		n.items = n.items[1:]
+	if len(n.items) == 0 {
+		return
 	}
+
+	copy(n.items, n.items[1:])
+	n.items = n.items[:len(n.items)-1]
 }
 
-// DismissAll empties the queue.
+// DismissAll empties the queue and clears the dropped counter.
 func (n *Notifications) DismissAll() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	n.items = n.items[:0]
+	n.dropped = 0
 }
 
 // Len returns the queue size.
@@ -88,6 +116,15 @@ func (n *Notifications) Len() int {
 	defer n.mu.RUnlock()
 
 	return len(n.items)
+}
+
+// droppedCount returns the number of notifications shed at the
+// cap since the last DismissAll, for the bar's backlog hint.
+func (n *Notifications) droppedCount() int {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	return n.dropped
 }
 
 // SlogHandler is a slog.Handler that captures records into a
@@ -203,9 +240,9 @@ func (h *SlogHandler) WithGroup(_ string) slog.Handler {
 //
 // Text colour stays white throughout for contrast.
 //
-// A " · N more" suffix is appended when the queue holds more
-// than one item so the operator knows another message is
-// pending behind the current one.
+// A "(N more — X clears all)" segment is appended when other
+// messages sit behind the current one; when the queue has hit
+// its cap the same segment also reports how many were dropped.
 func RenderNotificationBar(
 	grid *tview.Grid, parent *tview.Flex, bar *tview.TextView, notifs *Notifications,
 ) {
@@ -220,7 +257,7 @@ func RenderNotificationBar(
 	grid.SetRows(1, 0, 2) //nolint:mnd // footer (1) + notification (1) = 2 rows in the bottom section.
 	parent.ResizeItem(bar, 1, 0)
 	bar.SetBackgroundColor(notificationBackground(front.Level))
-	bar.SetText(formatNotification(front, notifs.Len()))
+	bar.SetText(formatNotification(front, notifs.Len(), notifs.droppedCount()))
 }
 
 // notificationBackground maps a slog level to the tcell colour
@@ -239,17 +276,34 @@ func notificationBackground(level slog.Level) tcell.Color {
 }
 
 // formatNotification builds the bar's one-line body. Prefixes
-// the severity for parseability, appends a "(N more)" hint when
-// queue depth exceeds 1, and a "press x to dismiss" reminder so
-// new operators don't have to remember the keybind.
-func formatNotification(notification Notification, queueLen int) string {
+// the severity for parseability, appends the backlog hint (see
+// moreSegment), and a "press x to dismiss" reminder so new
+// operators don't have to remember the keybind.
+func formatNotification(notification Notification, queueLen, dropped int) string {
 	tag := notification.Level.String()
-	more := ""
-
-	if queueLen > 1 {
-		more = fmt.Sprintf("  (%d more — X clears all)", queueLen-1)
-	}
 
 	return fmt.Sprintf(" [%s] %s%s  ·  press [::b]x[::-] to dismiss",
-		tag, notification.Message, more)
+		tag, notification.Message, moreSegment(queueLen, dropped))
+}
+
+// moreSegment renders the parenthesised backlog hint: how many
+// messages are queued behind the current one and, once the queue
+// has hit its cap, how many were dropped. Returns "" when nothing
+// is pending so the common single-message case stays uncluttered.
+func moreSegment(queueLen, dropped int) string {
+	var parts []string
+
+	if queueLen > 1 {
+		parts = append(parts, fmt.Sprintf("%d more", queueLen-1))
+	}
+
+	if dropped > 0 {
+		parts = append(parts, fmt.Sprintf("%d dropped", dropped))
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+
+	return fmt.Sprintf("  (%s — X clears all)", strings.Join(parts, ", "))
 }
