@@ -112,6 +112,8 @@ The pipeline is four separate projects, stacked. Each is pure Go, each runs on i
 
 Every boundary between layers is a format you can capture, inspect, and replay: IQ files between the driver and the demodulator, hex frames or Beast TCP between the demodulator and the decoder. Break the chain wherever you are curious, look at what flows through, and feed it back in. Captured IQ replayed through `--replay-iq` decodes the same way every time, which is also how the stack tests itself on real recordings.
 
+The Beast seam is a real network protocol, so it is also where the stack composes. A companion tool lives there: [beastmux](https://github.com/hyperized/beastmux) merges the streams of several receivers into one deduplicated feed, first arrival wins. Run a dongle on each side of the house, point both at beastmux, and give uAirwaves `--beast` the combined feed: the radar shows the union of what every antenna hears, and the coverage panel shows the merged reception pattern.
+
 When you run uAirwaves normally, all four layers run inside the one binary; there is no `readsb` or `dump1090` behind it.
 
 ```
