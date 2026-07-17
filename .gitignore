@@ -3,8 +3,6 @@ uAirwaves*
 coverage.out
 coverage.html
 dist/
-cad/
-.cad-venv/
 CLAUDE.md
 improvements.md
 plan.md
