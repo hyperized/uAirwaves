@@ -7,9 +7,9 @@ package check
 import (
 	"math"
 
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/adsb"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
+	"github.com/hyperized/uAirwaves/pkg/adsb"
+	"github.com/hyperized/uAirwaves/pkg/airplane"
+	"github.com/hyperized/uAirwaves/pkg/airplanes"
 )
 
 // Thresholds gates the exit code of a check run. A run "passes"

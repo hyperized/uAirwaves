@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/stratoberry/go-gpsd"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
+	"github.com/hyperized/uAirwaves/pkg/location"
 )
 
 var (

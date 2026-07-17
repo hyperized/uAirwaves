@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/scope"
+	"github.com/hyperized/uAirwaves/pkg/scope"
 )
 
 func TestNew(t *testing.T) {

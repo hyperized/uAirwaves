@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
+	"github.com/hyperized/uAirwaves/pkg/airplane"
 )
 
 const testICAO = "ABCDEF"

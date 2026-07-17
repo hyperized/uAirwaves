@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/radar"
+	"github.com/hyperized/uAirwaves/pkg/location"
+	"github.com/hyperized/uAirwaves/pkg/radar"
 )
 
 // TestConfigureUIWiresEveryComponent drives configureUI end-to-end and

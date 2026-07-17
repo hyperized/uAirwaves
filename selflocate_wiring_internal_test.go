@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/selflocate"
+	"github.com/hyperized/uAirwaves/pkg/location"
+	"github.com/hyperized/uAirwaves/pkg/selflocate"
 )
 
 // TestGPSIsFreshNilSlotReportsStale covers the nil-slot

@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/battery"
+	"github.com/hyperized/uAirwaves/pkg/battery"
 )
 
 func TestNewStatus(t *testing.T) {

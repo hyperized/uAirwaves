@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
+	"github.com/hyperized/uAirwaves/pkg/airplanes"
 )
 
 // biasFakeReceiver is fakeReceiver + the biasTeeController surface.

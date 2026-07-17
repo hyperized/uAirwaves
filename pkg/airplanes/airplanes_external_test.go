@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
+	"github.com/hyperized/uAirwaves/pkg/airplane"
+	"github.com/hyperized/uAirwaves/pkg/airplanes"
 )
 
 func TestNew(t *testing.T) {

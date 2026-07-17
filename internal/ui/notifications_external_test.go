@@ -10,7 +10,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
-	"lab.hyperized.net/hyperized/uAirwaves/internal/ui"
+	"github.com/hyperized/uAirwaves/internal/ui"
 )
 
 const (

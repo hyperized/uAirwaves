@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
+	"github.com/hyperized/uAirwaves/pkg/airplane"
 )
 
 // TestHeatMapAddClampsToOne locks the add() saturation behaviour:

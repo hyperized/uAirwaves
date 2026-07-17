@@ -11,8 +11,8 @@ import (
 
 	"github.com/hyperized/demod1090/beast"
 	"github.com/hyperized/modes"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/adsb"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
+	"github.com/hyperized/uAirwaves/pkg/adsb"
+	"github.com/hyperized/uAirwaves/pkg/airplanes"
 )
 
 // klm1023Frame is a DF 17 ES identification frame for ICAO

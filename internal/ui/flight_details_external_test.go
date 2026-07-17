@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/rivo/tview"
-	"lab.hyperized.net/hyperized/uAirwaves/internal/ui"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
+	"github.com/hyperized/uAirwaves/internal/ui"
+	"github.com/hyperized/uAirwaves/pkg/airplane"
 )
 
 func TestFormatFlightDetailsCompleteSnapshot(t *testing.T) {

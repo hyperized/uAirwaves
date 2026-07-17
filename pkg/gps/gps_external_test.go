@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/gps"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
+	"github.com/hyperized/uAirwaves/pkg/gps"
+	"github.com/hyperized/uAirwaves/pkg/location"
 )
 
 func TestGPS_PublicInterface(t *testing.T) {

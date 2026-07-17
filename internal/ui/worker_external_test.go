@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"lab.hyperized.net/hyperized/uAirwaves/internal/ui"
+	"github.com/hyperized/uAirwaves/internal/ui"
 )
 
 var (

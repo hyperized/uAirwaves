@@ -11,9 +11,9 @@ import (
 	"github.com/hyperized/demod1090/demod"
 	"github.com/hyperized/demod1090/sweep"
 	"github.com/hyperized/modes"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
+	"github.com/hyperized/uAirwaves/pkg/airplane"
+	"github.com/hyperized/uAirwaves/pkg/airplanes"
+	"github.com/hyperized/uAirwaves/pkg/location"
 )
 
 // newLocationAt is the test-friendly *location.Location constructor.

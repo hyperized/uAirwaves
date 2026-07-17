@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"lab.hyperized.net/hyperized/uAirwaves/internal/ui"
+	"github.com/hyperized/uAirwaves/internal/ui"
 )
 
 const icaoFixtureC = "CCC003"

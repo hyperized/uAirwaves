@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/selflocate"
+	"github.com/hyperized/uAirwaves/pkg/selflocate"
 )
 
 // TestNewWithDefaults covers the default construction path: no

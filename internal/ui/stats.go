@@ -5,10 +5,10 @@ import (
 	"math"
 	"time"
 
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/adsb"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
+	"github.com/hyperized/uAirwaves/pkg/adsb"
+	"github.com/hyperized/uAirwaves/pkg/airplane"
+	"github.com/hyperized/uAirwaves/pkg/airplanes"
+	"github.com/hyperized/uAirwaves/pkg/location"
 )
 
 // StatsTracker keeps the prior tick's frame counters so the

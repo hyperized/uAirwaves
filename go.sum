@@ -2,6 +2,12 @@ github.com/gdamore/encoding v1.0.1 h1:YzKZckdBL6jVt2Gc+5p82qhrGiqMdG/eNs6Wy0u3Uh
 github.com/gdamore/encoding v1.0.1/go.mod h1:0Z0cMFinngz9kS1QfMjCP8TY7em3bZYeeklsSDPivEo=
 github.com/gdamore/tcell/v2 v2.13.9 h1:uI5l3DYPcFvHINKlGft+en23evOKL+dwtD21QR8ejVA=
 github.com/gdamore/tcell/v2 v2.13.9/go.mod h1:+Wfe208WDdB7INEtCsNrAN6O2m+wsTPk1RAovjaILlo=
+github.com/hyperized/demod1090 v0.1.0 h1:7rF7BXYaopHxU7jOUsdPDejd6i0h/fA8LSYZFnhYalc=
+github.com/hyperized/demod1090 v0.1.0/go.mod h1:Nhlvb2oYT4SqgGS7jEAz/IPzKWwOmIXrfjoPnax6DyE=
+github.com/hyperized/modes v0.2.0 h1:zH8r9IJljN0aTDrJja+oCZySYS/EhlwIU4AmL3BetRA=
+github.com/hyperized/modes v0.2.0/go.mod h1:91Mi9u5mxZE4QmQTzN6ln29iiUmK9LgrpOGD0XjFKJQ=
+github.com/hyperized/rtl2832u v0.2.0 h1:xOxzMex2XrBwtbCZb71HbWIQurG86pab+w75/4aOs7U=
+github.com/hyperized/rtl2832u v0.2.0/go.mod h1:E6CsfYxZE3qX6WYbk7WTiykTbr8JpKNpsUCzg1g45UM=
 github.com/lucasb-eyer/go-colorful v1.4.0 h1:UtrWVfLdarDgc44HcS7pYloGHJUjHV/4FwW4TvVgFr4=
 github.com/lucasb-eyer/go-colorful v1.4.0/go.mod h1:R4dSotOR9KMtayYi1e77YzuveK+i7ruzyGqttikkLy0=
 github.com/rivo/tview v0.42.0 h1:b/ftp+RxtDsHSaynXTbJb+/n/BxDEi+W3UfF5jILK6c=

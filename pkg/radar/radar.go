@@ -16,11 +16,11 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airports"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/scope"
+	"github.com/hyperized/uAirwaves/pkg/airplane"
+	"github.com/hyperized/uAirwaves/pkg/airplanes"
+	"github.com/hyperized/uAirwaves/pkg/airports"
+	"github.com/hyperized/uAirwaves/pkg/location"
+	"github.com/hyperized/uAirwaves/pkg/scope"
 )
 
 const (

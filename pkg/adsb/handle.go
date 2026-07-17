@@ -6,8 +6,8 @@ import (
 
 	"github.com/hyperized/demod1090/demod"
 	"github.com/hyperized/modes"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
+	"github.com/hyperized/uAirwaves/pkg/airplane"
+	"github.com/hyperized/uAirwaves/pkg/airplanes"
 )
 
 // validCallsign reports whether s looks like a real Mode S

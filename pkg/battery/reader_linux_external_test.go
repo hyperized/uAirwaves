@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/battery"
+	"github.com/hyperized/uAirwaves/pkg/battery"
 )
 
 const (

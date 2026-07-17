@@ -6,12 +6,12 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
-	"lab.hyperized.net/hyperized/uAirwaves/internal/ui"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/adsb"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/radar"
+	"github.com/hyperized/uAirwaves/internal/ui"
+	"github.com/hyperized/uAirwaves/pkg/adsb"
+	"github.com/hyperized/uAirwaves/pkg/airplane"
+	"github.com/hyperized/uAirwaves/pkg/airplanes"
+	"github.com/hyperized/uAirwaves/pkg/location"
+	"github.com/hyperized/uAirwaves/pkg/radar"
 )
 
 // Repeated test fixtures: kept package-private so the goconst

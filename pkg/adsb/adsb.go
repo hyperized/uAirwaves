@@ -21,8 +21,8 @@ import (
 	"github.com/hyperized/demod1090/sweep"
 	"github.com/hyperized/modes"
 	"github.com/hyperized/rtl2832u"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
+	"github.com/hyperized/uAirwaves/pkg/airplanes"
+	"github.com/hyperized/uAirwaves/pkg/location"
 )
 
 const (

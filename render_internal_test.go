@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/radar"
+	"github.com/hyperized/uAirwaves/pkg/radar"
 )
 
 const (

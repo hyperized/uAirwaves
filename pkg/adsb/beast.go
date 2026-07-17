@@ -13,7 +13,7 @@ import (
 	"github.com/hyperized/demod1090/beast"
 	"github.com/hyperized/demod1090/demod"
 	"github.com/hyperized/modes"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
+	"github.com/hyperized/uAirwaves/pkg/airplanes"
 )
 
 // countingReader is a thin io.Reader wrapper that bumps an

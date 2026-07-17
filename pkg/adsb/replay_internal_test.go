@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/hyperized/demod1090/demod"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
+	"github.com/hyperized/uAirwaves/pkg/airplanes"
 )
 
 func TestNewFileReceiverMissingPathReturnsWrappedError(t *testing.T) {

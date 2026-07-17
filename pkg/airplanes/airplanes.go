@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
+	"github.com/hyperized/uAirwaves/pkg/airplane"
 )
 
 type airplaneMap map[string]*airplane.Airplane

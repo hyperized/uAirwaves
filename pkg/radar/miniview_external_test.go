@@ -4,9 +4,9 @@ import (
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplane"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/radar"
+	"github.com/hyperized/uAirwaves/pkg/airplane"
+	"github.com/hyperized/uAirwaves/pkg/location"
+	"github.com/hyperized/uAirwaves/pkg/radar"
 )
 
 const (

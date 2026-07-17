@@ -3,7 +3,7 @@ package airports_test
 import (
 	"testing"
 
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airports"
+	"github.com/hyperized/uAirwaves/pkg/airports"
 )
 
 const (

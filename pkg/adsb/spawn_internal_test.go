@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/airplanes"
+	"github.com/hyperized/uAirwaves/pkg/airplanes"
 )
 
 // errSpawnBoom is the panic a task raises so the tests can prove the

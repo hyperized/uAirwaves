@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"lab.hyperized.net/hyperized/uAirwaves/pkg/location"
+	"github.com/hyperized/uAirwaves/pkg/location"
 )
 
 const fix3D = "3D fix"

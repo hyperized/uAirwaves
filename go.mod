@@ -1,4 +1,4 @@
-module lab.hyperized.net/hyperized/uAirwaves
+module github.com/hyperized/uAirwaves
 
 go 1.26
 
@@ -18,14 +18,4 @@ require (
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/term v0.43.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
-)
-
-// Local development: consume the entire chain — demod1090 +
-// rtl2832u + modes — from sibling worktrees while we iterate on
-// live-decode bugs. Drop these replaces (and bump the require
-// versions) once the chain stabilises and gets re-released.
-replace (
-	github.com/hyperized/demod1090 => ../demod1090
-	github.com/hyperized/modes => ../modes
-	github.com/hyperized/rtl2832u => ../rtl2832u
 )
