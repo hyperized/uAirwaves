@@ -32,3 +32,33 @@ var (
 	// heading, rate. Matches DimTag so the panels agree with each other.
 	ColorSecondaryText = tcell.NewHexColor(0xB0B8C4)
 )
+
+// Header bar.
+//
+// This was the least readable thing in the interface: a DarkGreen bar with
+// ColorBlack text is 2.8:1, and because a terminal paints "black" as whatever
+// its theme says — usually a dark slate, not #000000 — what actually reached
+// the screen was closer to 1.4:1. The comment on FormatSourceText had the
+// polarity backwards and concluded white was the unreadable one.
+//
+// Dark bars with light text instead: the state still reads as green, amber or
+// red at a glance, nothing glares on a handheld at night, and every pair has
+// contrast to spare.
+var (
+	ColorHeaderOKBackground       = tcell.NewHexColor(0x14532D)
+	ColorHeaderOKText             = tcell.NewHexColor(0xE6F4EA)
+	ColorHeaderWarningBackground  = tcell.NewHexColor(0x7A4A00)
+	ColorHeaderWarningText        = tcell.NewHexColor(0xFFF1D6)
+	ColorHeaderCriticalBackground = tcell.NewHexColor(0x8B1A1A)
+	ColorHeaderCriticalText       = tcell.NewHexColor(0xFFE5E5)
+)
+
+// State dots sit on whichever header bar is current, so they are picked to
+// clear 4.5:1 against all three backgrounds rather than just the green one.
+const (
+	// ConnectedTag opens the connected state dot.
+	ConnectedTag = "[#9bffc7]"
+
+	// DisconnectedTag opens the disconnected state dot.
+	DisconnectedTag = "[#ffc4c4]"
+)

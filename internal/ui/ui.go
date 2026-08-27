@@ -50,11 +50,11 @@ func UpdateHeaderColor(percentage int8, clock, statusBar *tview.TextView) {
 func headerColors(percentage int8) (header, text tcell.Color) {
 	switch {
 	case percentage <= BatteryWarningRed:
-		return tcell.ColorRed, tcell.ColorWhite
+		return ColorHeaderCriticalBackground, ColorHeaderCriticalText
 	case percentage <= BatteryWarningOrange:
-		return tcell.ColorOrange, tcell.ColorBlack
+		return ColorHeaderWarningBackground, ColorHeaderWarningText
 	default:
-		return tcell.ColorDarkGreen, tcell.ColorBlack
+		return ColorHeaderOKBackground, ColorHeaderOKText
 	}
 }
 
@@ -408,18 +408,20 @@ func UpdateSourceStatus(sourceStatus *tview.TextView, stream *adsb.ADSB) {
 // pulled (so SDR and replay stay terse).
 //
 // Colour spans close with [-] (tview's reset-to-default sentinel)
-// rather than [white] so the byte suffix inherits the TextView's
-// configured text colour — the source pill sits on a dark-green
-// background where white text is unreadable.
+// rather than a literal colour, so the byte suffix inherits whichever
+// header text colour the current battery state selected.
+//
+// The dots are explicit hex because they sit on a bar that changes
+// colour underneath them, and have to stay legible on all three.
 func FormatSourceText(info adsb.SourceInfo) string {
 	label := info.Label
 	if label == "" {
 		label = "unknown"
 	}
 
-	state := "[red]●[-]"
+	state := DisconnectedTag + "●[-]"
 	if info.Connected {
-		state = "[green]●[-]"
+		state = ConnectedTag + "●[-]"
 	}
 
 	if info.BytesIn > 0 {

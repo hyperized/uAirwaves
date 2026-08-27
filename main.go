@@ -947,8 +947,8 @@ func configureFooter(commands *tview.TextView) *tview.Flex {
 func configureGpsStatus() *tview.TextView {
 	gpsStatus := tview.NewTextView().SetTextAlign(tview.AlignCenter)
 	gpsStatus.SetDynamicColors(true)
-	gpsStatus.SetBackgroundColor(tcell.ColorDarkGreen)
-	gpsStatus.SetTextColor(tcell.ColorBlack)
+	gpsStatus.SetBackgroundColor(ui.ColorHeaderOKBackground)
+	gpsStatus.SetTextColor(ui.ColorHeaderOKText)
 
 	return gpsStatus
 }
@@ -1058,8 +1058,8 @@ func configureHeader(
 func configureSourceStatus() *tview.TextView {
 	sourceStatus := tview.NewTextView().SetTextAlign(tview.AlignCenter)
 	sourceStatus.SetDynamicColors(true)
-	sourceStatus.SetBackgroundColor(tcell.ColorDarkGreen)
-	sourceStatus.SetTextColor(tcell.ColorBlack)
+	sourceStatus.SetBackgroundColor(ui.ColorHeaderOKBackground)
+	sourceStatus.SetTextColor(ui.ColorHeaderOKText)
 
 	return sourceStatus
 }
@@ -1068,8 +1068,8 @@ func configureSourceStatus() *tview.TextView {
 func configureStatusbar() *tview.TextView {
 	statusBar := tview.NewTextView().SetTextAlign(tview.AlignRight).SetText("loading...")
 	statusBar.SetDynamicColors(true)
-	statusBar.SetBackgroundColor(tcell.ColorDarkGreen)
-	statusBar.SetTextColor(tcell.ColorBlack)
+	statusBar.SetBackgroundColor(ui.ColorHeaderOKBackground)
+	statusBar.SetTextColor(ui.ColorHeaderOKText)
 
 	return statusBar
 }
@@ -1078,8 +1078,8 @@ func configureStatusbar() *tview.TextView {
 func configureClock() *tview.TextView {
 	clock := tview.NewTextView().SetTextAlign(tview.AlignLeft).SetText("..:..:..")
 	clock.SetDynamicColors(true)
-	clock.SetBackgroundColor(tcell.ColorDarkGreen)
-	clock.SetTextColor(tcell.ColorBlack)
+	clock.SetBackgroundColor(ui.ColorHeaderOKBackground)
+	clock.SetTextColor(ui.ColorHeaderOKText)
 
 	return clock
 }
