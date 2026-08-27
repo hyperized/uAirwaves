@@ -17,10 +17,20 @@ RTL2832U      ?= ../rtl2832u
 MODES         ?= ../modes
 DEMOD1090     ?= ../demod1090
 USB_PATH      ?= 1-1.3:1.0
+# GNSS wiring. Comments go above the assignment, never after it: make keeps
+# the whitespace before a trailing # inside the value.
+# The AIO board GNSS sits on the mini-UART.
+GPS_DEVICE    ?= /dev/ttyS0
+GPS_BAUD      ?= 9600
+# GPS_PPS=1 appends the pps-gpio overlay to config.txt; takes effect on reboot.
+GPS_PPS       ?= 0
+# GPS_SKIP=1 bypasses gps-setup entirely.
+GPS_SKIP      ?=
 CAPTURE_BYTES ?= 12000000  # ~5s @ 2.4 MS/s; enough for ≥1 ICAO under typical traffic
 
 .PHONY: all build build-aarch64 build-macos build-radio test lint fmt \
-        ship ship-all ship-radio radio smoke smoke-tui unbind clean
+        ship ship-all ship-radio radio smoke smoke-tui unbind clean \
+        gps-setup gps-check
 
 all: build
 
@@ -43,7 +53,7 @@ lint:
 fmt:
 	go fmt ./...
 
-ship: build-aarch64
+ship: build-aarch64 gps-setup
 	@test -n "$(DEVICE)" || { echo "DEVICE not set. Create .env with: DEVICE = user@host"; exit 1; }
 	scp uAirwaves-aarch64 $(DEVICE):~/uAirwaves
 
@@ -74,7 +84,7 @@ ship: build-aarch64
 
 GO_BUILD_DEV_ENV := env GOOS=linux GOARCH=$(GOARCH_DEV)
 
-ship-all:
+ship-all: gps-setup
 	@test -n "$(DEVICE)" || { echo "DEVICE not set. Create .env with: DEVICE = user@host"; exit 1; }
 	mkdir -p dist
 	$(GO_BUILD_DEV_ENV) go build -C $(RTL2832U)  -trimpath -o $(CURDIR)/dist/rtl-probe-aarch64    ./cmd/rtl-probe
@@ -85,6 +95,23 @@ ship-all:
 	scp dist/modes-decode-aarch64 $(DEVICE):~/modes-decode
 	scp dist/demod1090-aarch64    $(DEVICE):~/demod1090
 	scp uAirwaves-aarch64         $(DEVICE):~/uAirwaves
+
+# Make sure the device can actually supply a GPS fix: gpsd installed, pointed
+# at the receiver, enabled and running. Idempotent, so `ship` runs it every
+# time; it is a couple of dpkg queries when there is nothing to do. Skip it
+# with `make ship GPS_SKIP=1` when deploying somewhere without a receiver.
+gps-setup:
+	@test -n "$(DEVICE)" || { echo "DEVICE not set. Create .env with: DEVICE = user@host"; exit 1; }
+	@if [ "$(GPS_SKIP)" = "1" ]; then echo "gps-setup skipped (GPS_SKIP=1)"; else \
+	  ssh $(DEVICE) "GPS_DEVICE=$(GPS_DEVICE) GPS_BAUD=$(GPS_BAUD) GPS_PPS=$(GPS_PPS) sh -s" \
+	    < scripts/setup-gpsd.sh; \
+	fi
+
+# What is gpsd actually seeing right now? Changes nothing.
+gps-check:
+	@test -n "$(DEVICE)" || { echo "DEVICE not set. Create .env with: DEVICE = user@host"; exit 1; }
+	@ssh $(DEVICE) 'systemctl is-active gpsd.socket gpsd | paste -sd" " -; \
+	  gpspipe -w -n 10 2>/dev/null | grep -E "\"class\":\"(DEVICE|TPV|SKY)\"" | tail -3'
 
 unbind:
 	@test -n "$(DEVICE)" || { echo "DEVICE not set. Create .env with: DEVICE = user@host"; exit 1; }

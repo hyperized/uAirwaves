@@ -51,6 +51,31 @@ make ship          # cross-builds for linux/arm64 and scps it over
 
 The deploy targets read their hosts from a gitignored `.env` file next to the Makefile (`DEVICE = user@uconsole-host`, `RADIO = user@radio-host`) and tell you what to set when it is missing. `make build-aarch64` and `make build-macos` do the plain cross-builds, and `make test lint` runs what CI runs.
 
+`make ship` also runs `gps-setup`, which makes sure the device can supply a
+fix: gpsd and gpsd-clients installed, `/etc/default/gpsd` pointed at the
+receiver, both units enabled, and a check that gpsd is really parsing the port.
+It is idempotent, so on a device that is already set up it costs two dpkg
+queries and changes nothing.
+
+```sh
+make ship                              # build, set up gpsd, deploy
+make gps-check                         # what is gpsd seeing right now?
+make ship GPS_SKIP=1                   # deploy to a machine with no receiver
+make ship GPS_DEVICE=/dev/ttyUSB0      # different wiring
+make gps-setup GPS_PPS=1               # add the pps-gpio overlay, then reboot
+```
+
+The defaults suit a uConsole with the HackerGadgets AIO board, whose GNSS sits
+on the mini-UART at 9600 baud — `GPS_DEVICE=/dev/ttyS0`. Note that `/dev/ttyAMA0`
+on that machine is the serial console, not the GPS. If the port you name is
+absent the target warns, lists the serial ports it can see, and lets the deploy
+continue, because uAirwaves falls back to locating itself from ADS-B.
+
+The board also brings the receiver's PPS out on GPIO6 rather than the serial
+DCD line, so gpsd cannot find it on its own. `GPS_PPS=1` appends
+`dtoverlay=pps-gpio,gpiopin=6` to `config.txt`; it only takes effect after a
+reboot, which is why it is opt-in.
+
 ## Using it
 
 The screen is split in three: the radar scope on the left, the plane list with stats and the coverage panel on the right, notifications along the bottom. The footer shows the current state of every toggle.
