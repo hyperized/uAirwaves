@@ -76,6 +76,35 @@ DCD line, so gpsd cannot find it on its own. `GPS_PPS=1` appends
 `dtoverlay=pps-gpio,gpiopin=6` to `config.txt`; it only takes effect after a
 reboot, which is why it is opt-in.
 
+### Colours on the device screen
+
+The TUI picks its palette from what the terminal can show. Over SSH from a
+modern emulator it uses tuned 24-bit colours; on a Linux console it switches to
+named ANSI colours instead.
+
+That is not cosmetic. A console has eight colours, and approximating 24-bit
+values down to eight collapses distinct meanings onto the same colour — the
+climbing, descending and level markers all became white, so an aircraft going
+up looked exactly like one coming down.
+
+The uConsole console defaults to `TERM=linux`, which terminfo describes as
+eight colours. `linux-16color` is the same driver with the bright half
+declared, and the bright half is the readable half:
+
+```sh
+sudo install -d /etc/systemd/system/getty@tty1.service.d
+printf '[Service]\nEnvironment=TERM=linux-16color\n' \
+  | sudo tee /etc/systemd/system/getty@tty1.service.d/10-term.conf
+sudo systemctl daemon-reload   # takes effect at the next console login
+```
+
+Override the detection with `UAIRWAVES_COLORS` when TERM describes the terminal
+you are sitting at rather than the screen you are looking at:
+
+```sh
+UAIRWAVES_COLORS=8 ./uAirwaves    # preview the console palette over SSH
+```
+
 ## Using it
 
 The screen is split in three: the radar scope on the left, the plane list with stats and the coverage panel on the right, notifications along the bottom. The footer shows the current state of every toggle.

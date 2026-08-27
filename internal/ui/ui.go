@@ -48,13 +48,15 @@ func UpdateHeaderColor(percentage int8, clock, statusBar *tview.TextView) {
 //
 //nolint:nonamedreturns // (header, text) reads clearer named at this signature.
 func HeaderColors(percentage int8) (header, text tcell.Color) {
+	theme := ActiveTheme()
+
 	switch {
 	case percentage <= BatteryWarningRed:
-		return ColorHeaderCriticalBackground, ColorHeaderCriticalText
+		return theme.HeaderCriticalBackground, theme.HeaderCriticalText
 	case percentage <= BatteryWarningOrange:
-		return ColorHeaderWarningBackground, ColorHeaderWarningText
+		return theme.HeaderWarningBackground, theme.HeaderWarningText
 	default:
-		return ColorHeaderOKBackground, ColorHeaderOKText
+		return theme.HeaderOKBackground, theme.HeaderOKText
 	}
 }
 
@@ -419,9 +421,9 @@ func FormatSourceText(info adsb.SourceInfo) string {
 		label = "unknown"
 	}
 
-	state := DisconnectedTag + "●[-]"
+	state := DisconnectedTag() + "●[-]"
 	if info.Connected {
-		state = ConnectedTag + "●[-]"
+		state = ConnectedTag() + "●[-]"
 	}
 
 	if info.BytesIn > 0 {

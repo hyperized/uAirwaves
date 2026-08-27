@@ -387,10 +387,10 @@ func TestRenderNotificationBarSeverityColour(t *testing.T) {
 		level            slog.Level
 		wantBG, wantText tcell.Color
 	}{
-		{"error", slog.LevelError, ui.ColorNotifyErrorBackground, ui.ColorNotifyErrorText},
-		{"warn", slog.LevelWarn, ui.ColorNotifyWarningBackground, ui.ColorNotifyWarningText},
-		{"info", slog.LevelInfo, ui.ColorNotifyInfoBackground, ui.ColorNotifyInfoText},
-		{"below info", slog.LevelDebug, ui.ColorNotifyDebugBackground, ui.ColorNotifyDebugText},
+		{"error", slog.LevelError, ui.ActiveTheme().NotifyErrorBackground, ui.ActiveTheme().NotifyErrorText},
+		{"warn", slog.LevelWarn, ui.ActiveTheme().NotifyWarningBackground, ui.ActiveTheme().NotifyWarningText},
+		{"info", slog.LevelInfo, ui.ActiveTheme().NotifyInfoBackground, ui.ActiveTheme().NotifyInfoText},
+		{"below info", slog.LevelDebug, ui.ActiveTheme().NotifyDebugBackground, ui.ActiveTheme().NotifyDebugText},
 	}
 
 	for _, testCase := range tests {

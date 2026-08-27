@@ -1,87 +1,161 @@
 package ui
 
-import "github.com/gdamore/tcell/v2"
+import (
+	"sync/atomic"
 
-// Colour tags shared by the panels.
-//
-// tview's [gray] is #808080, which lands at 2.7:1 against a dark terminal
-// background — under the 4.5:1 needed to actually read it. Every panel used it
-// for secondary text, so callsigns, records and hints were all sitting below
-// the legibility floor at once.
-//
-// DimTag is a touch blue so it belongs with a slate background instead of
-// reading as an unrelated neutral, and clears 5.0:1 on slate, 10.5:1 on black.
-// pkg/radar carries the same reasoning for the scope palette.
-const (
-	// DimTag opens secondary text: units, record values, inline hints.
-	DimTag = "[#b0b8c4]"
-
-	// ResetTag returns to primary text. Paired with DimTag.
-	ResetTag = "[white]"
+	"github.com/gdamore/tcell/v2"
 )
 
-// Panel chrome. tview defaults the list secondary text and these titles to
-// ColorGreen, which is #008000 and lands at 2.0:1 on a dark background — the
-// same legibility problem the scope palette had.
-var (
-	// ColorPanelTitle labels the bordered panels. Green in keeping with the
-	// original, lifted to 5.8:1.
-	ColorPanelTitle = tcell.NewHexColor(0x7BD88F)
-
-	// ColorSecondaryText is the plane list's second line: distance, altitude,
-	// heading, rate. Matches DimTag so the panels agree with each other.
-	ColorSecondaryText = tcell.NewHexColor(0xB0B8C4)
-)
-
-// Header bar.
+// Theme is every colour the panels draw with.
 //
-// This was the least readable thing in the interface: a DarkGreen bar with
-// ColorBlack text is 2.8:1, and because a terminal paints "black" as whatever
-// its theme says — usually a dark slate, not #000000 — what actually reached
-// the screen was closer to 1.4:1. The comment on FormatSourceText had the
-// polarity backwards and concluded white was the unreadable one.
+// There are two of them because the two places this runs are very different
+// terminals. Over SSH from a modern emulator there are 16 million colours and
+// the values can be tuned to a contrast ratio. The uConsole's own screen is a
+// Linux virtual console, which terminfo reports as eight colours, and there
+// tcell has to approximate each 24-bit value to the nearest it has.
 //
-// Dark bars with light text instead: the state still reads as green, amber or
-// red at a glance, nothing glares on a handheld at night, and every pair has
-// contrast to spare.
-var (
-	ColorHeaderOKBackground       = tcell.NewHexColor(0x14532D)
-	ColorHeaderOKText             = tcell.NewHexColor(0xE6F4EA)
-	ColorHeaderWarningBackground  = tcell.NewHexColor(0x7A4A00)
-	ColorHeaderWarningText        = tcell.NewHexColor(0xFFF1D6)
-	ColorHeaderCriticalBackground = tcell.NewHexColor(0x8B1A1A)
-	ColorHeaderCriticalText       = tcell.NewHexColor(0xFFE5E5)
-)
-
-// State dots sit on whichever header bar is current, so they are picked to
-// clear 4.5:1 against all three backgrounds rather than just the green one.
-const (
-	// ConnectedTag opens the connected state dot.
-	ConnectedTag = "[#9bffc7]"
-
-	// DisconnectedTag opens the disconnected state dot.
-	DisconnectedTag = "[#ffc4c4]"
-)
-
-// Notification bar.
+// Approximation loses meaning, not just fidelity: the tuned dim grey, the panel
+// titles and the primary text all collapse onto white, and the green "battery
+// fine" header bar lands on grey. Picking named colours directly lets the
+// terminal resolve them from its own palette and keeps the slots apart.
 //
-// This had the same structural fault as the header, but worse: the bar set a
-// background per severity and a single fixed white text colour for all of
-// them. White on ColorYellow is 1.07:1, so a warning — the notification most
-// worth reading — was the least readable thing on screen. There is no single
-// text colour that works across red, yellow, blue and grey, so severity now
-// carries a pair.
+// pkg/radar carries the same split for the scope.
+type Theme struct {
+	DimTag          string
+	ResetTag        string
+	ConnectedTag    string
+	DisconnectedTag string
+
+	PanelTitle    tcell.Color
+	SecondaryText tcell.Color
+
+	HeaderOKBackground       tcell.Color
+	HeaderOKText             tcell.Color
+	HeaderWarningBackground  tcell.Color
+	HeaderWarningText        tcell.Color
+	HeaderCriticalBackground tcell.Color
+	HeaderCriticalText       tcell.Color
+
+	NotifyErrorBackground   tcell.Color
+	NotifyErrorText         tcell.Color
+	NotifyWarningBackground tcell.Color
+	NotifyWarningText       tcell.Color
+	NotifyInfoBackground    tcell.Color
+	NotifyInfoText          tcell.Color
+	NotifyDebugBackground   tcell.Color
+	NotifyDebugText         tcell.Color
+}
+
+// TrueColorTheme is the tuned theme, for terminals with 256 colours or more.
+// Every text-on-background pair clears WCAG 4.5:1, and the notification bars
+// are at least dE 25 apart so severity stays readable at a glance.
+func TrueColorTheme() Theme {
+	return Theme{
+		DimTag:          "[#b0b8c4]",
+		ResetTag:        "[white]",
+		ConnectedTag:    "[#9bffc7]",
+		DisconnectedTag: "[#ffc4c4]",
+
+		PanelTitle:    tcell.NewHexColor(0x7BD88F),
+		SecondaryText: tcell.NewHexColor(0xB0B8C4),
+
+		HeaderOKBackground:       tcell.NewHexColor(0x14532D),
+		HeaderOKText:             tcell.NewHexColor(0xE6F4EA),
+		HeaderWarningBackground:  tcell.NewHexColor(0x7A4A00),
+		HeaderWarningText:        tcell.NewHexColor(0xFFF1D6),
+		HeaderCriticalBackground: tcell.NewHexColor(0x8B1A1A),
+		HeaderCriticalText:       tcell.NewHexColor(0xFFE5E5),
+
+		NotifyErrorBackground:   tcell.NewHexColor(0x8B1A1A),
+		NotifyErrorText:         tcell.NewHexColor(0xFFE5E5),
+		NotifyWarningBackground: tcell.NewHexColor(0x7A4A00),
+		NotifyWarningText:       tcell.NewHexColor(0xFFF1D6),
+		NotifyInfoBackground:    tcell.NewHexColor(0x0F3D7A),
+		NotifyInfoText:          tcell.NewHexColor(0xE3F0FF),
+		NotifyDebugBackground:   tcell.NewHexColor(0x33383F),
+		NotifyDebugText:         tcell.NewHexColor(0xD5DAE1),
+	}
+}
+
+// BasicTheme is for terminals with 16 colours or fewer, the uConsole console
+// among them.
 //
-// Error and warning deliberately match the header bar: same meaning, same
-// colour. The bars are separated by hue rather than luminance, and kept at
-// least dE 25 apart so they stay tellable at a glance.
-var (
-	ColorNotifyErrorBackground   = tcell.NewHexColor(0x8B1A1A)
-	ColorNotifyErrorText         = tcell.NewHexColor(0xFFE5E5)
-	ColorNotifyWarningBackground = tcell.NewHexColor(0x7A4A00)
-	ColorNotifyWarningText       = tcell.NewHexColor(0xFFF1D6)
-	ColorNotifyInfoBackground    = tcell.NewHexColor(0x0F3D7A)
-	ColorNotifyInfoText          = tcell.NewHexColor(0xE3F0FF)
-	ColorNotifyDebugBackground   = tcell.NewHexColor(0x33383F)
-	ColorNotifyDebugText         = tcell.NewHexColor(0xD5DAE1)
-)
+// Foregrounds come from the bright half of the sixteen. tcell follows the W3C
+// names, so ColorGreen is the dark #008000 at 2.0:1 on black while ColorLime is
+// the bright one at 15.8:1 — the dark half is barely visible on a console.
+//
+// The header keeps a plain background and signals battery state through text
+// colour instead of a coloured bar. That is not just taste: the connected and
+// disconnected dots sit on the header, and on a red "battery critical" bar a
+// red dot disappears entirely. A plain background keeps both dots legible in
+// every battery state.
+func BasicTheme() Theme {
+	return Theme{
+		DimTag:          "[aqua]",
+		ResetTag:        "[white]",
+		ConnectedTag:    "[lime]",
+		DisconnectedTag: "[red]",
+
+		PanelTitle:    tcell.ColorLime,
+		SecondaryText: tcell.ColorAqua,
+
+		HeaderOKBackground:       tcell.ColorBlack,
+		HeaderOKText:             tcell.ColorLime,
+		HeaderWarningBackground:  tcell.ColorBlack,
+		HeaderWarningText:        tcell.ColorYellow,
+		HeaderCriticalBackground: tcell.ColorBlack,
+		HeaderCriticalText:       tcell.ColorRed,
+
+		// Notification bars carry no dots, so they can keep coloured
+		// backgrounds — which is what makes severity obvious at a glance.
+		NotifyErrorBackground:   tcell.ColorMaroon,
+		NotifyErrorText:         tcell.ColorWhite,
+		NotifyWarningBackground: tcell.ColorOlive,
+		NotifyWarningText:       tcell.ColorWhite,
+		NotifyInfoBackground:    tcell.ColorNavy,
+		NotifyInfoText:          tcell.ColorWhite,
+		NotifyDebugBackground:   tcell.ColorBlack,
+		NotifyDebugText:         tcell.ColorSilver,
+	}
+}
+
+// activeTheme holds the theme in use. A pointer swap rather than mutable
+// fields, so a render never reads a half-updated theme.
+var activeTheme atomic.Pointer[Theme] //nolint:gochecknoglobals // process-wide terminal capability.
+
+// SetTheme installs the theme the panels draw with. Call it once at startup,
+// after working out what the terminal can actually show.
+func SetTheme(theme Theme) {
+	activeTheme.Store(&theme)
+}
+
+// ActiveTheme returns the theme in use, defaulting to the tuned one when
+// nothing has been chosen — so every caller and test works unconfigured.
+func ActiveTheme() Theme {
+	if theme := activeTheme.Load(); theme != nil {
+		return *theme
+	}
+
+	return TrueColorTheme()
+}
+
+// Accessors, so the format strings that build panel text stay readable.
+
+// DimTag opens secondary text: units, record values, inline hints.
+func DimTag() string { return ActiveTheme().DimTag }
+
+// ResetTag returns to primary text. Paired with DimTag.
+func ResetTag() string { return ActiveTheme().ResetTag }
+
+// ConnectedTag opens the connected state dot.
+func ConnectedTag() string { return ActiveTheme().ConnectedTag }
+
+// DisconnectedTag opens the disconnected state dot.
+func DisconnectedTag() string { return ActiveTheme().DisconnectedTag }
+
+// ColorPanelTitle labels the bordered panels.
+func ColorPanelTitle() tcell.Color { return ActiveTheme().PanelTitle }
+
+// ColorSecondaryText is the plane list's second line: distance, altitude,
+// heading, rate. tview defaults it to TertiaryTextColor, which is #008000.
+func ColorSecondaryText() tcell.Color { return ActiveTheme().SecondaryText }

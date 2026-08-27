@@ -151,7 +151,7 @@ func TestFormatCoverageShadowsTinyPanel(t *testing.T) {
 	)
 
 	got := ui.FormatCoverageShadows(seededCoverageShadows(), tinyWidth, tinyHeight)
-	if want := "  N  \nW▓+▓E\n" + ui.DimTag + "edge 150 nm" + ui.ResetTag; got != want {
+	if want := "  N  \nW▓+▓E\n" + ui.DimTag() + "edge 150 nm" + ui.ResetTag(); got != want {
 		t.Errorf("shadows (tiny) = %q, want %q", got, want)
 	}
 }

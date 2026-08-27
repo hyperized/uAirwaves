@@ -66,11 +66,11 @@ func TestGetVerticalRateColor(t *testing.T) {
 		vertRate float64
 		want     tcell.Color
 	}{
-		{600, colorClimbing},
-		{-600, colorDescending},
-		{0, colorLevel},
-		{500, colorLevel},
-		{-500, colorLevel},
+		{600, TrueColorPalette().Climbing},
+		{-600, TrueColorPalette().Descending},
+		{0, TrueColorPalette().Level},
+		{500, TrueColorPalette().Level},
+		{-500, TrueColorPalette().Level},
 	}
 
 	for _, testCase := range tests {
@@ -276,14 +276,14 @@ func TestGetFlightLevelColor(t *testing.T) {
 		altitude float64
 		want     tcell.Color
 	}{
-		{400, colorAltBelowFL050},
-		{5000, colorAltBelowFL100},
-		{15000, colorAltBelowFL200},
-		{25000, colorAltBelowFL300},
-		{35000, colorAltBelowFL400},
-		{45000, colorAltBelowFL500},
-		{55000, colorAltBelowFL600},
-		{65000, colorAltAboveFL600},
+		{400, TrueColorPalette().AltBelowFL050},
+		{5000, TrueColorPalette().AltBelowFL100},
+		{15000, TrueColorPalette().AltBelowFL200},
+		{25000, TrueColorPalette().AltBelowFL300},
+		{35000, TrueColorPalette().AltBelowFL400},
+		{45000, TrueColorPalette().AltBelowFL500},
+		{55000, TrueColorPalette().AltBelowFL600},
+		{65000, TrueColorPalette().AltAboveFL600},
 	}
 
 	for _, testCase := range tests {

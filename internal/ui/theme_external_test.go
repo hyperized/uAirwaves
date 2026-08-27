@@ -69,9 +69,9 @@ func TestHeaderContrast(t *testing.T) {
 		name             string
 		background, text tcell.Color
 	}{
-		{"ok", ui.ColorHeaderOKBackground, ui.ColorHeaderOKText},
-		{"warning", ui.ColorHeaderWarningBackground, ui.ColorHeaderWarningText},
-		{"critical", ui.ColorHeaderCriticalBackground, ui.ColorHeaderCriticalText},
+		{"ok", ui.ActiveTheme().HeaderOKBackground, ui.ActiveTheme().HeaderOKText},
+		{"warning", ui.ActiveTheme().HeaderWarningBackground, ui.ActiveTheme().HeaderWarningText},
+		{"critical", ui.ActiveTheme().HeaderCriticalBackground, ui.ActiveTheme().HeaderCriticalText},
 	}
 
 	for _, pair := range pairs {
@@ -90,14 +90,14 @@ func TestStateDotsReadableOnEveryHeader(t *testing.T) {
 	t.Parallel()
 
 	dots := map[string]int32{
-		"connected":    hexFromTag(t, ui.ConnectedTag),
-		"disconnected": hexFromTag(t, ui.DisconnectedTag),
+		"connected":    hexFromTag(t, ui.ConnectedTag()),
+		"disconnected": hexFromTag(t, ui.DisconnectedTag()),
 	}
 
 	backgrounds := map[string]tcell.Color{
-		"ok":       ui.ColorHeaderOKBackground,
-		"warning":  ui.ColorHeaderWarningBackground,
-		"critical": ui.ColorHeaderCriticalBackground,
+		"ok":       ui.ActiveTheme().HeaderOKBackground,
+		"warning":  ui.ActiveTheme().HeaderWarningBackground,
+		"critical": ui.ActiveTheme().HeaderCriticalBackground,
 	}
 
 	for dotName, dot := range dots {
@@ -118,9 +118,9 @@ func TestPanelTextContrast(t *testing.T) {
 	t.Parallel()
 
 	colours := map[string]int32{
-		"DimTag":             hexFromTag(t, ui.DimTag),
-		"ColorSecondaryText": ui.ColorSecondaryText.Hex(),
-		"ColorPanelTitle":    ui.ColorPanelTitle.Hex(),
+		"DimTag":             hexFromTag(t, ui.DimTag()),
+		"ColorSecondaryText": ui.ColorSecondaryText().Hex(),
+		"ColorPanelTitle":    ui.ColorPanelTitle().Hex(),
 	}
 
 	backgrounds := map[string]int32{"black": themeBackgroundBlack, "slate": themeBackgroundSlate}

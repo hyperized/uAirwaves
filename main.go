@@ -251,6 +251,13 @@ func configureUI(cfg cliConfig) *uiComponents {
 	// goroutines the same supervision every other worker gets.
 	waitGroup := &sync.WaitGroup{}
 	errChan := make(chan error, workerErrChanDepth)
+	// Before any panel is built: the widgets read their colours once, at
+	// construction, so choosing the theme afterwards would leave them on the
+	// wrong palette. The uConsole's own screen is an eight-colour Linux
+	// console, where the tuned 24-bit palette collapses several distinct
+	// meanings onto the same colour.
+	colorDepth := ui.SelectThemeForTerminal()
+
 	clock := configureClock()
 	statusBar := configureStatusbar()
 	commands := configureCommands()
@@ -261,6 +268,16 @@ func configureUI(cfg cliConfig) *uiComponents {
 	coveragePanel := configureCoveragePanel()
 	headerPanel := configureHeader(clock, gpsStatus, sourceStatus, statusBar)
 	notifications := ui.NewNotifications()
+
+	// Only worth saying when the terminal is at the bottom of the range and
+	// there is something the operator can actually do about it. Pushed into
+	// the queue rather than logged, because stderr is tview's once Run starts.
+	if colorDepth < 16 {
+		notifications.Push(slog.LevelInfo, fmt.Sprintf(
+			"Terminal reports %d colours, using the basic palette. "+
+				"TERM=linux-16color doubles it.", colorDepth))
+	}
+
 	notificationBar := configureNotificationBar()
 	footer := configureFooter(commands)
 	bottomSection := tview.NewFlex().SetDirection(tview.FlexRow).
@@ -506,7 +523,7 @@ func configureFlightDetailsPanel(
 		AddItem(text, 0, flightDetailsTextWeight, false).
 		AddItem(mini, 0, flightDetailsMiniWeight, false)
 	panel.SetBorder(true).SetTitle("Flight details").
-		SetTitleColor(ui.ColorPanelTitle).
+		SetTitleColor(ui.ColorPanelTitle()).
 		SetBorderPadding(1, 1, 2, 2) //nolint:mnd // padding for header chrome inside the panel.
 
 	return text, mini, panel
@@ -521,7 +538,7 @@ func configureNotificationBar() *tview.TextView {
 	bar := tview.NewTextView().SetDynamicColors(true).SetTextAlign(tview.AlignLeft)
 	// Starting value only; RenderNotificationBar sets the pair that matches
 	// whichever severity is currently showing.
-	bar.SetTextColor(ui.ColorNotifyInfoText)
+	bar.SetTextColor(ui.ActiveTheme().NotifyInfoText)
 
 	return bar
 }
@@ -949,8 +966,8 @@ func configureFooter(commands *tview.TextView) *tview.Flex {
 func configureGpsStatus() *tview.TextView {
 	gpsStatus := tview.NewTextView().SetTextAlign(tview.AlignCenter)
 	gpsStatus.SetDynamicColors(true)
-	gpsStatus.SetBackgroundColor(ui.ColorHeaderOKBackground)
-	gpsStatus.SetTextColor(ui.ColorHeaderOKText)
+	gpsStatus.SetBackgroundColor(ui.ActiveTheme().HeaderOKBackground)
+	gpsStatus.SetTextColor(ui.ActiveTheme().HeaderOKText)
 
 	return gpsStatus
 }
@@ -973,9 +990,9 @@ func configurePlaneList() *tview.List {
 	planeListPanel.SetWrapAround(false)
 	// tview defaults this to TertiaryTextColor (#008000), which is unreadable
 	// on a dark terminal — and it is the line carrying distance and altitude.
-	planeListPanel.SetSecondaryTextColor(ui.ColorSecondaryText)
+	planeListPanel.SetSecondaryTextColor(ui.ColorSecondaryText())
 	planeListPanel.SetBorder(false).SetTitle("Airplanes").
-		SetTitleColor(ui.ColorPanelTitle).
+		SetTitleColor(ui.ColorPanelTitle()).
 		SetBorderPadding(1, 1, 1, 1)
 
 	return planeListPanel
@@ -987,7 +1004,7 @@ func configurePlaneList() *tview.List {
 func configureStatsPanel() *tview.TextView {
 	statsPanel := tview.NewTextView().SetDynamicColors(true).SetWrap(false)
 	statsPanel.SetBorder(true).SetTitle("Stats").
-		SetTitleColor(ui.ColorPanelTitle).
+		SetTitleColor(ui.ColorPanelTitle()).
 		SetBorderPadding(0, 0, 1, 1)
 
 	return statsPanel
@@ -1000,7 +1017,7 @@ func configureStatsPanel() *tview.TextView {
 func configureCoveragePanel() *tview.TextView {
 	coveragePanel := tview.NewTextView().SetDynamicColors(true).SetWrap(false)
 	coveragePanel.SetBorder(true).SetTitle("Coverage").
-		SetTitleColor(ui.ColorPanelTitle).
+		SetTitleColor(ui.ColorPanelTitle()).
 		SetBorderPadding(0, 0, 1, 1)
 
 	return coveragePanel
@@ -1060,8 +1077,8 @@ func configureHeader(
 func configureSourceStatus() *tview.TextView {
 	sourceStatus := tview.NewTextView().SetTextAlign(tview.AlignCenter)
 	sourceStatus.SetDynamicColors(true)
-	sourceStatus.SetBackgroundColor(ui.ColorHeaderOKBackground)
-	sourceStatus.SetTextColor(ui.ColorHeaderOKText)
+	sourceStatus.SetBackgroundColor(ui.ActiveTheme().HeaderOKBackground)
+	sourceStatus.SetTextColor(ui.ActiveTheme().HeaderOKText)
 
 	return sourceStatus
 }
@@ -1070,8 +1087,8 @@ func configureSourceStatus() *tview.TextView {
 func configureStatusbar() *tview.TextView {
 	statusBar := tview.NewTextView().SetTextAlign(tview.AlignRight).SetText("loading...")
 	statusBar.SetDynamicColors(true)
-	statusBar.SetBackgroundColor(ui.ColorHeaderOKBackground)
-	statusBar.SetTextColor(ui.ColorHeaderOKText)
+	statusBar.SetBackgroundColor(ui.ActiveTheme().HeaderOKBackground)
+	statusBar.SetTextColor(ui.ActiveTheme().HeaderOKText)
 
 	return statusBar
 }
@@ -1080,8 +1097,8 @@ func configureStatusbar() *tview.TextView {
 func configureClock() *tview.TextView {
 	clock := tview.NewTextView().SetTextAlign(tview.AlignLeft).SetText("..:..:..")
 	clock.SetDynamicColors(true)
-	clock.SetBackgroundColor(ui.ColorHeaderOKBackground)
-	clock.SetTextColor(ui.ColorHeaderOKText)
+	clock.SetBackgroundColor(ui.ActiveTheme().HeaderOKBackground)
+	clock.SetTextColor(ui.ActiveTheme().HeaderOKText)
 
 	return clock
 }

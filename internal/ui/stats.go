@@ -140,45 +140,45 @@ type StatsRender struct {
 func FormatStatsText(render StatsRender) string {
 	nearest := "—"
 	if render.Positioned > 0 {
-		nearest = fmt.Sprintf("%.1f nm  "+DimTag+"%s"+ResetTag, render.NearestDist, render.NearestCallsign)
+		nearest = fmt.Sprintf("%.1f nm  "+DimTag()+"%s"+ResetTag(), render.NearestDist, render.NearestCallsign)
 	}
 
 	farthest := "—"
 	if render.Positioned > 0 {
-		farthest = fmt.Sprintf("%.1f nm  "+DimTag+"%s"+ResetTag, render.FarthestDist, render.FarthestCallsign)
+		farthest = fmt.Sprintf("%.1f nm  "+DimTag()+"%s"+ResetTag(), render.FarthestDist, render.FarthestCallsign)
 	}
 
 	if render.FarthestRecordDist > 0 && render.FarthestRecordCallsign != "" {
 		farthest += fmt.Sprintf(
-			"  "+DimTag+"(%.1f nm %s)"+ResetTag,
+			"  "+DimTag()+"(%.1f nm %s)"+ResetTag(),
 			render.FarthestRecordDist, render.FarthestRecordCallsign,
 		)
 	}
 
 	highest := "—"
 	if render.HighestAlt > 0 {
-		highest = fmt.Sprintf("%.0f ft  "+DimTag+"%s"+ResetTag, render.HighestAlt, render.HighestCallsign)
+		highest = fmt.Sprintf("%.0f ft  "+DimTag()+"%s"+ResetTag(), render.HighestAlt, render.HighestCallsign)
 	}
 
 	if render.HighestRecordAlt > 0 && render.HighestRecordCallsign != "" {
 		highest += fmt.Sprintf(
-			"  "+DimTag+"(%.0f ft %s)"+ResetTag,
+			"  "+DimTag()+"(%.0f ft %s)"+ResetTag(),
 			render.HighestRecordAlt, render.HighestRecordCallsign,
 		)
 	}
 
 	framesLine := fmt.Sprintf("%.1f", render.FramesPerSec)
 	if render.FramesPerSecRecord > 0 {
-		framesLine += fmt.Sprintf("  "+DimTag+"(peak %.1f)"+ResetTag, render.FramesPerSecRecord)
+		framesLine += fmt.Sprintf("  "+DimTag()+"(peak %.1f)"+ResetTag(), render.FramesPerSecRecord)
 	}
 
 	return fmt.Sprintf(
-		"[::b]Tracked[::-]    %d  ("+DimTag+"%d positioned"+ResetTag+")\n"+
+		"[::b]Tracked[::-]    %d  ("+DimTag()+"%d positioned"+ResetTag()+")\n"+
 			"[::b]Nearest[::-]    %s\n"+
 			"[::b]Farthest[::-]   %s\n"+
 			"[::b]Highest[::-]    %s\n"+
 			"[::b]Frames/s[::-]   %s\n"+
-			"[::b]Total[::-]      %d  ("+DimTag+"IDs %d/%d"+ResetTag+")",
+			"[::b]Total[::-]      %d  ("+DimTag()+"IDs %d/%d"+ResetTag()+")",
 		render.Tracked, render.Positioned,
 		nearest,
 		farthest,

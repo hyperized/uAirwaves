@@ -269,15 +269,17 @@ func RenderNotificationBar(
 //
 //nolint:nonamedreturns // (background, text) reads clearer named at this signature.
 func NotificationColors(level slog.Level) (background, text tcell.Color) {
+	theme := ActiveTheme()
+
 	switch {
 	case level >= slog.LevelError:
-		return ColorNotifyErrorBackground, ColorNotifyErrorText
+		return theme.NotifyErrorBackground, theme.NotifyErrorText
 	case level >= slog.LevelWarn:
-		return ColorNotifyWarningBackground, ColorNotifyWarningText
+		return theme.NotifyWarningBackground, theme.NotifyWarningText
 	case level >= slog.LevelInfo:
-		return ColorNotifyInfoBackground, ColorNotifyInfoText
+		return theme.NotifyInfoBackground, theme.NotifyInfoText
 	default:
-		return ColorNotifyDebugBackground, ColorNotifyDebugText
+		return theme.NotifyDebugBackground, theme.NotifyDebugText
 	}
 }
 

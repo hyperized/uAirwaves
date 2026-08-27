@@ -43,11 +43,11 @@ func TestUpdateHeaderColorBatteryThresholds(t *testing.T) {
 		wantBG     tcell.Color
 		wantText   tcell.Color
 	}{
-		{name: "red at exact threshold", percentage: ui.BatteryWarningRed, wantBG: ui.ColorHeaderCriticalBackground, wantText: ui.ColorHeaderCriticalText},
-		{name: "red below threshold", percentage: 5, wantBG: ui.ColorHeaderCriticalBackground, wantText: ui.ColorHeaderCriticalText},
-		{name: "orange at exact threshold", percentage: ui.BatteryWarningOrange, wantBG: ui.ColorHeaderWarningBackground, wantText: ui.ColorHeaderWarningText},
-		{name: "orange between red and orange", percentage: 30, wantBG: ui.ColorHeaderWarningBackground, wantText: ui.ColorHeaderWarningText},
-		{name: "green above orange threshold", percentage: 80, wantBG: ui.ColorHeaderOKBackground, wantText: ui.ColorHeaderOKText},
+		{name: "red at exact threshold", percentage: ui.BatteryWarningRed, wantBG: ui.ActiveTheme().HeaderCriticalBackground, wantText: ui.ActiveTheme().HeaderCriticalText},
+		{name: "red below threshold", percentage: 5, wantBG: ui.ActiveTheme().HeaderCriticalBackground, wantText: ui.ActiveTheme().HeaderCriticalText},
+		{name: "orange at exact threshold", percentage: ui.BatteryWarningOrange, wantBG: ui.ActiveTheme().HeaderWarningBackground, wantText: ui.ActiveTheme().HeaderWarningText},
+		{name: "orange between red and orange", percentage: 30, wantBG: ui.ActiveTheme().HeaderWarningBackground, wantText: ui.ActiveTheme().HeaderWarningText},
+		{name: "green above orange threshold", percentage: 80, wantBG: ui.ActiveTheme().HeaderOKBackground, wantText: ui.ActiveTheme().HeaderOKText},
 	}
 
 	for _, testCase := range tests {
@@ -638,27 +638,27 @@ func TestFormatSourceText(t *testing.T) {
 		{
 			name: "empty label connected with bytes",
 			info: adsb.SourceInfo{Label: "", Connected: true, BytesIn: 1024},
-			want: "Source: unknown " + ui.ConnectedTag + "●[-] 1.0 KiB",
+			want: "Source: unknown " + ui.ConnectedTag() + "●[-] 1.0 KiB",
 		},
 		{
 			name: "sdr connected no bytes",
 			info: adsb.SourceInfo{Label: "SDR", Connected: true, BytesIn: 0},
-			want: "Source: SDR " + ui.ConnectedTag + "●[-]",
+			want: "Source: SDR " + ui.ConnectedTag() + "●[-]",
 		},
 		{
 			name: "beast disconnected",
 			info: adsb.SourceInfo{Label: "BEAST host:30005", Connected: false, BytesIn: 0},
-			want: "Source: BEAST host:30005 " + ui.DisconnectedTag + "●[-]",
+			want: "Source: BEAST host:30005 " + ui.DisconnectedTag() + "●[-]",
 		},
 		{
 			name: "beast connected with bytes",
 			info: adsb.SourceInfo{Label: "BEAST host:30005", Connected: true, BytesIn: 5_242_880},
-			want: "Source: BEAST host:30005 " + ui.ConnectedTag + "●[-] 5.0 MiB",
+			want: "Source: BEAST host:30005 " + ui.ConnectedTag() + "●[-] 5.0 MiB",
 		},
 		{
 			name: "replay connected",
 			info: adsb.SourceInfo{Label: "Replay capture.iq", Connected: true, BytesIn: 0},
-			want: "Source: Replay capture.iq " + ui.ConnectedTag + "●[-]",
+			want: "Source: Replay capture.iq " + ui.ConnectedTag() + "●[-]",
 		},
 	}
 

@@ -34,11 +34,10 @@ const (
 	// controller's spoken bearing.
 	compassSectorCount = 16
 	compassSectorWidth = fullCircleDegrees / compassSectorCount
-	// flightDetailsDashCell is the placeholder rendered for missing
+	// flightDetailsDashCell() is the placeholder rendered for missing
 	// or unresolved fields in the details panel. Hoisted as a
 	// constant so the four call sites share one literal (and so
 	// goconst stops flagging it).
-	flightDetailsDashCell = DimTag + "—" + ResetTag
 	// compassRoundingOffset is the +0.5 added before flooring a
 	// scaled bearing so values straddling a sector boundary round
 	// to the nearest sector rather than always-down.
@@ -67,7 +66,7 @@ func UpdateFlightDetails(
 	detailsPanel *tview.TextView, snap *airplane.Snapshot, receiverLat, receiverLon float64,
 ) {
 	if snap == nil {
-		detailsPanel.SetText(DimTag + "Select a flight from the right-column list and press Enter." + ResetTag)
+		detailsPanel.SetText(DimTag() + "Select a flight from the right-column list and press Enter." + ResetTag())
 
 		return
 	}
@@ -80,6 +79,11 @@ func UpdateFlightDetails(
 // no I/O, no clocks beyond time.Since(snap.LastUpdate) which is
 // already used by Snapshot.Summary() and is deterministic enough
 // for golden-byte testing within a single tick.
+// flightDetailsDashCell() is the placeholder for a field the receiver has not
+// supplied. A function rather than a constant now that the tags follow the
+// terminal's colour depth.
+func flightDetailsDashCell() string { return DimTag() + "—" + ResetTag() }
+
 func FormatFlightDetails(snap airplane.Snapshot, receiverLat, receiverLon float64) string {
 	var builder strings.Builder
 
@@ -94,16 +98,16 @@ func FormatFlightDetails(snap airplane.Snapshot, receiverLat, receiverLon float6
 func writeIdentityBlock(builder *strings.Builder, snap airplane.Snapshot) {
 	callsign := snap.Callsign
 	if callsign == "" {
-		callsign = flightDetailsDashCell
+		callsign = flightDetailsDashCell()
 	}
 
 	squawk := snap.Squawk
 	if squawk == "" {
-		squawk = flightDetailsDashCell
+		squawk = flightDetailsDashCell()
 	}
 
 	if snap.Emergency {
-		squawk = fmt.Sprintf("[red]%s (!)"+ResetTag, snap.Squawk)
+		squawk = fmt.Sprintf("[red]%s (!)"+ResetTag(), snap.Squawk)
 	}
 
 	fmt.Fprintf(builder, "[::b]Callsign[::-]   %s\n", callsign)
@@ -123,7 +127,7 @@ func writePositionBlock(builder *strings.Builder, snap airplane.Snapshot, receiv
 	builder.WriteString("\n")
 
 	if snap.Latitude == 0 && snap.Longitude == 0 {
-		builder.WriteString("[::b]Position[::-]   " + DimTag + "not yet resolved" + ResetTag + "\n")
+		builder.WriteString("[::b]Position[::-]   " + DimTag() + "not yet resolved" + ResetTag() + "\n")
 
 		return
 	}
@@ -131,8 +135,8 @@ func writePositionBlock(builder *strings.Builder, snap airplane.Snapshot, receiv
 	fmt.Fprintf(builder, "[::b]Position[::-]   %.5f, %.5f\n", snap.Latitude, snap.Longitude)
 
 	if receiverLat == 0 && receiverLon == 0 {
-		builder.WriteString("[::b]Distance[::-]   " + DimTag + "no GPS fix" + ResetTag + "\n")
-		builder.WriteString("[::b]Bearing[::-]    " + DimTag + "no GPS fix" + ResetTag + "\n")
+		builder.WriteString("[::b]Distance[::-]   " + DimTag() + "no GPS fix" + ResetTag() + "\n")
+		builder.WriteString("[::b]Bearing[::-]    " + DimTag() + "no GPS fix" + ResetTag() + "\n")
 
 		return
 	}
@@ -147,7 +151,7 @@ func writePositionBlock(builder *strings.Builder, snap airplane.Snapshot, receiv
 
 func writeMetaBlock(builder *strings.Builder, snap airplane.Snapshot) {
 	builder.WriteString("\n")
-	fmt.Fprintf(builder, "[::b]Last seen[::-]  %.0fs ago ("+DimTag+"%s"+ResetTag+")\n",
+	fmt.Fprintf(builder, "[::b]Last seen[::-]  %.0fs ago ("+DimTag()+"%s"+ResetTag()+")\n",
 		time.Since(snap.LastUpdate.UTC()).Seconds(),
 		snap.LastUpdate.UTC().Format(time.TimeOnly),
 	)
@@ -169,7 +173,7 @@ func formatAltitude(altitude float64) string {
 // for unset planes.
 func formatHeading(heading float64) string {
 	if heading < 0 {
-		return flightDetailsDashCell
+		return flightDetailsDashCell()
 	}
 
 	return fmt.Sprintf("%.0f° (%s)", heading, cardinalFromHeading(heading))
@@ -179,7 +183,7 @@ func formatHeading(heading float64) string {
 // Airplane default sentinel for "no velocity yet".
 func formatVelocity(velocity float64) string {
 	if velocity < 0 {
-		return flightDetailsDashCell
+		return flightDetailsDashCell()
 	}
 
 	return fmt.Sprintf("%.0f kt (%.0f km/h)", velocity, velocity*knotsToKmh)
