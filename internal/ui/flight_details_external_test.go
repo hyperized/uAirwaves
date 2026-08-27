@@ -63,7 +63,7 @@ func TestFormatFlightDetailsEmergencyHighlight(t *testing.T) {
 
 	out := ui.FormatFlightDetails(snap, 0, 0)
 
-	if !strings.Contains(out, "[red]7700 (!)[white]") {
+	if !strings.Contains(out, "[red]7700 (!)"+ui.ResetTag) {
 		t.Errorf("emergency squawk not highlighted in output:\n%s", out)
 	}
 }
@@ -81,11 +81,11 @@ func TestFormatFlightDetailsUnsetFieldsRenderDashes(t *testing.T) {
 	out := ui.FormatFlightDetails(snap, 52, 4)
 
 	for _, want := range []string{
-		"Callsign[::-]   [gray]—[white]",
-		"Squawk[::-]     [gray]—[white]",
-		"Heading[::-]    [gray]—[white]",
-		"Velocity[::-]   [gray]—[white]",
-		"Position[::-]   [gray]not yet resolved[white]",
+		"Callsign[::-]   " + ui.DimTag + "—" + ui.ResetTag,
+		"Squawk[::-]     " + ui.DimTag + "—" + ui.ResetTag,
+		"Heading[::-]    " + ui.DimTag + "—" + ui.ResetTag,
+		"Velocity[::-]   " + ui.DimTag + "—" + ui.ResetTag,
+		"Position[::-]   " + ui.DimTag + "not yet resolved" + ui.ResetTag,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in output:\n%s", want, out)
@@ -139,7 +139,7 @@ func TestFormatFlightDetailsNoGPSFixHidesDistance(t *testing.T) {
 	// (0,0) receiver simulates no GPS fix yet.
 	out := ui.FormatFlightDetails(snap, 0, 0)
 
-	if !strings.Contains(out, "Distance[::-]   [gray]no GPS fix[white]") {
+	if !strings.Contains(out, "Distance[::-]   "+ui.DimTag+"no GPS fix"+ui.ResetTag) {
 		t.Errorf("expected 'no GPS fix' hint when receiver position unknown, got:\n%s", out)
 	}
 }

@@ -53,9 +53,14 @@ lint:
 fmt:
 	go fmt ./...
 
+# Upload beside the target and rename, rather than straight over it. scp onto
+# a running binary fails with ETXTBSY; rename(2) only swaps the directory
+# entry, so a TUI session that is already open keeps running on the old inode
+# and picks the new build up next time it starts.
 ship: build-aarch64 gps-setup
 	@test -n "$(DEVICE)" || { echo "DEVICE not set. Create .env with: DEVICE = user@host"; exit 1; }
-	scp uAirwaves-aarch64 $(DEVICE):~/uAirwaves
+	scp uAirwaves-aarch64 $(DEVICE):~/uAirwaves.new
+	ssh $(DEVICE) 'mv -f ~/uAirwaves.new ~/uAirwaves'
 
 # ---------------------------------------------------------------
 # SMOKE WORKFLOW
@@ -91,10 +96,11 @@ ship-all: gps-setup
 	$(GO_BUILD_DEV_ENV) go build -C $(MODES)     -trimpath -o $(CURDIR)/dist/modes-decode-aarch64 ./cmd/modes-decode
 	$(GO_BUILD_DEV_ENV) go build -C $(DEMOD1090) -trimpath -o $(CURDIR)/dist/demod1090-aarch64    ./cmd/demod1090
 	$(MAKE) build-aarch64
-	scp dist/rtl-probe-aarch64    $(DEVICE):~/rtl-probe
-	scp dist/modes-decode-aarch64 $(DEVICE):~/modes-decode
-	scp dist/demod1090-aarch64    $(DEVICE):~/demod1090
-	scp uAirwaves-aarch64         $(DEVICE):~/uAirwaves
+	scp dist/rtl-probe-aarch64    $(DEVICE):~/rtl-probe.new
+	scp dist/modes-decode-aarch64 $(DEVICE):~/modes-decode.new
+	scp dist/demod1090-aarch64    $(DEVICE):~/demod1090.new
+	scp uAirwaves-aarch64         $(DEVICE):~/uAirwaves.new
+	ssh $(DEVICE) 'for b in rtl-probe modes-decode demod1090 uAirwaves; do mv -f ~/$$b.new ~/$$b; done'
 
 # Make sure the device can actually supply a GPS fix: gpsd installed, pointed
 # at the receiver, enabled and running. Idempotent, so `ship` runs it every
@@ -174,7 +180,8 @@ build-radio:
 
 ship-radio: build-radio
 	@test -n "$(RADIO)" || { echo "RADIO not set. Create .env with: RADIO = user@host"; exit 1; }
-	scp dist/demod1090-$(GOARCH_RADIO) $(RADIO):~/demod1090
+	scp dist/demod1090-$(GOARCH_RADIO) $(RADIO):~/demod1090.new
+	ssh $(RADIO) 'mv -f ~/demod1090.new ~/demod1090'
 
 radio:
 	@test -n "$(RADIO)" || { echo "RADIO not set. Create .env with: RADIO = user@host"; exit 1; }

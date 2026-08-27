@@ -118,7 +118,7 @@ func TestFormatStatsTextPositionedZero(t *testing.T) {
 		CallsignsApplied: 40,
 	})
 
-	if !strings.Contains(got, "Tracked[::-]    5  ([gray]0 positioned[white])") {
+	if !strings.Contains(got, "Tracked[::-]    5  ("+ui.DimTag+"0 positioned"+ui.ResetTag+")") {
 		t.Errorf("missing Tracked line; got:\n%s", got)
 	}
 
@@ -159,11 +159,11 @@ func TestFormatStatsTextWithAggregates(t *testing.T) {
 	})
 
 	for _, want := range []string{
-		"1.5 nm  [gray]KLM1023[white]",
-		"42.0 nm  [gray]BAW123[white]",
-		"38000 ft  [gray]DLH456[white]",
-		"Frames/s[::-]   12.3  [gray](peak 28.7)[white]",
-		"999  ([gray]IDs 77/88[white])",
+		"1.5 nm  " + ui.DimTag + "KLM1023" + ui.ResetTag,
+		"42.0 nm  " + ui.DimTag + "BAW123" + ui.ResetTag,
+		"38000 ft  " + ui.DimTag + "DLH456" + ui.ResetTag,
+		"Frames/s[::-]   12.3  " + ui.DimTag + "(peak 28.7)" + ui.ResetTag,
+		"999  (" + ui.DimTag + "IDs 77/88" + ui.ResetTag + ")",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output missing %q; full:\n%s", want, got)
@@ -214,8 +214,8 @@ func TestFormatStatsTextWithRecords(t *testing.T) {
 	})
 
 	for _, want := range []string{
-		"42.0 nm  [gray]BAW123[white]  [gray](186.9 nm KLM999)[white]",
-		"38000 ft  [gray]DLH456[white]  [gray](45000 ft QFA8)[white]",
+		"42.0 nm  " + ui.DimTag + "BAW123" + ui.ResetTag + "  " + ui.DimTag + "(186.9 nm KLM999)" + ui.ResetTag,
+		"38000 ft  " + ui.DimTag + "DLH456" + ui.ResetTag + "  " + ui.DimTag + "(45000 ft QFA8)" + ui.ResetTag,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output missing %q; full:\n%s", want, got)

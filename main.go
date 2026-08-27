@@ -506,7 +506,7 @@ func configureFlightDetailsPanel(
 		AddItem(text, 0, flightDetailsTextWeight, false).
 		AddItem(mini, 0, flightDetailsMiniWeight, false)
 	panel.SetBorder(true).SetTitle("Flight details").
-		SetTitleColor(tcell.ColorGreen).
+		SetTitleColor(ui.ColorPanelTitle).
 		SetBorderPadding(1, 1, 2, 2) //nolint:mnd // padding for header chrome inside the panel.
 
 	return text, mini, panel
@@ -969,8 +969,11 @@ func configureCommands() *tview.TextView {
 func configurePlaneList() *tview.List {
 	planeListPanel := tview.NewList().ShowSecondaryText(true)
 	planeListPanel.SetWrapAround(false)
+	// tview defaults this to TertiaryTextColor (#008000), which is unreadable
+	// on a dark terminal — and it is the line carrying distance and altitude.
+	planeListPanel.SetSecondaryTextColor(ui.ColorSecondaryText)
 	planeListPanel.SetBorder(false).SetTitle("Airplanes").
-		SetTitleColor(tcell.ColorGreen).
+		SetTitleColor(ui.ColorPanelTitle).
 		SetBorderPadding(1, 1, 1, 1)
 
 	return planeListPanel
@@ -982,7 +985,7 @@ func configurePlaneList() *tview.List {
 func configureStatsPanel() *tview.TextView {
 	statsPanel := tview.NewTextView().SetDynamicColors(true).SetWrap(false)
 	statsPanel.SetBorder(true).SetTitle("Stats").
-		SetTitleColor(tcell.ColorGreen).
+		SetTitleColor(ui.ColorPanelTitle).
 		SetBorderPadding(0, 0, 1, 1)
 
 	return statsPanel
@@ -995,7 +998,7 @@ func configureStatsPanel() *tview.TextView {
 func configureCoveragePanel() *tview.TextView {
 	coveragePanel := tview.NewTextView().SetDynamicColors(true).SetWrap(false)
 	coveragePanel.SetBorder(true).SetTitle("Coverage").
-		SetTitleColor(tcell.ColorGreen).
+		SetTitleColor(ui.ColorPanelTitle).
 		SetBorderPadding(0, 0, 1, 1)
 
 	return coveragePanel

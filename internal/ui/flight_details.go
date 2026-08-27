@@ -38,7 +38,7 @@ const (
 	// or unresolved fields in the details panel. Hoisted as a
 	// constant so the four call sites share one literal (and so
 	// goconst stops flagging it).
-	flightDetailsDashCell = "[gray]—[white]"
+	flightDetailsDashCell = DimTag + "—" + ResetTag
 	// compassRoundingOffset is the +0.5 added before flooring a
 	// scaled bearing so values straddling a sector boundary round
 	// to the nearest sector rather than always-down.
@@ -67,7 +67,7 @@ func UpdateFlightDetails(
 	detailsPanel *tview.TextView, snap *airplane.Snapshot, receiverLat, receiverLon float64,
 ) {
 	if snap == nil {
-		detailsPanel.SetText("[gray]Select a flight from the right-column list and press Enter.[white]")
+		detailsPanel.SetText(DimTag + "Select a flight from the right-column list and press Enter." + ResetTag)
 
 		return
 	}
@@ -103,7 +103,7 @@ func writeIdentityBlock(builder *strings.Builder, snap airplane.Snapshot) {
 	}
 
 	if snap.Emergency {
-		squawk = fmt.Sprintf("[red]%s (!)[white]", snap.Squawk)
+		squawk = fmt.Sprintf("[red]%s (!)"+ResetTag, snap.Squawk)
 	}
 
 	fmt.Fprintf(builder, "[::b]Callsign[::-]   %s\n", callsign)
@@ -123,7 +123,7 @@ func writePositionBlock(builder *strings.Builder, snap airplane.Snapshot, receiv
 	builder.WriteString("\n")
 
 	if snap.Latitude == 0 && snap.Longitude == 0 {
-		builder.WriteString("[::b]Position[::-]   [gray]not yet resolved[white]\n")
+		builder.WriteString("[::b]Position[::-]   " + DimTag + "not yet resolved" + ResetTag + "\n")
 
 		return
 	}
@@ -131,8 +131,8 @@ func writePositionBlock(builder *strings.Builder, snap airplane.Snapshot, receiv
 	fmt.Fprintf(builder, "[::b]Position[::-]   %.5f, %.5f\n", snap.Latitude, snap.Longitude)
 
 	if receiverLat == 0 && receiverLon == 0 {
-		builder.WriteString("[::b]Distance[::-]   [gray]no GPS fix[white]\n")
-		builder.WriteString("[::b]Bearing[::-]    [gray]no GPS fix[white]\n")
+		builder.WriteString("[::b]Distance[::-]   " + DimTag + "no GPS fix" + ResetTag + "\n")
+		builder.WriteString("[::b]Bearing[::-]    " + DimTag + "no GPS fix" + ResetTag + "\n")
 
 		return
 	}
@@ -147,7 +147,7 @@ func writePositionBlock(builder *strings.Builder, snap airplane.Snapshot, receiv
 
 func writeMetaBlock(builder *strings.Builder, snap airplane.Snapshot) {
 	builder.WriteString("\n")
-	fmt.Fprintf(builder, "[::b]Last seen[::-]  %.0fs ago ([gray]%s[white])\n",
+	fmt.Fprintf(builder, "[::b]Last seen[::-]  %.0fs ago ("+DimTag+"%s"+ResetTag+")\n",
 		time.Since(snap.LastUpdate.UTC()).Seconds(),
 		snap.LastUpdate.UTC().Format(time.TimeOnly),
 	)

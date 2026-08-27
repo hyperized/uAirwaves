@@ -779,15 +779,38 @@ func drawCircle(screen tcell.Screen, cx, cy, rx, ry int, style tcell.Style) {
 	}
 }
 
+// Scope palette.
+//
+// Every entry clears WCAG 4.5:1 against both a black and a slate terminal
+// background, which the tcell named colours mostly did not: DarkBlue sat at
+// 1.5:1, Purple at 1.1:1 and Green at 2.0:1. FL300-400 is where most cruise
+// traffic lives, so the old DarkBlue made the busiest band the least legible
+// thing on the scope. Hexes rather than names because a terminal palette can
+// remap "green" to anything it likes. TestPaletteContrast pins the ratios.
+var (
+	colorAltBelowFL050 = tcell.NewHexColor(0xFFFFFF) // white
+	colorAltBelowFL100 = tcell.NewHexColor(0xFFFF00) // yellow
+	colorAltBelowFL200 = tcell.NewHexColor(0xADFF2F) // green-yellow
+	colorAltBelowFL300 = tcell.NewHexColor(0x00FFFF) // aqua
+	colorAltBelowFL400 = tcell.NewHexColor(0x87CEFA) // light sky blue
+	colorAltBelowFL500 = tcell.NewHexColor(0xE9A6F0) // orchid
+	colorAltBelowFL600 = tcell.NewHexColor(0xFFA07A) // light salmon
+	colorAltAboveFL600 = tcell.NewHexColor(0xFFFFFF) // white
+
+	colorClimbing   = tcell.NewHexColor(0x90EE90) // light green
+	colorDescending = tcell.NewHexColor(0xFFA0A0) // light red
+	colorLevel      = tcell.NewHexColor(0xADD8E6) // light blue
+)
+
 // getVerticalRateColor returns a color based on vertical rate in fpm.
 func getVerticalRateColor(vertRate float64) tcell.Color {
 	switch {
 	case vertRate > fastVerticalRate:
-		return tcell.ColorGreen
+		return colorClimbing
 	case vertRate < -fastVerticalRate:
-		return tcell.ColorRed
+		return colorDescending
 	default:
-		return tcell.ColorLightBlue
+		return colorLevel
 	}
 }
 
@@ -816,20 +839,20 @@ func altitudeToFL(altitude float64) string {
 func getFlightLevelColor(altitude float64) tcell.Color {
 	switch {
 	case altitude < flightLevelSub5:
-		return tcell.ColorWhite
+		return colorAltBelowFL050
 	case altitude < flightLevelSub100:
-		return tcell.ColorYellow
+		return colorAltBelowFL100
 	case altitude < flightLevelSub200:
-		return tcell.ColorGreen
+		return colorAltBelowFL200
 	case altitude < flightLevelSub300:
-		return tcell.ColorLightBlue
+		return colorAltBelowFL300
 	case altitude < flightLevelSub400:
-		return tcell.ColorDarkBlue
+		return colorAltBelowFL400
 	case altitude < flightLevelSub500:
-		return tcell.ColorPurple
+		return colorAltBelowFL500
 	case altitude < flightLevelSub600:
-		return tcell.ColorRed
+		return colorAltBelowFL600
 	default:
-		return tcell.ColorWhite
+		return colorAltAboveFL600
 	}
 }

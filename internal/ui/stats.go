@@ -140,45 +140,45 @@ type StatsRender struct {
 func FormatStatsText(render StatsRender) string {
 	nearest := "—"
 	if render.Positioned > 0 {
-		nearest = fmt.Sprintf("%.1f nm  [gray]%s[white]", render.NearestDist, render.NearestCallsign)
+		nearest = fmt.Sprintf("%.1f nm  "+DimTag+"%s"+ResetTag, render.NearestDist, render.NearestCallsign)
 	}
 
 	farthest := "—"
 	if render.Positioned > 0 {
-		farthest = fmt.Sprintf("%.1f nm  [gray]%s[white]", render.FarthestDist, render.FarthestCallsign)
+		farthest = fmt.Sprintf("%.1f nm  "+DimTag+"%s"+ResetTag, render.FarthestDist, render.FarthestCallsign)
 	}
 
 	if render.FarthestRecordDist > 0 && render.FarthestRecordCallsign != "" {
 		farthest += fmt.Sprintf(
-			"  [gray](%.1f nm %s)[white]",
+			"  "+DimTag+"(%.1f nm %s)"+ResetTag,
 			render.FarthestRecordDist, render.FarthestRecordCallsign,
 		)
 	}
 
 	highest := "—"
 	if render.HighestAlt > 0 {
-		highest = fmt.Sprintf("%.0f ft  [gray]%s[white]", render.HighestAlt, render.HighestCallsign)
+		highest = fmt.Sprintf("%.0f ft  "+DimTag+"%s"+ResetTag, render.HighestAlt, render.HighestCallsign)
 	}
 
 	if render.HighestRecordAlt > 0 && render.HighestRecordCallsign != "" {
 		highest += fmt.Sprintf(
-			"  [gray](%.0f ft %s)[white]",
+			"  "+DimTag+"(%.0f ft %s)"+ResetTag,
 			render.HighestRecordAlt, render.HighestRecordCallsign,
 		)
 	}
 
 	framesLine := fmt.Sprintf("%.1f", render.FramesPerSec)
 	if render.FramesPerSecRecord > 0 {
-		framesLine += fmt.Sprintf("  [gray](peak %.1f)[white]", render.FramesPerSecRecord)
+		framesLine += fmt.Sprintf("  "+DimTag+"(peak %.1f)"+ResetTag, render.FramesPerSecRecord)
 	}
 
 	return fmt.Sprintf(
-		"[::b]Tracked[::-]    %d  ([gray]%d positioned[white])\n"+
+		"[::b]Tracked[::-]    %d  ("+DimTag+"%d positioned"+ResetTag+")\n"+
 			"[::b]Nearest[::-]    %s\n"+
 			"[::b]Farthest[::-]   %s\n"+
 			"[::b]Highest[::-]    %s\n"+
 			"[::b]Frames/s[::-]   %s\n"+
-			"[::b]Total[::-]      %d  ([gray]IDs %d/%d[white])",
+			"[::b]Total[::-]      %d  ("+DimTag+"IDs %d/%d"+ResetTag+")",
 		render.Tracked, render.Positioned,
 		nearest,
 		farthest,

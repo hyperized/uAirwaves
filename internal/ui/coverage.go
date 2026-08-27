@@ -241,12 +241,12 @@ func writeRulerLabel(ruler []rune, col int, label string) {
 // occurred at, or a dash when nothing has been observed.
 func coneCaption(snap coverage.Snapshot) string {
 	if snap.MaxRangeNm <= 0 {
-		return "[gray]max — nm[white]"
+		return DimTag + "max — nm" + ResetTag
 	}
 
 	flightLevel := int(snap.MaxRangeAltFt / flightLevelDivisor)
 
-	return fmt.Sprintf("[gray]max %.0f nm @ FL%03d[white]", snap.MaxRangeNm, flightLevel)
+	return fmt.Sprintf(DimTag+"max %.0f nm @ FL%03d"+ResetTag, snap.MaxRangeNm, flightLevel)
 }
 
 // FormatCoverageShadows renders the top-down shadow silhouette: the receiver
@@ -378,10 +378,10 @@ func shadowLines(grid [][]rune, maxRange float64, height int) string {
 // coverage has been recorded.
 func shadowCaption(maxRange float64) string {
 	if maxRange <= 0 {
-		return "[gray]no coverage yet[white]"
+		return DimTag + "no coverage yet" + ResetTag
 	}
 
-	return fmt.Sprintf("[gray]edge %.0f nm[white]", maxRange)
+	return fmt.Sprintf(DimTag+"edge %.0f nm"+ResetTag, maxRange)
 }
 
 // clampInt bounds value into [low, high].
