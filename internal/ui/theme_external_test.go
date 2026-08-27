@@ -1,6 +1,7 @@
 package ui_test
 
 import (
+	"log/slog"
 	"math"
 	"strconv"
 	"strings"
@@ -133,4 +134,98 @@ func TestPanelTextContrast(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestNotificationContrast is the one that would have caught the original bug:
+// the bar varied its background per severity but kept a fixed white text, and
+// white on ColorYellow is 1.07:1. A warning was the least readable thing in the
+// interface, which is precisely backwards.
+func TestNotificationContrast(t *testing.T) {
+	t.Parallel()
+
+	levels := map[string]slog.Level{
+		"error":   slog.LevelError,
+		"warning": slog.LevelWarn,
+		"info":    slog.LevelInfo,
+		"debug":   slog.LevelDebug,
+	}
+
+	for name, level := range levels {
+		background, text := ui.NotificationColors(level)
+
+		ratio := themeContrast(background.Hex(), text.Hex())
+		if ratio < themeMinContrast {
+			t.Errorf("notification %s: #%06X on #%06X is %.2f:1, want at least %.1f:1",
+				name, text.Hex(), background.Hex(), ratio, themeMinContrast)
+		}
+	}
+}
+
+// TestNotificationBarsAreDistinguishable guards the other half: four bars that
+// all read well but look alike would make severity invisible. They are
+// separated by hue rather than luminance, so compare in Lab.
+func TestNotificationBarsAreDistinguishable(t *testing.T) {
+	t.Parallel()
+
+	const minDeltaE = 25.0
+
+	bars := []struct {
+		name  string
+		level slog.Level
+	}{
+		{"error", slog.LevelError},
+		{"warning", slog.LevelWarn},
+		{"info", slog.LevelInfo},
+		{"debug", slog.LevelDebug},
+	}
+
+	for i := range len(bars) {
+		for j := i + 1; j < len(bars); j++ {
+			first, _ := ui.NotificationColors(bars[i].level)
+			second, _ := ui.NotificationColors(bars[j].level)
+
+			if d := themeDeltaE(first.Hex(), second.Hex()); d < minDeltaE {
+				t.Errorf("%s and %s bars differ by only dE %.1f, want at least %.1f",
+					bars[i].name, bars[j].name, d, minDeltaE)
+			}
+		}
+	}
+}
+
+// themeDeltaE is CIE76, adequate for catching two bars a person would read as
+// the same colour.
+func themeDeltaE(a, b int32) float64 {
+	l1, a1, b1 := themeLab(a)
+	l2, a2, b2 := themeLab(b)
+
+	return math.Sqrt((l1-l2)*(l1-l2) + (a1-a2)*(a1-a2) + (b1-b2)*(b1-b2))
+}
+
+func themeLab(hex int32) (lightness, aAxis, bAxis float64) {
+	channel := func(shift uint) float64 {
+		v := float64((hex>>shift)&0xFF) / 255
+		if v <= 0.04045 {
+			return v / 12.92
+		}
+
+		return math.Pow((v+0.055)/1.055, 2.4)
+	}
+
+	red, green, blue := channel(16), channel(8), channel(0)
+
+	x := (0.4124*red + 0.3576*green + 0.1805*blue) / 0.95047
+	y := 0.2126*red + 0.7152*green + 0.0722*blue
+	z := (0.0193*red + 0.1192*green + 0.9505*blue) / 1.08883
+
+	f := func(t float64) float64 {
+		if t > 0.008856 {
+			return math.Cbrt(t)
+		}
+
+		return 7.787*t + 16.0/116.0
+	}
+
+	fx, fy, fz := f(x), f(y), f(z)
+
+	return 116*fy - 16, 500 * (fx - fy), 200 * (fy - fz)
 }

@@ -376,19 +376,21 @@ func TestRenderNotificationBarMoreWithoutDropped(t *testing.T) {
 }
 
 // TestRenderNotificationBarSeverityColour covers every branch of
-// notificationBackground via the public render path.
+// notificationColors via the public render path. It asserts the text colour
+// as well as the background: the bar used to vary only the background and
+// leave the text fixed white, which put warnings at 1.07:1.
 func TestRenderNotificationBarSeverityColour(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name  string
-		level slog.Level
-		want  tcell.Color
+		name             string
+		level            slog.Level
+		wantBG, wantText tcell.Color
 	}{
-		{"error red", slog.LevelError, tcell.ColorRed},
-		{"warn yellow", slog.LevelWarn, tcell.ColorYellow},
-		{"info blue", slog.LevelInfo, tcell.ColorBlue},
-		{"below info grey", slog.LevelDebug, tcell.ColorGrey},
+		{"error", slog.LevelError, ui.ColorNotifyErrorBackground, ui.ColorNotifyErrorText},
+		{"warn", slog.LevelWarn, ui.ColorNotifyWarningBackground, ui.ColorNotifyWarningText},
+		{"info", slog.LevelInfo, ui.ColorNotifyInfoBackground, ui.ColorNotifyInfoText},
+		{"below info", slog.LevelDebug, ui.ColorNotifyDebugBackground, ui.ColorNotifyDebugText},
 	}
 
 	for _, testCase := range tests {
@@ -401,8 +403,16 @@ func TestRenderNotificationBarSeverityColour(t *testing.T) {
 			grid, parent, bar := newBarWidgets(t)
 			ui.RenderNotificationBar(grid, parent, bar, notifs)
 
-			if got := bar.GetBackgroundColor(); got != testCase.want {
-				t.Errorf("background = %v, want %v", got, testCase.want)
+			if got := bar.GetBackgroundColor(); got != testCase.wantBG {
+				t.Errorf("background = %v, want %v", got, testCase.wantBG)
+			}
+
+			// The text half has no getter on tview.TextView, so assert the
+			// mapping directly rather than leaving it uncovered.
+			gotBG, gotText := ui.NotificationColors(testCase.level)
+			if gotBG != testCase.wantBG || gotText != testCase.wantText {
+				t.Errorf("NotificationColors(%v) = (%v, %v), want (%v, %v)",
+					testCase.level, gotBG, gotText, testCase.wantBG, testCase.wantText)
 			}
 		})
 	}

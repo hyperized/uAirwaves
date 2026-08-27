@@ -41,12 +41,13 @@ func TestUpdateHeaderColorBatteryThresholds(t *testing.T) {
 		name       string
 		percentage int8
 		wantBG     tcell.Color
+		wantText   tcell.Color
 	}{
-		{name: "red at exact threshold", percentage: ui.BatteryWarningRed, wantBG: ui.ColorHeaderCriticalBackground},
-		{name: "red below threshold", percentage: 5, wantBG: ui.ColorHeaderCriticalBackground},
-		{name: "orange at exact threshold", percentage: ui.BatteryWarningOrange, wantBG: ui.ColorHeaderWarningBackground},
-		{name: "orange between red and orange", percentage: 30, wantBG: ui.ColorHeaderWarningBackground},
-		{name: "green above orange threshold", percentage: 80, wantBG: ui.ColorHeaderOKBackground},
+		{name: "red at exact threshold", percentage: ui.BatteryWarningRed, wantBG: ui.ColorHeaderCriticalBackground, wantText: ui.ColorHeaderCriticalText},
+		{name: "red below threshold", percentage: 5, wantBG: ui.ColorHeaderCriticalBackground, wantText: ui.ColorHeaderCriticalText},
+		{name: "orange at exact threshold", percentage: ui.BatteryWarningOrange, wantBG: ui.ColorHeaderWarningBackground, wantText: ui.ColorHeaderWarningText},
+		{name: "orange between red and orange", percentage: 30, wantBG: ui.ColorHeaderWarningBackground, wantText: ui.ColorHeaderWarningText},
+		{name: "green above orange threshold", percentage: 80, wantBG: ui.ColorHeaderOKBackground, wantText: ui.ColorHeaderOKText},
 	}
 
 	for _, testCase := range tests {
@@ -64,6 +65,19 @@ func TestUpdateHeaderColorBatteryThresholds(t *testing.T) {
 
 			if got := statusBar.GetBackgroundColor(); got != testCase.wantBG {
 				t.Errorf("statusBar BG = %v, want %v", got, testCase.wantBG)
+			}
+
+			// tview.TextView exposes no GetTextColor, so the text half of the
+			// pair was never covered — and it was the half that was wrong.
+			gotBG, gotText := ui.HeaderColors(testCase.percentage)
+			if gotBG != testCase.wantBG {
+				t.Errorf("HeaderColors(%d) background = %v, want %v",
+					testCase.percentage, gotBG, testCase.wantBG)
+			}
+
+			if gotText != testCase.wantText {
+				t.Errorf("HeaderColors(%d) text = %v, want %v",
+					testCase.percentage, gotText, testCase.wantText)
 			}
 		})
 	}

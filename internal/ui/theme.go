@@ -62,3 +62,26 @@ const (
 	// DisconnectedTag opens the disconnected state dot.
 	DisconnectedTag = "[#ffc4c4]"
 )
+
+// Notification bar.
+//
+// This had the same structural fault as the header, but worse: the bar set a
+// background per severity and a single fixed white text colour for all of
+// them. White on ColorYellow is 1.07:1, so a warning — the notification most
+// worth reading — was the least readable thing on screen. There is no single
+// text colour that works across red, yellow, blue and grey, so severity now
+// carries a pair.
+//
+// Error and warning deliberately match the header bar: same meaning, same
+// colour. The bars are separated by hue rather than luminance, and kept at
+// least dE 25 apart so they stay tellable at a glance.
+var (
+	ColorNotifyErrorBackground   = tcell.NewHexColor(0x8B1A1A)
+	ColorNotifyErrorText         = tcell.NewHexColor(0xFFE5E5)
+	ColorNotifyWarningBackground = tcell.NewHexColor(0x7A4A00)
+	ColorNotifyWarningText       = tcell.NewHexColor(0xFFF1D6)
+	ColorNotifyInfoBackground    = tcell.NewHexColor(0x0F3D7A)
+	ColorNotifyInfoText          = tcell.NewHexColor(0xE3F0FF)
+	ColorNotifyDebugBackground   = tcell.NewHexColor(0x33383F)
+	ColorNotifyDebugText         = tcell.NewHexColor(0xD5DAE1)
+)

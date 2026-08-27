@@ -33,7 +33,7 @@ const (
 // Pulled out of main.go so it can be table-driven tested with
 // fake tview TextViews — no harness required.
 func UpdateHeaderColor(percentage int8, clock, statusBar *tview.TextView) {
-	headerColor, textColor := headerColors(percentage)
+	headerColor, textColor := HeaderColors(percentage)
 
 	clock.SetBackgroundColor(headerColor)
 	clock.SetTextColor(textColor)
@@ -41,13 +41,13 @@ func UpdateHeaderColor(percentage int8, clock, statusBar *tview.TextView) {
 	statusBar.SetTextColor(textColor)
 }
 
-// headerColors picks the (background, text) pair for a given
-// battery percentage. Pure function, exported through
-// UpdateHeaderColor — keeps the colour-decision logic isolated
-// for table-driven tests.
+// HeaderColors picks the (background, text) pair for a given battery
+// percentage. Exported as a pure function because tview.TextView has no
+// GetTextColor, so going through UpdateHeaderColor can only ever verify half
+// the pair — and the half it could not see was the broken one.
 //
 //nolint:nonamedreturns // (header, text) reads clearer named at this signature.
-func headerColors(percentage int8) (header, text tcell.Color) {
+func HeaderColors(percentage int8) (header, text tcell.Color) {
 	switch {
 	case percentage <= BatteryWarningRed:
 		return ColorHeaderCriticalBackground, ColorHeaderCriticalText

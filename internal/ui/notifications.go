@@ -256,22 +256,28 @@ func RenderNotificationBar(
 
 	grid.SetRows(1, 0, 2) //nolint:mnd // footer (1) + notification (1) = 2 rows in the bottom section.
 	parent.ResizeItem(bar, 1, 0)
-	bar.SetBackgroundColor(notificationBackground(front.Level))
+	background, text := NotificationColors(front.Level)
+	bar.SetBackgroundColor(background)
+	bar.SetTextColor(text)
 	bar.SetText(formatNotification(front, notifs.Len(), notifs.droppedCount()))
 }
 
-// notificationBackground maps a slog level to the tcell colour
-// the bar paints behind the text.
-func notificationBackground(level slog.Level) tcell.Color {
+// NotificationColors maps a slog level to the (background, text) pair the bar
+// paints. A pair rather than just a background: the previous code varied the
+// background per severity while leaving the text fixed white, and white on
+// yellow is 1.07:1 — warnings were unreadable.
+//
+//nolint:nonamedreturns // (background, text) reads clearer named at this signature.
+func NotificationColors(level slog.Level) (background, text tcell.Color) {
 	switch {
 	case level >= slog.LevelError:
-		return tcell.ColorRed
+		return ColorNotifyErrorBackground, ColorNotifyErrorText
 	case level >= slog.LevelWarn:
-		return tcell.ColorYellow
+		return ColorNotifyWarningBackground, ColorNotifyWarningText
 	case level >= slog.LevelInfo:
-		return tcell.ColorBlue
+		return ColorNotifyInfoBackground, ColorNotifyInfoText
 	default:
-		return tcell.ColorGrey
+		return ColorNotifyDebugBackground, ColorNotifyDebugText
 	}
 }
 

@@ -519,7 +519,9 @@ func configureFlightDetailsPanel(
 // hidden state (height=0) doesn't leak a colour stripe.
 func configureNotificationBar() *tview.TextView {
 	bar := tview.NewTextView().SetDynamicColors(true).SetTextAlign(tview.AlignLeft)
-	bar.SetTextColor(tcell.ColorWhite)
+	// Starting value only; RenderNotificationBar sets the pair that matches
+	// whichever severity is currently showing.
+	bar.SetTextColor(ui.ColorNotifyInfoText)
 
 	return bar
 }
