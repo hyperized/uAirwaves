@@ -38,11 +38,14 @@ func (m *mockSession) Close() error {
 	return m.closeErr
 }
 
-func (m *mockSession) getFilter(f string) (gpsd.Filter, bool) {
+// tpvFilter returns the TPV filter the session under test registered.
+// The mock only ever carries that one filter, so the report type is
+// fixed rather than a parameter.
+func (m *mockSession) tpvFilter() (gpsd.Filter, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	filter, found := m.filters[f]
+	filter, found := m.filters["TPV"]
 
 	return filter, found
 }
@@ -128,7 +131,7 @@ func testSuccessfulWatch(t *testing.T) {
 		// Give it a moment to connect and add filters
 		time.Sleep(10 * time.Millisecond)
 
-		if filter, found := session.getFilter("TPV"); found {
+		if filter, found := session.tpvFilter(); found {
 			filter(&gpsd.TPVReport{
 				Mode: 3,
 				Lat:  52.5,
@@ -379,7 +382,7 @@ func testInvalidReportType(t *testing.T) {
 
 		time.Sleep(10 * time.Millisecond)
 
-		if filter, found := session.getFilter("TPV"); found {
+		if filter, found := session.tpvFilter(); found {
 			filter("not a TPV report") // Should not panic
 		}
 	})
@@ -660,5 +663,227 @@ func TestWaitForSessionTPVKeepsAlive(t *testing.T) {
 	err := waitForSession(ctx, done, &lastTPV, tick, timeout)
 	if err != nil {
 		t.Errorf("watchdog should stay quiet while TPVs arrive, got %v", err)
+	}
+}
+
+// TestReconnectLoggerDeduplicates pins the notification-bar fix: a
+// gpsd that is simply absent fails the same way on every attempt, so
+// only the first failure is worth a Warn. Repeats must fold into the
+// running Debug counter, a different failure must reset it, and a
+// cycle that carried TPV data must make the next failure count as
+// news again. Log output itself is not asserted (that would mean
+// swapping the process-global slog default while other tests in this
+// package log from Watch goroutines); the state the branches drive is.
+func TestReconnectLoggerDeduplicates(t *testing.T) {
+	t.Parallel()
+
+	const delay = time.Second
+
+	logger := &reconnectLogger{}
+
+	logger.report(errDial, delay)
+
+	if !logger.warned || logger.repeats != 0 {
+		t.Fatalf("first failure: warned=%v repeats=%d, want true/0", logger.warned, logger.repeats)
+	}
+
+	logger.report(errDial, delay)
+	logger.report(errDial, delay)
+
+	if logger.repeats != 2 {
+		t.Errorf("two identical repeats: repeats=%d, want 2", logger.repeats)
+	}
+
+	// A different failure is news: it warns and restarts the count.
+	logger.report(errTPVTimeout, delay)
+
+	if logger.repeats != 0 || logger.last != errTPVTimeout.Error() {
+		t.Errorf("changed failure: repeats=%d last=%q, want 0/%q",
+			logger.repeats, logger.last, errTPVTimeout.Error())
+	}
+
+	logger.report(errTPVTimeout, delay)
+
+	if logger.repeats != 1 {
+		t.Errorf("repeat of the new failure: repeats=%d, want 1", logger.repeats)
+	}
+
+	// gpsd delivered TPV during the cycle, so the identical error
+	// that ended it is a fresh event, not a continuation.
+	logger.delivered()
+	logger.report(errTPVTimeout, delay)
+
+	if logger.repeats != 0 || !logger.warned {
+		t.Errorf("failure after delivery: repeats=%d warned=%v, want 0/true", logger.repeats, logger.warned)
+	}
+}
+
+// TestWatchOnceReportsDelivery covers the signal Watch's de-duplication
+// hangs on: whether the cycle heard a TPV report before it ended.
+func TestWatchOnceReportsDelivery(t *testing.T) {
+	t.Parallel()
+
+	t.Run("failed dial delivers nothing", func(t *testing.T) {
+		t.Parallel()
+
+		gpsInstance := New(func(gps *GPS) {
+			gps.dial = func(_ string) (Session, error) {
+				return nil, errDialFailed
+			}
+		})
+
+		delivered, err := gpsInstance.watchOnce(t.Context(), location.New())
+		if delivered {
+			t.Error("delivered = true on a failed dial")
+		}
+
+		if !errors.Is(err, errDial) {
+			t.Errorf("err = %v, want errDial", err)
+		}
+	})
+
+	t.Run("hangup before any TPV", func(t *testing.T) {
+		t.Parallel()
+
+		delivered, err := runWatchOnceThenHangUp(t)
+		if delivered {
+			t.Error("delivered = true without a single TPV report")
+		}
+
+		if !errors.Is(err, errSessionClosed) {
+			t.Errorf("err = %v, want errSessionClosed", err)
+		}
+	})
+
+	t.Run("hangup after a TPV", func(t *testing.T) {
+		t.Parallel()
+
+		delivered, err := runWatchOnceThenHangUp(t, &gpsd.TPVReport{Mode: 3, Lat: 52.5, Lon: 13.4})
+		if !delivered {
+			t.Error("delivered = false after a TPV report arrived")
+		}
+
+		if !errors.Is(err, errSessionClosed) {
+			t.Errorf("err = %v, want errSessionClosed", err)
+		}
+	})
+}
+
+// runWatchOnceThenHangUp drives one watchOnce cycle against a mock
+// session, pushing the given reports through the registered filter
+// first, then hangs the session up and returns what watchOnce reported.
+func runWatchOnceThenHangUp(t *testing.T, reports ...*gpsd.TPVReport) (bool, error) {
+	t.Helper()
+
+	session := &mockSession{
+		filters: make(map[string]gpsd.Filter),
+		done:    make(chan bool),
+	}
+
+	gpsInstance := New(func(gps *GPS) {
+		gps.dial = func(_ string) (Session, error) {
+			return session, nil
+		}
+	})
+
+	type outcome struct {
+		delivered bool
+		err       error
+	}
+
+	results := make(chan outcome, 1)
+
+	go func() {
+		delivered, err := gpsInstance.watchOnce(t.Context(), location.New())
+		results <- outcome{delivered: delivered, err: err}
+	}()
+
+	waitFor(t, func() bool {
+		_, found := session.tpvFilter()
+
+		return found
+	})
+
+	filter, _ := session.tpvFilter()
+	for _, report := range reports {
+		filter(report)
+	}
+
+	close(session.done)
+
+	select {
+	case got := <-results:
+		return got.delivered, got.err
+	case <-time.After(2 * time.Second): //nolint:mnd // would-fail-anyway deadline; returns in microseconds in practice.
+		t.Fatal("watchOnce did not return after the session hung up")
+
+		return false, nil
+	}
+}
+
+// TestWatchClearsDedupAfterDeliveredSession drives Watch's
+// delivered-cycle arm: a session that carried a TPV report before the
+// server hung up must clear the reconnect logger's de-duplication
+// state, so the failure that ended it is warned about rather than
+// folded into the previous outage's repeat count. Observable effect is
+// the redial; the state itself is covered by
+// TestReconnectLoggerDeduplicates.
+func TestWatchClearsDedupAfterDeliveredSession(t *testing.T) {
+	t.Parallel()
+
+	first := &mockSession{filters: make(map[string]gpsd.Filter), done: make(chan bool)}
+	second := &mockSession{filters: make(map[string]gpsd.Filter), done: make(chan bool)}
+
+	var (
+		dialMu    sync.Mutex
+		dialCount int
+	)
+
+	gpsInstance := New(
+		WithReconnect(true),
+		func(gps *GPS) {
+			gps.dial = func(_ string) (Session, error) {
+				dialMu.Lock()
+				defer dialMu.Unlock()
+
+				dialCount++
+				if dialCount == 1 {
+					return first, nil
+				}
+
+				return second, nil
+			}
+		},
+	)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- gpsInstance.Watch(ctx, location.New())
+	}()
+
+	waitFor(t, func() bool {
+		_, found := first.tpvFilter()
+
+		return found
+	})
+
+	filter, _ := first.tpvFilter()
+	filter(&gpsd.TPVReport{Mode: 3, Lat: 52.5, Lon: 13.4})
+	close(first.done)
+
+	// The backoff base is 1s, so allow a few seconds for the redial.
+	waitForUpTo(t, 3*time.Second, func() bool {
+		dialMu.Lock()
+		defer dialMu.Unlock()
+
+		return dialCount >= 2
+	})
+
+	cancel()
+
+	if err := <-errCh; err != nil {
+		t.Errorf("ctx-cancelled Watch should return nil, got %v", err)
 	}
 }

@@ -38,7 +38,7 @@ No dongle on this machine? Point it at a remote [demod1090](https://github.com/h
 A few things worth knowing on the first run:
 
 - Without a GPS receiver the header starts out reading `no fix`. After a few minutes of decoded traffic uAirwaves estimates its own location from the planes it hears, and the header switches to something like `EST lat 52.31, lon 4.92 (inferred ±22 nm)`. The `EST` marker means estimated: good enough to sort planes by distance, not precise coordinates. A real GPS fix takes over the moment one arrives.
-- If the dongle is unplugged mid-session, the app keeps running and reconnects when it comes back. Same for the remote feed and gpsd.
+- If the dongle is unplugged mid-session, the app keeps running and reconnects when it comes back. Same for the remote feed and gpsd; if one of them stays down you get a single warning about it rather than one per retry.
 - Reception weak? Try `--auto-sweep` to let it find the best gain settings, and `--bias-t` if you have a mast-mounted amplifier that takes power over the coax.
 
 ### Deploying to a uConsole

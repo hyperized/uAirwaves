@@ -139,6 +139,10 @@ const (
 	// so the timeout fires within ~1 s of the gap exceeding the
 	// threshold.
 	tpvWatchdogTick = 1 * time.Second
+	// noTPVYet is the prevMode sentinel for "no TPV report has
+	// arrived in this watch cycle". Real gpsd modes start at 0,
+	// so a negative value cannot collide with one.
+	noTPVYet int32 = -1
 )
 
 // Watch starts the GPS monitoring process.
@@ -147,11 +151,17 @@ const (
 // the case where the connection is silently stalled (errTPVTimeout).
 // Without those distinctions, a remote disconnect looked identical to ctx
 // cancellation and the outer loop exited silently.
+//
+// Repeated failures go through a reconnectLogger, so a machine with no
+// gpsd reports the problem once instead of once per backoff window.
 func (g *GPS) Watch(ctx context.Context, myLocation *location.Location) error {
-	backoff := reconnectBaseDelay
+	var (
+		backoff  = reconnectBaseDelay
+		failures reconnectLogger
+	)
 
 	for {
-		err := g.watchOnce(ctx, myLocation)
+		delivered, err := g.watchOnce(ctx, myLocation)
 		if err == nil {
 			return nil
 		}
@@ -160,7 +170,11 @@ func (g *GPS) Watch(ctx context.Context, myLocation *location.Location) error {
 			return err
 		}
 
-		slog.Warn("GPS watch error, reconnecting", slog.Any("error", err), slog.Duration("delay", backoff))
+		if delivered {
+			failures.delivered()
+		}
+
+		failures.report(err, backoff)
 
 		select {
 		case <-ctx.Done():
@@ -171,9 +185,56 @@ func (g *GPS) Watch(ctx context.Context, myLocation *location.Location) error {
 	}
 }
 
-func (g *GPS) watchOnce(ctx context.Context, myLocation *location.Location) error {
+// reconnectLogger holds Watch's reconnect warnings down to the ones that
+// tell the operator something new. A missing gpsd fails the same way on
+// every attempt, and in TUI mode each Warn queues another notification to
+// dismiss, all of it repeating what the header already says (position
+// switched to the inferred self-locate estimate). So the first failure of
+// a kind warns, identical repeats drop to a counted Debug line, and only
+// a cycle that carried TPV data lets the next failure warn again.
+//
+// Owned by the single Watch loop; not safe for concurrent use.
+type reconnectLogger struct {
+	last    string
+	repeats int
+	warned  bool
+}
+
+// delivered clears the de-duplication state after a watch cycle that saw
+// at least one TPV report: gpsd was alive, so whatever broke afterwards
+// is a new problem rather than the old one repeating.
+func (r *reconnectLogger) delivered() {
+	r.warned = false
+}
+
+// report logs one failed watch cycle: a Warn for a failure that has not
+// been reported yet, a counted Debug line while the same one repeats.
+func (r *reconnectLogger) report(err error, delay time.Duration) {
+	if r.warned && err.Error() == r.last {
+		r.repeats++
+
+		slog.Debug("GPS still unavailable, reconnecting",
+			slog.Any("error", err),
+			slog.Int("repeats", r.repeats),
+			slog.Duration("delay", delay),
+		)
+
+		return
+	}
+
+	slog.Warn("GPS watch error, reconnecting", slog.Any("error", err), slog.Duration("delay", delay))
+
+	r.last = err.Error()
+	r.repeats = 0
+	r.warned = true
+}
+
+// watchOnce runs one connect-and-watch cycle. It reports whether gpsd
+// delivered at least one TPV report during the cycle, which is how Watch
+// tells a fresh failure from a repeat of one it already reported.
+func (g *GPS) watchOnce(ctx context.Context, myLocation *location.Location) (bool, error) {
 	if err := g.connect(); err != nil {
-		return err
+		return false, err
 	}
 
 	defer g.disconnect()
@@ -189,15 +250,19 @@ func (g *GPS) watchOnce(ctx context.Context, myLocation *location.Location) erro
 	// emit a one-shot info-level log on every transition —
 	// "GPS mode change from=1 to=3" tells the operator the
 	// receiver acquired a fix even if the rest of the UI is
-	// idle. -1 marks the pre-first-TPV sentinel.
+	// idle. noTPVYet marks the pre-first-TPV sentinel.
 	var prevMode atomic.Int32
-	prevMode.Store(-1)
+	prevMode.Store(noTPVYet)
 
 	g.session.AddFilter("TPV", buildTPVHandler(myLocation, &lastTPV, &prevMode, g.onFix))
 
 	done := g.session.Watch()
 
-	return waitForSession(ctx, done, &lastTPV, tpvWatchdogTick, tpvTimeout)
+	err := waitForSession(ctx, done, &lastTPV, tpvWatchdogTick, tpvTimeout)
+
+	// prevMode leaves the noTPVYet sentinel behind on the first report,
+	// so it doubles as "did this cycle hear anything at all".
+	return prevMode.Load() != noTPVYet, err
 }
 
 // buildTPVHandler returns the gpsd Filter callback bound to the
@@ -216,7 +281,7 @@ func buildTPVHandler(
 		lastTPV.Store(time.Now().UnixNano())
 
 		newMode := int32(tpvReport.Mode)
-		if oldMode := prevMode.Swap(newMode); oldMode != newMode && oldMode != -1 {
+		if oldMode := prevMode.Swap(newMode); oldMode != newMode && oldMode != noTPVYet {
 			slog.Info("GPS mode change",
 				slog.Int("from", int(oldMode)),
 				slog.Int("to", int(newMode)),
