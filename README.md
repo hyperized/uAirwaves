@@ -203,7 +203,7 @@ github.com/hyperized/demod1090/demod        │            (same demod chain as 
 
 A few pieces deserve a word:
 
-**Self-locate.** Every aircraft position broadcast also tells you something about where *you* are: if you can hear a plane, you must be within its radio horizon, a circle whose size follows from the plane's altitude. Intersect enough of those circles and your own position falls out, typically within 5 to 30 nm after a few minutes of moderate traffic. That is enough to bootstrap position decoding and distance sorting on a device with no GPS and no internet, in the middle of a field. The estimate is clearly marked in the header and steps aside as soon as gpsd delivers a real fix.
+**Self-locate.** Every aircraft position broadcast also tells you something about where *you* are: if you can hear a plane, you must be within its radio horizon, a circle whose size follows from the plane's altitude and your own antenna height. Intersect enough of those circles and your own position falls out, typically within 5 to 30 nm after a few minutes of moderate traffic. Traffic on the ground is left out and every circle carries a margin, because a circle drawn too small excludes the receiver and drags the answer towards the aircraft instead. That is enough to bootstrap position decoding and distance sorting on a device with no GPS and no internet, in the middle of a field. The estimate is clearly marked in the header and steps aside as soon as gpsd delivers a real fix.
 
 **Phantom suppression.** Some Mode S frame types carry no verifiable checksum, and random noise can decode into plausible-looking aircraft. Those frames only count once the same aircraft has been seen in a properly CRC-verified frame, which keeps the plane list at real-airspace size.
 

@@ -6,9 +6,18 @@
 // constrains the receiver to lie within the aircraft's radio
 // horizon. The receiver itself must therefore live inside the
 // intersection of every such constraint circle; with enough
-// observations — particularly low-altitude approach traffic —
-// the intersection shrinks to a small region centred on the
-// receiver.
+// observations, particularly low-altitude approach traffic, the
+// intersection shrinks to a small region centred on the receiver.
+//
+// The horizon is the 4/3-earth one, computed from both ends of
+// the link (aircraft altitude and receiver antenna height) and
+// widened by a fixed margin, because a circle that is too tight
+// is not a conservative error: it excludes the true receiver
+// position and the search converges on the aircraft instead.
+// Observations below minObservationAltitudeFt are dropped for the
+// same reason. Where the remaining circles still disagree, Fix
+// reports how many of them exclude the estimate and widens the
+// confidence radius to the region that would win without them.
 //
 // The package is GPS-free and internet-free: it consumes the
 // same ADSB stream uAirwaves already decodes for the scope view.
@@ -16,7 +25,7 @@
 // on the uConsole before satellite lock).
 //
 // Locator is the only public type. Construction takes functional
-// options; the algorithm is passive — the caller drives Observe
+// options; the algorithm is passive. The caller drives Observe
 // from the ADSB ingest path and polls Estimate at whatever
 // cadence makes sense for the surrounding application.
 package selflocate
@@ -34,6 +43,34 @@ const (
 	// bonus over the geometric horizon, which is the convention
 	// every ADSB / aviation reference uses.
 	horizonCoefficient = 1.23
+
+	// defaultAntennaHeightFt is the assumed height of the receiver
+	// antenna above ground. The horizon is the sum of both ends of
+	// the link, d_nm = 1.23 * (sqrt(h_aircraft) + sqrt(h_antenna)),
+	// so leaving the antenna out understates every circle; 30 ft of
+	// antenna is worth 6.7 nm on its own. 30 ft spans what this
+	// receiver realistically sits on, a whip on a windowsill up to
+	// a short mast on a house, and erring high is the safe
+	// direction: a circle that is slightly too wide costs a little
+	// confidence, one that is too tight costs correctness.
+	defaultAntennaHeightFt = 30
+
+	// horizonMargin scales every horizon after the formula.
+	// Reception regularly beats the nominal 4/3-earth horizon by a
+	// few percent through ducting and because the aircraft's
+	// antenna sits above the barometric reference its altitude
+	// reports. 15 % of slack keeps an aircraft the receiver
+	// genuinely heard from excluding the receiver's true position.
+	horizonMargin = 1.15
+
+	// minObservationAltitudeFt drops surface and rolling traffic.
+	// An aircraft on a runway reports a near-zero barometric
+	// altitude, giving it a horizon of a few nm, yet receivers
+	// routinely hear it from ten times that distance. Those are the
+	// tightest circles in the set, so initialSearchRegion anchors
+	// on them, and one of them is enough to drag the whole estimate
+	// onto the airport.
+	minObservationAltitudeFt = 300
 
 	// nauticalMilePerDegree is the great-circle distance for one
 	// degree of latitude. The longitude direction needs an
@@ -90,6 +127,20 @@ const (
 	// shrinks between levels. A factor of 10 means each level
 	// zooms in by an order of magnitude.
 	gridSearchShrinkFactor = 10
+
+	// confidenceGridHalfSize is half the linear count of grid
+	// points in the confidence scan (33x33 = 1089 candidates). The
+	// scan spans the whole initial search region, not the refined
+	// box the estimate came from, because the region that satisfies
+	// the constraints is routinely tens of nm wide while the final
+	// grid spans a fraction of a nm. Resolution is deliberately
+	// coarse: the result is an upper bound on the error, not a
+	// precision figure. It costs 1089 * len(obs) distance
+	// calculations per Estimate, about two thirds of the 5.4 ms a
+	// capped 500-observation Estimate takes on an M2 Pro
+	// (BenchmarkEstimate). The uConsole is slower by roughly an
+	// order of magnitude and calls Estimate every 15 s.
+	confidenceGridHalfSize = 16
 )
 
 // observation is a single buffered ADSB position fix plus its
@@ -102,25 +153,40 @@ type observation struct {
 
 // Fix is the estimated receiver position with confidence
 // metadata. ConfidenceRadiusNm is the half-diagonal of the
-// "inside every circle" region's bounding box at the finest grid
-// level — a loose upper bound on how far the estimate could be
-// from the true receiver position.
+// plausible region's bounding box, floored at one grid cell of
+// the search's finest level: a loose upper bound on how far the
+// estimate could be from the true receiver position, never a
+// claim of precision the grid cannot support.
+//
+// Violated counts the observations whose horizon circle does not
+// contain the estimate. Zero means every circle agrees. Anything
+// higher means the constraints are mutually inconsistent, the
+// estimate is a compromise, and ConfidenceRadiusNm has been
+// widened to the region that would win if those circles were
+// dropped. Callers that display a position should surface the
+// doubt rather than hide it.
 type Fix struct {
 	Latitude           float64
 	Longitude          float64
 	ConfidenceRadiusNm float64
 	ObservationCount   int
+	Violated           int
 }
 
 // Locator buffers observed aircraft positions and produces a
 // receiver-location estimate on demand. Zero value is not
 // usable; construct via New. Thread-safe.
+//
+// Only observations is mutex-guarded. The configuration fields
+// are written once in New and read without the lock afterwards,
+// which is why Option applies at construction and nowhere else.
 type Locator struct {
 	mu sync.RWMutex
 
 	maxObservations     int
 	minObservations     int
 	maxAltitudeForReady float64
+	antennaHeightFt     float64
 
 	observations []observation
 }
@@ -164,6 +230,19 @@ func WithMaxAltitudeForReady(altFt float64) Option {
 	}
 }
 
+// WithAntennaHeightFt sets the receiver antenna height above
+// ground in feet, the second term of the horizon formula. Raise
+// it for a rooftop or mast install; the default assumes
+// defaultAntennaHeightFt. Zero is accepted and means a receiver
+// at ground level; negative values are ignored.
+func WithAntennaHeightFt(ft float64) Option {
+	return func(l *Locator) {
+		if ft >= 0 {
+			l.antennaHeightFt = ft
+		}
+	}
+}
+
 // New constructs a Locator with sensible defaults. Options
 // override defaults; unknown or invalid options have no effect.
 func New(opts ...Option) *Locator {
@@ -171,6 +250,7 @@ func New(opts ...Option) *Locator {
 		maxObservations:     defaultMaxObservations,
 		minObservations:     defaultMinObservations,
 		maxAltitudeForReady: defaultMaxAltitudeForReady,
+		antennaHeightFt:     defaultAntennaHeightFt,
 	}
 
 	for _, opt := range opts {
@@ -181,9 +261,10 @@ func New(opts ...Option) *Locator {
 }
 
 // Observe records an aircraft position fix. lat/lon must be a
-// real (non-zero) position and altFt must be > 0 — observations
-// failing these gates are silently dropped so callers can pass
-// raw CPR-decoded values without pre-validation.
+// real (non-zero) position, altFt must be > 0, and altFt must be
+// at or above minObservationAltitudeFt. Observations failing
+// these gates are silently dropped so callers can pass raw
+// CPR-decoded values without pre-validation.
 func (l *Locator) Observe(lat, lon, altFt float64) {
 	if lat == 0 && lon == 0 {
 		return
@@ -193,10 +274,14 @@ func (l *Locator) Observe(lat, lon, altFt float64) {
 		return
 	}
 
+	if altFt < minObservationAltitudeFt {
+		return
+	}
+
 	obs := observation{
 		lat:        lat,
 		lon:        lon,
-		horizonNm:  horizonCoefficient * math.Sqrt(altFt),
+		horizonNm:  horizonNmFor(altFt, l.antennaHeightFt),
 		receivedAt: time.Now(),
 	}
 
@@ -231,7 +316,7 @@ func (l *Locator) Estimate() (Fix, bool) {
 		return Fix{}, false
 	}
 
-	if !hasLowAltitude(obs, l.maxAltitudeForReady) {
+	if !hasTightHorizon(obs, horizonNmFor(l.maxAltitudeForReady, l.antennaHeightFt)) {
 		return Fix{}, false
 	}
 
@@ -250,17 +335,28 @@ func (l *Locator) snapshotObservations() []observation {
 	return out
 }
 
-// hasLowAltitude reports whether the observation set includes at
-// least one fix whose horizon is tight enough to materially
-// shrink the intersection. The threshold is expressed as an
-// altitude ceiling (ft) and translated to a horizon ceiling so
-// the per-observation check is a single float comparison rather
-// than a sqrt per call.
-func hasLowAltitude(obs []observation, maxAltFt float64) bool {
-	horizonCeiling := horizonCoefficient * math.Sqrt(maxAltFt)
+// horizonNmFor returns the radio horizon in nautical miles for an
+// aircraft at altFt seen by an antenna antennaFt above ground:
+//
+//	d_nm = horizonMargin * 1.23 * (sqrt(alt_ft) + sqrt(antenna_ft))
+//
+// Both ends of the link contribute, which the single-term form
+// d = 1.23 * sqrt(alt) silently omits. See the horizonMargin and
+// defaultAntennaHeightFt comments for why the result is then
+// deliberately padded.
+func horizonNmFor(altFt, antennaFt float64) float64 {
+	return horizonMargin * horizonCoefficient * (math.Sqrt(altFt) + math.Sqrt(antennaFt))
+}
 
+// hasTightHorizon reports whether the observation set includes at
+// least one fix whose horizon is small enough to materially
+// shrink the intersection. The ceiling arrives as a horizon
+// rather than an altitude so the per-observation check is a
+// single float comparison, and so the ceiling passes through the
+// same antenna-height and margin terms the observations did.
+func hasTightHorizon(obs []observation, horizonCeilingNm float64) bool {
 	for _, fix := range obs {
-		if fix.horizonNm <= horizonCeiling {
+		if fix.horizonNm <= horizonCeilingNm {
 			return true
 		}
 	}
@@ -271,24 +367,29 @@ func hasLowAltitude(obs []observation, maxAltFt float64) bool {
 // solve runs the recursive grid search and packages the result
 // into a Fix. Caller must have validated readiness.
 func solve(obs []observation) Fix {
-	centerLat, centerLon, halfWidth := initialSearchRegion(obs)
+	bestLat, bestLon, halfWidth := initialSearchRegion(obs)
+	searchHalfWidth := halfWidth
 
-	bestLat, bestLon := centerLat, centerLon
-	confRadius := halfWidth
+	var finestStep float64
 
 	for range gridSearchLevels {
-		var spread float64
-
-		bestLat, bestLon, spread = gridSearch(obs, bestLat, bestLon, halfWidth)
-		confRadius = spread
+		bestLat, bestLon = gridSearch(obs, bestLat, bestLon, halfWidth)
+		finestStep = halfWidth / float64(gridSearchHalfSize)
 		halfWidth /= gridSearchShrinkFactor
 	}
 
+	violated := len(obs) - countCirclesContaining(obs, bestLat, bestLon)
+	confRadius := plausibleSpreadNm(obs, bestLat, bestLon, searchHalfWidth, violated)
+
 	return Fix{
-		Latitude:           bestLat,
-		Longitude:          bestLon,
-		ConfidenceRadiusNm: confRadius,
+		Latitude:  bestLat,
+		Longitude: bestLon,
+		// finestStep is the floor the Fix contract promises. The
+		// scan's own floor is a coarse half-cell and therefore
+		// larger; this keeps the promise true if that ever changes.
+		ConfidenceRadiusNm: math.Max(confRadius, finestStep),
 		ObservationCount:   len(obs),
+		Violated:           violated,
 	}
 }
 
@@ -311,21 +412,23 @@ func initialSearchRegion(obs []observation) (float64, float64, float64) {
 
 // gridSearch evaluates an (2*gridSearchHalfSize+1)^2 grid around
 // (centerLat, centerLon) at ±halfWidth nm. For each candidate
-// point it counts how many horizon circles contain it; the best
-// estimate is the centroid of points sharing the maximum count.
-// The third return is the bounding-box half-diagonal of those
-// best points — a loose confidence radius.
+// point it counts how many horizon circles contain it, and
+// returns the centroid of the points sharing the maximum count.
+// When no candidate is inside any circle the input centre comes
+// back unchanged, leaving the next level to try a tighter box.
 //
-//nolint:nonamedreturns // (lat, lon, spread) reads clearer named at this signature.
-func gridSearch(obs []observation, centerLat, centerLon, halfWidth float64) (lat, lon, spread float64) {
+// It reports position only. The spread of the tied points is not
+// a usable confidence radius: it shrinks with every level of
+// zoom whether or not the underlying region does, which is how
+// an estimate 17 nm from the receiver came to be published with a
+// confidence of 0.01 nm. plausibleSpreadNm measures that instead.
+func gridSearch(obs []observation, centerLat, centerLon, halfWidth float64) (float64, float64) {
 	step := halfWidth / float64(gridSearchHalfSize)
 	cosLat := cosLatFloor(centerLat)
 
 	var bestCount, tied int
 
 	var sumLat, sumLon float64
-
-	var minLat, maxLat, minLon, maxLon float64
 
 	for i := -gridSearchHalfSize; i <= gridSearchHalfSize; i++ {
 		for j := -gridSearchHalfSize; j <= gridSearchHalfSize; j++ {
@@ -338,16 +441,10 @@ func gridSearch(obs []observation, centerLat, centerLon, halfWidth float64) (lat
 			case count > bestCount:
 				bestCount = count
 				sumLat, sumLon = candidateLat, candidateLon
-				minLat, maxLat = candidateLat, candidateLat
-				minLon, maxLon = candidateLon, candidateLon
 				tied = 1
 			case count == bestCount && bestCount > 0:
 				sumLat += candidateLat
 				sumLon += candidateLon
-				minLat = math.Min(minLat, candidateLat)
-				maxLat = math.Max(maxLat, candidateLat)
-				minLon = math.Min(minLon, candidateLon)
-				maxLon = math.Max(maxLon, candidateLon)
 				tied++
 			default:
 				// Candidate is inside fewer circles than the best
@@ -359,19 +456,64 @@ func gridSearch(obs []observation, centerLat, centerLon, halfWidth float64) (lat
 	}
 
 	if tied == 0 {
-		return centerLat, centerLon, halfWidth
+		return centerLat, centerLon
 	}
 
-	return sumLat / float64(tied), sumLon / float64(tied),
-		boundingHalfDiagonalNm(minLat, maxLat, minLon, maxLon, cosLat, step)
+	return sumLat / float64(tied), sumLon / float64(tied)
 }
 
-// boundingHalfDiagonalNm converts the lat/lon bounding box of
-// the best-grid-points into a half-diagonal in nautical miles.
-// Floored at step/2 so a single-best-point grid still reports
-// a non-zero radius — the true intersection region must be at
-// least the grid step wide or the search would have found more
-// tied points.
+// plausibleSpreadNm returns the half-diagonal, in nautical miles,
+// of the region the receiver could occupy: every candidate within
+// ±halfWidth of the estimate that sits inside enough horizon
+// circles to beat the estimate's own agreement.
+//
+// With violated == 0 the threshold is every circle, so the scan
+// bounds the true intersection. With circles that disagree the
+// estimate is a compromise no consistent position occupies, and
+// the threshold drops to (contained - violated): the region that
+// would win if the offending circles were dropped. The clamp at
+// one keeps a set with more dissent than agreement from bounding
+// candidates that satisfy nothing at all.
+//
+// The measurement is an upper bound, and a truncated one where
+// the region runs past the scan box. That is the safe direction:
+// the alternative, a radius measured inside the search's final
+// zoom, reports a fraction of a nautical mile regardless of how
+// wrong the estimate is.
+func plausibleSpreadNm(obs []observation, centerLat, centerLon, halfWidth float64, violated int) float64 {
+	// The estimate is inside (len(obs) - violated) circles, so the
+	// threshold described above works out as len(obs) - 2*violated.
+	minCount := max(len(obs)-2*violated, 1)
+	step := halfWidth / float64(confidenceGridHalfSize)
+	cosLat := cosLatFloor(centerLat)
+
+	minLat, maxLat := centerLat, centerLat
+	minLon, maxLon := centerLon, centerLon
+
+	for i := -confidenceGridHalfSize; i <= confidenceGridHalfSize; i++ {
+		for j := -confidenceGridHalfSize; j <= confidenceGridHalfSize; j++ {
+			candidateLat := centerLat + float64(i)*step/nauticalMilePerDegree
+			candidateLon := centerLon + float64(j)*step/(nauticalMilePerDegree*cosLat)
+
+			if countCirclesContaining(obs, candidateLat, candidateLon) < minCount {
+				continue
+			}
+
+			minLat = math.Min(minLat, candidateLat)
+			maxLat = math.Max(maxLat, candidateLat)
+			minLon = math.Min(minLon, candidateLon)
+			maxLon = math.Max(maxLon, candidateLon)
+		}
+	}
+
+	return boundingHalfDiagonalNm(minLat, maxLat, minLon, maxLon, cosLat, step)
+}
+
+// boundingHalfDiagonalNm converts a lat/lon bounding box into a
+// half-diagonal in nautical miles. Floored at step/2 so a box
+// that collapsed onto a single grid point still reports a
+// non-zero radius: the region it stands for is at least a cell
+// across, or the scan would have qualified more than one point.
 func boundingHalfDiagonalNm(minLat, maxLat, minLon, maxLon, cosLat, step float64) float64 {
 	dLatNm := (maxLat - minLat) * nauticalMilePerDegree
 	dLonNm := (maxLon - minLon) * nauticalMilePerDegree * cosLat

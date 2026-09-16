@@ -53,6 +53,68 @@ func TestObserveSkipsNonPositiveAltitude(t *testing.T) {
 	}
 }
 
+// TestObserveRejectsBelowTheAltitudeFloor pins the surface-traffic
+// gate. An aircraft rolling on a runway reports a barometric
+// altitude near zero, which yields a horizon of a few nm; the
+// receiver hears it from far outside that circle, and because it
+// is the tightest circle in the set the search anchors on it.
+func TestObserveRejectsBelowTheAltitudeFloor(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		altFt     float64
+		wantCount int
+	}{
+		{name: "rolling on the runway", altFt: 50, wantCount: 0},
+		{name: "200 ft is still surface traffic", altFt: 200, wantCount: 0},
+		{name: "just below the floor", altFt: 299, wantCount: 0},
+		{name: "on the floor", altFt: 300, wantCount: 1},
+		{name: "400 ft is airborne", altFt: 400, wantCount: 1},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			loc := selflocate.New()
+			loc.Observe(52.31, 4.77, testCase.altFt)
+
+			if got := loc.ObservationCount(); got != testCase.wantCount {
+				t.Errorf("after Observe at %.0f ft: ObservationCount = %d, want %d",
+					testCase.altFt, got, testCase.wantCount)
+			}
+		})
+	}
+}
+
+// TestAntennaHeightWidensTheConfidenceRegion covers the antenna
+// term from the outside. A taller antenna sees further, so every
+// horizon circle grows, the region satisfying all of them grows
+// with it, and the reported confidence has to follow.
+func TestAntennaHeightWidensTheConfidenceRegion(t *testing.T) {
+	t.Parallel()
+
+	const (
+		trueLat = 51.5
+		trueLon = 4.5
+	)
+
+	atGround := selflocate.New(selflocate.WithAntennaHeightFt(0))
+	onAMast := selflocate.New(selflocate.WithAntennaHeightFt(500))
+
+	feedSyntheticObservations(atGround, trueLat, trueLon)
+	feedSyntheticObservations(onAMast, trueLat, trueLon)
+
+	groundFix := mustEstimate(t, atGround)
+	mastFix := mustEstimate(t, onAMast)
+
+	if mastFix.ConfidenceRadiusNm <= groundFix.ConfidenceRadiusNm {
+		t.Errorf("500 ft antenna gave confidence %.2f nm, want more than the ground-level %.2f nm",
+			mastFix.ConfidenceRadiusNm, groundFix.ConfidenceRadiusNm)
+	}
+}
+
 // TestObserveValidFixIncrementsCount covers the happy-path Observe.
 func TestObserveValidFixIncrementsCount(t *testing.T) {
 	t.Parallel()
@@ -150,8 +212,13 @@ func TestEstimateConvergesNearTrueReceiver(t *testing.T) {
 			fix.Latitude, fix.Longitude, gotDistNm, toleranceNm)
 	}
 
-	if fix.ConfidenceRadiusNm <= 0 {
-		t.Errorf("Fix.ConfidenceRadiusNm = %v, want > 0", fix.ConfidenceRadiusNm)
+	if fix.ConfidenceRadiusNm < gotDistNm {
+		t.Errorf("Fix.ConfidenceRadiusNm = %v, want at least the %.2f nm error it covers",
+			fix.ConfidenceRadiusNm, gotDistNm)
+	}
+
+	if fix.Violated != 0 {
+		t.Errorf("Fix.Violated = %d on a set built to be consistent, want 0", fix.Violated)
 	}
 }
 
@@ -196,6 +263,7 @@ func TestWithOptionRejectsInvalidValues(t *testing.T) {
 		selflocate.WithMaxObservations(0),       // ignored
 		selflocate.WithMinObservations(-1),      // ignored
 		selflocate.WithMaxAltitudeForReady(-50), // ignored
+		selflocate.WithAntennaHeightFt(-5),      // ignored
 	)
 
 	// The locator should still accept observations and decline
@@ -243,4 +311,36 @@ func flatDistanceNm(lat1, lon1, lat2, lon2 float64) float64 {
 	dLon := (lon1 - lon2) * math.Cos(midLat*math.Pi/180)
 
 	return math.Sqrt(dLat*dLat+dLon*dLon) * nauticalMilePerDegree
+}
+
+// BenchmarkEstimate measures a full Estimate at the observation
+// cap, which is what bounds the self-locate worker's tick. The
+// confidence scan is the bulk of it.
+func BenchmarkEstimate(b *testing.B) {
+	loc := selflocate.New()
+	for range 9 {
+		feedSyntheticObservations(loc, 52.0, 4.0)
+	}
+
+	b.ResetTimer()
+
+	for b.Loop() {
+		if _, ok := loc.Estimate(); !ok {
+			b.Fatal("Estimate returned ok=false")
+		}
+	}
+}
+
+// mustEstimate fails the test if the locator declines to produce
+// a fix, so callers can compare two fixes without repeating the
+// readiness check.
+func mustEstimate(t *testing.T, loc *selflocate.Locator) selflocate.Fix {
+	t.Helper()
+
+	fix, ready := loc.Estimate()
+	if !ready {
+		t.Fatal("Estimate returned ok=false on a fully populated dataset")
+	}
+
+	return fix
 }
