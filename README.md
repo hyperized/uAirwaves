@@ -205,6 +205,8 @@ A few pieces deserve a word:
 
 **Self-locate.** Every aircraft position broadcast also tells you something about where *you* are: if you can hear a plane, you must be within its radio horizon, a circle whose size follows from the plane's altitude and your own antenna height. Intersect enough of those circles and your own position falls out, typically within 5 to 30 nm after a few minutes of moderate traffic. Traffic on the ground is left out and every circle carries a margin, because a circle drawn too small excludes the receiver and drags the answer towards the aircraft instead. That is enough to bootstrap position decoding and distance sorting on a device with no GPS and no internet, in the middle of a field. The estimate is clearly marked in the header and steps aside as soon as gpsd delivers a real fix.
 
+The estimate carries two numbers. The confidence radius is a hard bound from the horizon model: every position the circles admit, which with margins that generous runs to tens of nautical miles even when the answer is good. The spread is measured rather than derived. The position is solved again from each fifth of the fixes, five times over, and the spread is how far those answers land from the full one. On a real feed near Schiphol the bound reads ±97 nm while the estimate sits about 13 nm from the truth. Neither number replaces the other: the spread says how much the answer depends on which aircraft happened to be heard, and a bias every subset shares, a directional antenna being the obvious case, moves the bound while leaving the spread alone.
+
 **Phantom suppression.** Some Mode S frame types carry no verifiable checksum, and random noise can decode into plausible-looking aircraft. Those frames only count once the same aircraft has been seen in a properly CRC-verified frame, which keeps the plane list at real-airspace size.
 
 **Position without waiting.** With a known receiver position, a single position broadcast resolves to latitude and longitude immediately, instead of waiting to pair the two frame variants aircraft alternate between.
@@ -231,7 +233,7 @@ pkg/airports/      — embedded airport overlay data (CC0, OurAirports)
 pkg/battery/       — cross-platform battery reader (sysfs / pmset)
 pkg/coverage/      — antenna reception-pattern tracker behind the coverage panel
 pkg/gps/           — gpsd client with reconnect and a stall watchdog
-pkg/location/      — the shared receiver position, with source and confidence
+pkg/location/      — the shared receiver position, with source, confidence and spread
 pkg/radar/         — all scope drawing: trails, heatmap, MiniView, overlays
 pkg/scope/         — range arithmetic
 pkg/selflocate/    — the horizon-circle intersection locator

@@ -222,6 +222,78 @@ func TestEstimateConvergesNearTrueReceiver(t *testing.T) {
 	}
 }
 
+// TestSpreadIsMeasuredWellInsideTheBound covers the second figure
+// on a set long enough for the folds to run: 180 observations
+// against the default 30-observation gate, where the threshold is
+// 150.
+//
+// The gap between the two numbers is the point of having both.
+// The bound is the width of the region 180 deliberately generous
+// circles admit, which no amount of traffic shrinks below the
+// tightest horizon less the distance to the aircraft that drew
+// it. The spread is how far the answer moves when four fifths of
+// the fixes are taken away, and on a fixture where every fold
+// sees the same full ring at the same four altitudes it comes out
+// around a sixtieth of the bound. A tenth is the assertion, which
+// leaves the fixture room to drift without the test having to be
+// retuned.
+func TestSpreadIsMeasuredWellInsideTheBound(t *testing.T) {
+	t.Parallel()
+
+	const (
+		trueLat    = 52.0
+		trueLon    = 4.0
+		obsCount   = 180
+		boundShare = 10.0
+	)
+
+	loc := selflocate.New()
+	feedRingObservations(loc, trueLat, trueLon, obsCount)
+
+	fix := mustEstimate(t, loc)
+
+	if fix.SpreadNm <= 0 {
+		t.Errorf("Fix.SpreadNm = %v, want a positive figure", fix.SpreadNm)
+	}
+
+	if fix.SpreadNm > fix.ConfidenceRadiusNm {
+		t.Errorf("Fix.SpreadNm = %.4f nm, want no more than the %.4f nm bound",
+			fix.SpreadNm, fix.ConfidenceRadiusNm)
+	}
+
+	if fix.SpreadNm > fix.ConfidenceRadiusNm/boundShare {
+		t.Errorf("Fix.SpreadNm = %.4f nm is not a small fraction of the %.4f nm bound",
+			fix.SpreadNm, fix.ConfidenceRadiusNm)
+	}
+}
+
+// TestSpreadFallsBackToTheBoundOnTooFewObservations covers the
+// gate. Below five times the readiness minimum a fold holds fewer
+// fixes than the locator would publish an estimate from at all,
+// so there is nothing worth measuring and the bound is what gets
+// reported.
+func TestSpreadFallsBackToTheBoundOnTooFewObservations(t *testing.T) {
+	t.Parallel()
+
+	// Five folds against the default 30-observation gate.
+	const foldThreshold = 150
+
+	loc := selflocate.New()
+	feedSyntheticObservations(loc, 52.0, 4.0)
+
+	fix := mustEstimate(t, loc)
+
+	if fix.ObservationCount >= foldThreshold {
+		t.Fatalf("fixture grew to %d observations, at or past the %d the folds need: "+
+			"this test no longer covers the fallback", fix.ObservationCount, foldThreshold)
+	}
+
+	if fix.SpreadNm != fix.ConfidenceRadiusNm {
+		t.Errorf("Fix.SpreadNm = %v on %d observations, want the %v nm bound",
+			fix.SpreadNm, fix.ObservationCount, fix.ConfidenceRadiusNm)
+	}
+}
+
 // TestObserveAndEstimateAreThreadSafe runs concurrent Observe
 // and Estimate calls under the race detector to confirm the
 // sync.RWMutex protects every access path.
@@ -300,6 +372,32 @@ func feedSyntheticObservations(loc *selflocate.Locator, receiverLat, receiverLon
 	}
 }
 
+// feedRingObservations drives count Observe calls on a full
+// bearing sweep around a receiver position at four altitudes.
+//
+// Four rather than the five feedSyntheticObservations cycles
+// because the fold stride is five: an altitude cycle of the same
+// length hands every fold a single altitude, and a fold of
+// nothing but FL380 is a set of 280 nm circles that agree
+// everywhere in the search box and answer with the box centre.
+// That is a genuine weakness of the estimator, worth knowing
+// about and not what a fixture for the spread should be built on.
+func feedRingObservations(loc *selflocate.Locator, receiverLat, receiverLon float64, count int) {
+	altitudes := []float64{1500, 5000, 12000, 38000}
+
+	for index := range count {
+		altFt := altitudes[index%len(altitudes)]
+		horizonNm := 1.23 * math.Sqrt(altFt)
+
+		bearingRad := float64(index) * (2 * math.Pi / float64(count))
+		offsetNm := horizonNm / 2
+		dLat := offsetNm * math.Cos(bearingRad) / 60.0
+		dLon := offsetNm * math.Sin(bearingRad) / (60.0 * math.Cos(receiverLat*math.Pi/180))
+
+		loc.Observe(receiverLat+dLat, receiverLon+dLon, altFt)
+	}
+}
+
 // flatDistanceNm is a local copy of the package's flat-Earth
 // distance formula so external tests don't depend on a package-
 // internal export just to assert convergence.
@@ -316,18 +414,39 @@ func flatDistanceNm(lat1, lon1, lat2, lon2 float64) float64 {
 // BenchmarkEstimate measures a full Estimate at the observation
 // cap, which is what bounds the self-locate worker's tick. The
 // confidence scan is the bulk of it.
+//
+// The two cases price the fold spread. Raising the readiness
+// minimum to 101 puts the fold threshold at 505, one past the
+// 500-observation cap, so "without folds" runs the same estimate
+// with the five sub-searches skipped. The folds partition the
+// observations, so together they are five levels of 121
+// candidates against a fifth of the set apiece: about one extra
+// grid search, against a confidence scan of 1089 candidates
+// against all of it.
 func BenchmarkEstimate(b *testing.B) {
-	loc := selflocate.New()
-	for range 9 {
-		feedSyntheticObservations(loc, 52.0, 4.0)
+	benchmarks := []struct {
+		name string
+		opts []selflocate.Option
+	}{
+		{name: "with folds", opts: nil},
+		{name: "without folds", opts: []selflocate.Option{selflocate.WithMinObservations(101)}},
 	}
 
-	b.ResetTimer()
+	for _, benchmark := range benchmarks {
+		b.Run(benchmark.name, func(b *testing.B) {
+			loc := selflocate.New(benchmark.opts...)
+			for range 9 {
+				feedSyntheticObservations(loc, 52.0, 4.0)
+			}
 
-	for b.Loop() {
-		if _, ok := loc.Estimate(); !ok {
-			b.Fatal("Estimate returned ok=false")
-		}
+			b.ResetTimer()
+
+			for b.Loop() {
+				if _, ok := loc.Estimate(); !ok {
+					b.Fatal("Estimate returned ok=false")
+				}
+			}
+		})
 	}
 }
 

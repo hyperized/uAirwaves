@@ -170,6 +170,35 @@ func TestSourceAndConfidenceRadius(t *testing.T) {
 	}
 }
 
+// TestSpreadNm pins the second self-locate figure: the cold-start
+// default, and the value set through its option. It sits beside
+// the confidence radius rather than replacing it. One is the
+// bound the horizon model guarantees, the other how far the
+// estimate moves when it is worked out from a fifth of the
+// observations.
+func TestSpreadNm(t *testing.T) {
+	t.Parallel()
+
+	defaults := location.New()
+	if got := defaults.SpreadNm(); got != 0 {
+		t.Errorf("default SpreadNm() = %f, want 0", got)
+	}
+
+	loc := location.New(
+		location.WithSource(location.SourceInferred),
+		location.WithConfidenceRadiusNm(97.0),
+		location.WithSpreadNm(13.0),
+	)
+
+	if got := loc.SpreadNm(); got != 13.0 {
+		t.Errorf("SpreadNm() = %f, want 13.0", got)
+	}
+
+	if got := loc.ConfidenceRadiusNm(); got != 97.0 {
+		t.Errorf("ConfidenceRadiusNm() = %f, want 97.0 (the spread must not overwrite it)", got)
+	}
+}
+
 // TestStringBySource pins the exact header line for every source:
 // full-precision GPS, the cold-start unset form, and the reduced-
 // precision inferred estimate with and without a confidence radius.

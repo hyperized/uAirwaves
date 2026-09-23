@@ -1,6 +1,7 @@
 package selflocate
 
 import (
+	"fmt"
 	"math"
 	"testing"
 )
@@ -330,7 +331,7 @@ func TestSolveConvergesNearSyntheticReceiver(t *testing.T) {
 	)
 
 	obs := syntheticObservations(receiverLat, receiverLon)
-	fix := solve(obs)
+	fix := solve(obs, defaultMinObservations)
 
 	gotDistNm := distanceNm(fix.Latitude, fix.Longitude, receiverLat, receiverLon)
 	if gotDistNm > toleranceNm {
@@ -357,7 +358,7 @@ func TestRunwayAircraftNoLongerCapturesTheEstimate(t *testing.T) {
 		t.Parallel()
 
 		obs := legacyObservations(fixes)
-		estimate := solve(obs)
+		estimate := solve(obs, defaultMinObservations)
 
 		runwayErrNm := distanceNm(estimate.Latitude, estimate.Longitude, runwayAircraftLat, runwayAircraftLon)
 		if runwayErrNm > 1.0 {
@@ -465,7 +466,7 @@ func TestSolveReportsViolatedCircles(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			fix := solve(testCase.obs)
+			fix := solve(testCase.obs, defaultMinObservations)
 			if fix.Violated != testCase.wantViolated {
 				t.Errorf("Violated = %d, want %d", fix.Violated, testCase.wantViolated)
 			}
@@ -500,11 +501,245 @@ func TestSolveConfidenceNeverBelowOneFinestGridCell(t *testing.T) {
 			_, _, halfWidth := initialSearchRegion(testCase.obs)
 			finestStep := halfWidth / math.Pow(gridSearchShrinkFactor, gridSearchLevels-1) / gridSearchHalfSize
 
-			if got := solve(testCase.obs).ConfidenceRadiusNm; got < finestStep {
+			if got := solve(testCase.obs, defaultMinObservations).ConfidenceRadiusNm; got < finestStep {
 				t.Errorf("ConfidenceRadiusNm = %v, want at least one finest grid cell (%v)", got, finestStep)
 			}
 		})
 	}
+}
+
+// TestSolveIsUnchangedByTheFoldRefactor pins the full-set answer
+// against the values solve produced before its search loop moved
+// into solveFold. The split exists so a fold can walk the same
+// levels out of the same box as the whole set; it must not have
+// moved the estimate itself.
+//
+// The tolerance is not slack for the refactor, which reproduces
+// these to the last bit. It is there because distanceNm's
+// dLat*dLat+dLon*dLon is a shape the compiler may fuse into a
+// single FMA on arm64 and not on amd64, and a last-bit difference
+// at a circle boundary can move a tie count.
+func TestSolveIsUnchangedByTheFoldRefactor(t *testing.T) {
+	t.Parallel()
+
+	const (
+		toleranceDeg = 1e-9
+		toleranceNm  = 1e-9
+	)
+
+	tests := []struct {
+		name                       string
+		obs                        []observation
+		wantLat, wantLon, wantConf float64
+	}{
+		{
+			name:     "synthetic ring at 48N 11E",
+			obs:      syntheticObservations(48.0, 11.0),
+			wantLat:  48.020450732723098,
+			wantLon:  11,
+			wantConf: 51.143433720433777,
+		},
+		{
+			name:     "the Schiphol scenario",
+			obs:      observationsFrom(schipholFixes(), defaultAntennaHeightFt),
+			wantLat:  52.336041047671593,
+			wantLon:  4.7699999999999934,
+			wantConf: 67.794394922228548,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			fix := solve(testCase.obs, defaultMinObservations)
+
+			if math.Abs(fix.Latitude-testCase.wantLat) > toleranceDeg ||
+				math.Abs(fix.Longitude-testCase.wantLon) > toleranceDeg {
+				t.Errorf("solve = (%.17g, %.17g), want the pre-refactor (%.17g, %.17g)",
+					fix.Latitude, fix.Longitude, testCase.wantLat, testCase.wantLon)
+			}
+
+			if math.Abs(fix.ConfidenceRadiusNm-testCase.wantConf) > toleranceNm {
+				t.Errorf("ConfidenceRadiusNm = %.17g, want the pre-refactor %.17g",
+					fix.ConfidenceRadiusNm, testCase.wantConf)
+			}
+		})
+	}
+}
+
+// TestFoldObservationsAreInterleaved pins the stride. Fold k holds
+// observations k, k+spreadFolds, k+2*spreadFolds and so on, so
+// every fold spans the whole observation window instead of one
+// contiguous stretch of it.
+func TestFoldObservationsAreInterleaved(t *testing.T) {
+	t.Parallel()
+
+	// Not a multiple of spreadFolds, so the folds come out uneven
+	// and the last one runs short.
+	const obsCount = 13
+
+	obs := make([]observation, obsCount)
+	for index := range obs {
+		// lat carries the index so each observation is identifiable.
+		obs[index] = observation{lat: float64(index)}
+	}
+
+	for fold := range spreadFolds {
+		t.Run(fmt.Sprintf("fold %d", fold), func(t *testing.T) {
+			t.Parallel()
+
+			var want []float64
+			for index := fold; index < obsCount; index += spreadFolds {
+				want = append(want, float64(index))
+			}
+
+			got := foldObservations(obs, fold)
+			if len(got) != len(want) {
+				t.Fatalf("fold %d holds %d observations, want %d", fold, len(got), len(want))
+			}
+
+			for position, entry := range got {
+				if entry.lat != want[position] {
+					t.Errorf("fold %d position %d holds observation %.0f, want %.0f",
+						fold, position, entry.lat, want[position])
+				}
+			}
+		})
+	}
+}
+
+// TestClampSpreadNmHoldsBetweenTheGridAndTheBound covers both
+// clamps. Under the grid step the figure would claim a resolution
+// the search never had; over the bound it would contradict the
+// one number that accounts for what every fold shares.
+func TestClampSpreadNmHoldsBetweenTheGridAndTheBound(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		rmsNm      float64
+		finestStep float64
+		boundNm    float64
+		want       float64
+	}{
+		{
+			name:  "folds agree exactly, floored at the grid step",
+			rmsNm: 0, finestStep: 0.02, boundNm: 40, want: 0.02,
+		},
+		{
+			name:  "a measurement between the two passes through",
+			rmsNm: 3.5, finestStep: 0.02, boundNm: 40, want: 3.5,
+		},
+		{
+			name:  "folds scatter past the bound, capped at it",
+			rmsNm: 90, finestStep: 0.02, boundNm: 40, want: 40,
+		},
+		{
+			name:  "a bound at the grid step wins over the floor",
+			rmsNm: 5, finestStep: 0.02, boundNm: 0.02, want: 0.02,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := clampSpreadNm(testCase.rmsNm, testCase.finestStep, testCase.boundNm)
+			if got != testCase.want {
+				t.Errorf("clampSpreadNm(%v, %v, %v) = %v, want %v",
+					testCase.rmsNm, testCase.finestStep, testCase.boundNm, got, testCase.want)
+			}
+		})
+	}
+}
+
+// TestSolveFloorsTheSpreadAtTheFinestGridStep drives the floor
+// through solve. Every observation is the same circle, so every
+// fold is the same problem as the whole set and lands on the same
+// answer: an RMS of exactly zero, which has to come back as the
+// grid step rather than as a claim of perfect precision.
+func TestSolveFloorsTheSpreadAtTheFinestGridStep(t *testing.T) {
+	t.Parallel()
+
+	obs := repeatObservation(spreadFolds*defaultMinObservations,
+		observation{lat: 52.0, lon: 4.0, horizonNm: 40})
+
+	_, _, halfWidth := initialSearchRegion(obs)
+
+	fix := solve(obs, defaultMinObservations)
+	if want := finestStepNm(halfWidth); fix.SpreadNm != want {
+		t.Errorf("SpreadNm = %v on identical observations, want the finest grid step %v",
+			fix.SpreadNm, want)
+	}
+}
+
+// TestSolveCapsTheSpreadAtTheConfidenceBound drives the other
+// clamp through solve, on a set where a fifth of the fixes
+// constrain nothing. Fold 0 holds only distant aircraft whose
+// circles cover the entire search box, so it ties everywhere and
+// falls back on the box centre, tens of nm from the answer the
+// other four folds and the full set agree on. The raw RMS comes
+// out larger than the region the circles admit, and a precision
+// figure that exceeds its own bound is not one worth printing.
+func TestSolveCapsTheSpreadAtTheConfidenceBound(t *testing.T) {
+	t.Parallel()
+
+	obs := unconstrainedFoldObservations(spreadFolds * defaultMinObservations)
+	fix := solve(obs, defaultMinObservations)
+
+	anchorLat, anchorLon, halfWidth := initialSearchRegion(obs)
+
+	rawNm := foldSpreadNm(obs, fix.Latitude, fix.Longitude, anchorLat, anchorLon, halfWidth)
+	if rawNm <= fix.ConfidenceRadiusNm {
+		t.Fatalf("fixture RMS %.2f nm no longer exceeds the %.2f nm bound, so the cap goes untested",
+			rawNm, fix.ConfidenceRadiusNm)
+	}
+
+	if fix.SpreadNm != fix.ConfidenceRadiusNm {
+		t.Errorf("SpreadNm = %.4f nm, want it capped at the %.4f nm bound",
+			fix.SpreadNm, fix.ConfidenceRadiusNm)
+	}
+}
+
+// unconstrainedFoldObservations builds a set where one fold is
+// useless and the rest are not. Every fifth fix is a distant
+// aircraft whose 400 nm horizon covers the whole search box; the
+// others ring the receiver at nine tenths of their own horizon,
+// so the region they agree on is a few nm across. It is the shape
+// of a receiver hearing one high-level airway and a ring of local
+// traffic, with the airway landing entirely on fold 0.
+func unconstrainedFoldObservations(count int) []observation {
+	const (
+		receiverLat      = 52.0
+		receiverLon      = 4.0
+		distantLat       = 55.0
+		distantHorizonNm = 400.0
+		ringFraction     = 0.9
+		ringAltFt        = 1500.0
+	)
+
+	ringHorizonNm := horizonNmFor(ringAltFt, defaultAntennaHeightFt)
+	offsetNm := ringHorizonNm * ringFraction
+	out := make([]observation, 0, count)
+
+	for index := range count {
+		if index%spreadFolds == 0 {
+			out = append(out, observation{lat: distantLat, lon: receiverLon, horizonNm: distantHorizonNm})
+
+			continue
+		}
+
+		bearingRad := float64(index) * (2 * math.Pi / float64(count))
+		out = append(out, observation{
+			lat: receiverLat + offsetNm*math.Cos(bearingRad)/nauticalMilePerDegree,
+			lon: receiverLon + offsetNm*math.Sin(bearingRad)/
+				(nauticalMilePerDegree*math.Cos(receiverLat*deg2Rad)),
+			horizonNm: ringHorizonNm,
+		})
+	}
+
+	return out
 }
 
 // aircraftFix is a synthetic ADSB position report, the shape

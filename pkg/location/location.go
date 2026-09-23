@@ -40,6 +40,7 @@ const (
 type Location struct {
 	latitude, longitude, altitude float64
 	confidenceRadiusNm            float64
+	spreadNm                      float64
 	lastUpdated                   time.Time
 	mode                          fix
 	source                        Source
@@ -118,6 +119,19 @@ func (l *Location) ConfidenceRadiusNm() float64 {
 	defer l.mu.RUnlock()
 
 	return l.confidenceRadiusNm
+}
+
+// SpreadNm returns the self-locate spread in nautical miles, or 0
+// when it does not apply (a GPS fix or no fix at all). It is the
+// precision figure that sits beside ConfidenceRadiusNm: how far
+// the estimate moves when it is worked out from a fifth of the
+// observations, where the radius is the bound the horizon model
+// guarantees.
+func (l *Location) SpreadNm() float64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	return l.spreadNm
 }
 
 // Update applies the provided options to an existing Location.
@@ -221,5 +235,14 @@ func WithSource(source Source) Option {
 func WithConfidenceRadiusNm(radiusNm float64) Option {
 	return func(l *Location) {
 		l.confidenceRadiusNm = radiusNm
+	}
+}
+
+// WithSpreadNm sets the self-locate spread in nautical miles. Pass
+// 0 when it does not apply (a GPS fix clears any stale inferred
+// spread this way).
+func WithSpreadNm(nm float64) Option {
+	return func(l *Location) {
+		l.spreadNm = nm
 	}
 }

@@ -724,6 +724,7 @@ func runSelfLocate(
 			loc.Update(
 				location.WithSource(location.SourceInferred),
 				location.WithConfidenceRadiusNm(fix.ConfidenceRadiusNm),
+				location.WithSpreadNm(fix.SpreadNm),
 				location.WithLatitude(fix.Latitude),
 				location.WithLongitude(fix.Longitude),
 			)
@@ -733,6 +734,7 @@ func runSelfLocate(
 					slog.Float64("lat", fix.Latitude),
 					slog.Float64("lon", fix.Longitude),
 					slog.Float64("confidence_nm", fix.ConfidenceRadiusNm),
+					slog.Float64("spread_nm", fix.SpreadNm),
 					slog.Int("observations", fix.ObservationCount),
 				)
 			}

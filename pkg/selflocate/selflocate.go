@@ -19,6 +19,17 @@
 // reports how many of them exclude the estimate and widens the
 // confidence radius to the region that would win without them.
 //
+// Generous circles make for a generous bound, so Fix carries two
+// numbers rather than one. ConfidenceRadiusNm is what the model
+// guarantees: the size of the region the circles admit, which on
+// a real feed runs to a hundred nautical miles while the estimate
+// sits within a dozen of the truth. SpreadNm is what the data
+// shows: the position solved again from each fifth of the
+// observations, and how far those answers land from the full one.
+// A bias every subset shares, a directional antenna being the
+// obvious one, moves the bound and not the spread, which is why
+// neither number replaces the other.
+//
 // The package is GPS-free and internet-free: it consumes the
 // same ADSB stream uAirwaves already decodes for the scope view.
 // Use it as a fallback when gpsd is unavailable (e.g. cold-start
@@ -136,11 +147,28 @@ const (
 	// grid spans a fraction of a nm. Resolution is deliberately
 	// coarse: the result is an upper bound on the error, not a
 	// precision figure. It costs 1089 * len(obs) distance
-	// calculations per Estimate, about two thirds of the 5.4 ms a
-	// capped 500-observation Estimate takes on an M2 Pro
+	// calculations per Estimate, about two thirds of the 5.1 ms a
+	// capped 500-observation Estimate takes on an M2 Pro without
+	// the fold spread and half of the 6.6 ms with it
 	// (BenchmarkEstimate). The uConsole is slower by roughly an
 	// order of magnitude and calls Estimate every 15 s.
 	confidenceGridHalfSize = 16
+
+	// spreadFolds is how many subsets SpreadNm is measured over.
+	// Observation i goes to fold i%spreadFolds, so the folds
+	// partition the set and each one is worth a fifth of the data:
+	// a large enough perturbation to move the answer, small enough
+	// that every fold still has geometry to work with. Interleaved
+	// rather than contiguous because a contiguous block is one
+	// stretch of the observation window, and traffic changes
+	// direction over that window, so a block would measure the sky
+	// turning rather than the estimator's own noise. Partitioning
+	// is also what keeps the five searches to about one extra grid
+	// search between them: every level is the same 121 candidates
+	// against a fifth of the observations. At the 500-observation
+	// cap that measures as 1.6 ms on top of 5.1, and five slices
+	// of the snapshot where there was one.
+	spreadFolds = 5
 )
 
 // observation is a single buffered ADSB position fix plus its
@@ -151,12 +179,22 @@ type observation struct {
 	receivedAt          time.Time
 }
 
-// Fix is the estimated receiver position with confidence
-// metadata. ConfidenceRadiusNm is the half-diagonal of the
-// plausible region's bounding box, floored at one grid cell of
-// the search's finest level: a loose upper bound on how far the
-// estimate could be from the true receiver position, never a
-// claim of precision the grid cannot support.
+// Fix is the estimated receiver position with two figures beside
+// it. They answer different questions and routinely differ by an
+// order of magnitude, which is not a contradiction.
+//
+// ConfidenceRadiusNm is what the model guarantees: the
+// half-diagonal of the plausible region's bounding box, floored
+// at one grid cell of the search's finest level. It is a loose
+// upper bound on how far the estimate could be from the true
+// receiver position, never a claim of precision the grid cannot
+// support. Because the horizon circles are deliberately generous
+// the region they admit is wide, tens of nm on sparse traffic,
+// while the estimate is the centroid of that region and lands far
+// closer to the receiver than its edge does.
+//
+// SpreadNm is what the data shows, measured rather than derived
+// from the model. See the field comment.
 //
 // Violated counts the observations whose horizon circle does not
 // contain the estimate. Zero means every circle agrees. Anything
@@ -169,8 +207,22 @@ type Fix struct {
 	Latitude           float64
 	Longitude          float64
 	ConfidenceRadiusNm float64
-	ObservationCount   int
-	Violated           int
+
+	// SpreadNm is how far the estimate moves when it is worked out
+	// from a fifth of the observations: the RMS distance, in
+	// nautical miles, of spreadFolds sub-estimates from the full
+	// estimate, each solved on its own interleaved subset. It is a
+	// precision figure and not a bound. It says how much the answer
+	// depends on which fixes happened to arrive, and says nothing
+	// about a bias every subset shares, such as a directional
+	// antenna; ConfidenceRadiusNm is the number that covers that.
+	// Never above ConfidenceRadiusNm and never below the finest
+	// grid step, and equal to ConfidenceRadiusNm while there are
+	// too few observations for the folds to mean anything.
+	SpreadNm float64
+
+	ObservationCount int
+	Violated         int
 }
 
 // Locator buffers observed aircraft positions and produces a
@@ -320,7 +372,7 @@ func (l *Locator) Estimate() (Fix, bool) {
 		return Fix{}, false
 	}
 
-	return solve(obs), true
+	return solve(obs, l.minObservations), true
 }
 
 // snapshotObservations returns a stable value copy under a
@@ -365,32 +417,114 @@ func hasTightHorizon(obs []observation, horizonCeilingNm float64) bool {
 }
 
 // solve runs the recursive grid search and packages the result
-// into a Fix. Caller must have validated readiness.
-func solve(obs []observation) Fix {
-	bestLat, bestLon, halfWidth := initialSearchRegion(obs)
-	searchHalfWidth := halfWidth
-
-	var finestStep float64
-
-	for range gridSearchLevels {
-		bestLat, bestLon = gridSearch(obs, bestLat, bestLon, halfWidth)
-		finestStep = halfWidth / float64(gridSearchHalfSize)
-		halfWidth /= gridSearchShrinkFactor
-	}
+// into a Fix. minObservations is the locator's readiness gate,
+// which also decides whether the observation set is long enough
+// for the fold spread to mean anything. Caller must have
+// validated readiness.
+func solve(obs []observation, minObservations int) Fix {
+	anchorLat, anchorLon, halfWidth := initialSearchRegion(obs)
+	bestLat, bestLon := solveFold(obs, anchorLat, anchorLon, halfWidth)
 
 	violated := len(obs) - countCirclesContaining(obs, bestLat, bestLon)
-	confRadius := plausibleSpreadNm(obs, bestLat, bestLon, searchHalfWidth, violated)
+	// finestStep is the floor both reported figures promise. The
+	// confidence scan's own floor is a coarse half-cell and
+	// therefore larger; this keeps the promise true if that ever
+	// changes.
+	finestStep := finestStepNm(halfWidth)
+	bound := math.Max(plausibleSpreadNm(obs, bestLat, bestLon, halfWidth, violated), finestStep)
+
+	// Below spreadFolds * minObservations a fold holds fewer fixes
+	// than the locator will publish an estimate from at all: at
+	// the default gate that is six fixes per fold, whose scatter
+	// is noise about noise. The bound is the honest answer until
+	// there is enough traffic to measure anything better.
+	spread := bound
+
+	if len(obs) >= spreadFolds*minObservations {
+		rmsNm := foldSpreadNm(obs, bestLat, bestLon, anchorLat, anchorLon, halfWidth)
+		spread = clampSpreadNm(rmsNm, finestStep, bound)
+	}
 
 	return Fix{
-		Latitude:  bestLat,
-		Longitude: bestLon,
-		// finestStep is the floor the Fix contract promises. The
-		// scan's own floor is a coarse half-cell and therefore
-		// larger; this keeps the promise true if that ever changes.
-		ConfidenceRadiusNm: math.Max(confRadius, finestStep),
+		Latitude:           bestLat,
+		Longitude:          bestLon,
+		ConfidenceRadiusNm: bound,
+		SpreadNm:           spread,
 		ObservationCount:   len(obs),
 		Violated:           violated,
 	}
+}
+
+// solveFold runs the recursive grid search over one observation
+// set and returns the position it converges on. solve calls it
+// for the full set and foldSpreadNm for each fold, from the same
+// starting region: a sub-estimate is only comparable with the
+// full one if it was solved the same way, over the same levels,
+// out of the same box.
+func solveFold(obs []observation, lat, lon, halfWidth float64) (float64, float64) {
+	bestLat, bestLon, width := lat, lon, halfWidth
+
+	for range gridSearchLevels {
+		bestLat, bestLon = gridSearch(obs, bestLat, bestLon, width)
+		width /= gridSearchShrinkFactor
+	}
+
+	return bestLat, bestLon
+}
+
+// finestStepNm is the grid spacing at the search's last level:
+// the initial half-width shrunk once per level after the first,
+// spread over the half-count of points across the grid. Neither
+// figure a Fix carries can mean anything finer than this, so it
+// is the floor under both.
+func finestStepNm(halfWidth float64) float64 {
+	return halfWidth / math.Pow(gridSearchShrinkFactor, gridSearchLevels-1) / gridSearchHalfSize
+}
+
+// foldSpreadNm is the RMS distance from the full estimate to the
+// spreadFolds sub-estimates, each solved on its own interleaved
+// fifth of the observations out of the same starting region.
+//
+// The sum is deliberately not divided by sqrt(spreadFolds) to
+// convert a fifth-of-the-data scatter into a whole-data standard
+// error. A fifth of the data is the scale this estimator's noise
+// is honest at, the fold answers are not independent samples of
+// it, and over-claiming precision is the failure the bound exists
+// to prevent.
+func foldSpreadNm(obs []observation, estLat, estLon, anchorLat, anchorLon, halfWidth float64) float64 {
+	var sumSquares float64
+
+	for fold := range spreadFolds {
+		foldLat, foldLon := solveFold(foldObservations(obs, fold), anchorLat, anchorLon, halfWidth)
+
+		offsetNm := distanceNm(foldLat, foldLon, estLat, estLon)
+		sumSquares += offsetNm * offsetNm
+	}
+
+	return math.Sqrt(sumSquares / spreadFolds)
+}
+
+// foldObservations returns the observations belonging to one
+// fold: fold, fold+spreadFolds, fold+2*spreadFolds and so on. See
+// the spreadFolds comment for why the stride rather than a slice
+// of the buffer.
+func foldObservations(obs []observation, fold int) []observation {
+	out := make([]observation, 0, len(obs)/spreadFolds+1)
+
+	for index := fold; index < len(obs); index += spreadFolds {
+		out = append(out, obs[index])
+	}
+
+	return out
+}
+
+// clampSpreadNm holds the precision figure between the grid it
+// was measured on and the bound that covers it. Under finestStep
+// it would claim a resolution the search never had; over the
+// bound it would contradict the one number that accounts for what
+// every fold shares.
+func clampSpreadNm(rmsNm, finestStep, boundNm float64) float64 {
+	return math.Min(math.Max(rmsNm, finestStep), boundNm)
 }
 
 // initialSearchRegion returns the centre and half-width of the
