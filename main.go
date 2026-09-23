@@ -272,7 +272,10 @@ func configureUI(cfg cliConfig) *uiComponents {
 	// Only worth saying when the terminal is at the bottom of the range and
 	// there is something the operator can actually do about it. Pushed into
 	// the queue rather than logged, because stderr is tview's once Run starts.
-	if colorDepth < 16 {
+	// Below sixteen means the console is on eight, which linux-16color doubles.
+	const colorDepthHintCeiling = 16
+
+	if colorDepth < colorDepthHintCeiling {
 		notifications.Push(slog.LevelInfo, fmt.Sprintf(
 			"Terminal reports %d colours, using the basic palette. "+
 				"TERM=linux-16color doubles it.", colorDepth))

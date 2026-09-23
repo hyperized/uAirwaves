@@ -17,6 +17,15 @@ const (
 	testMessage  = "notify"
 	droppedToken = "dropped"
 
+	// Case names for the severity and header-state tables. goconst counts
+	// them across the whole ui_test package, so they live here with the
+	// rest of the shared test constants rather than in each table's file.
+	caseError    = "error"
+	caseWarning  = "warning"
+	caseInfo     = "info"
+	caseDebug    = "debug"
+	caseCritical = "critical"
+
 	// maxQueued mirrors the unexported maxQueuedNotifications cap
 	// in notifications.go; the external package can't reference it
 	// directly, so the value is duplicated and asserted through the
@@ -387,9 +396,9 @@ func TestRenderNotificationBarSeverityColour(t *testing.T) {
 		level            slog.Level
 		wantBG, wantText tcell.Color
 	}{
-		{"error", slog.LevelError, ui.ActiveTheme().NotifyErrorBackground, ui.ActiveTheme().NotifyErrorText},
+		{caseError, slog.LevelError, ui.ActiveTheme().NotifyErrorBackground, ui.ActiveTheme().NotifyErrorText},
 		{"warn", slog.LevelWarn, ui.ActiveTheme().NotifyWarningBackground, ui.ActiveTheme().NotifyWarningText},
-		{"info", slog.LevelInfo, ui.ActiveTheme().NotifyInfoBackground, ui.ActiveTheme().NotifyInfoText},
+		{caseInfo, slog.LevelInfo, ui.ActiveTheme().NotifyInfoBackground, ui.ActiveTheme().NotifyInfoText},
 		{"below info", slog.LevelDebug, ui.ActiveTheme().NotifyDebugBackground, ui.ActiveTheme().NotifyDebugText},
 	}
 

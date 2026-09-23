@@ -256,6 +256,7 @@ func RenderNotificationBar(
 
 	grid.SetRows(1, 0, 2) //nolint:mnd // footer (1) + notification (1) = 2 rows in the bottom section.
 	parent.ResizeItem(bar, 1, 0)
+
 	background, text := NotificationColors(front.Level)
 	bar.SetBackgroundColor(background)
 	bar.SetTextColor(text)

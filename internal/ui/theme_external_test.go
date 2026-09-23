@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
-
 	"github.com/hyperized/uAirwaves/internal/ui"
 )
 
@@ -70,8 +69,8 @@ func TestHeaderContrast(t *testing.T) {
 		background, text tcell.Color
 	}{
 		{"ok", ui.ActiveTheme().HeaderOKBackground, ui.ActiveTheme().HeaderOKText},
-		{"warning", ui.ActiveTheme().HeaderWarningBackground, ui.ActiveTheme().HeaderWarningText},
-		{"critical", ui.ActiveTheme().HeaderCriticalBackground, ui.ActiveTheme().HeaderCriticalText},
+		{caseWarning, ui.ActiveTheme().HeaderWarningBackground, ui.ActiveTheme().HeaderWarningText},
+		{caseCritical, ui.ActiveTheme().HeaderCriticalBackground, ui.ActiveTheme().HeaderCriticalText},
 	}
 
 	for _, pair := range pairs {
@@ -144,10 +143,10 @@ func TestNotificationContrast(t *testing.T) {
 	t.Parallel()
 
 	levels := map[string]slog.Level{
-		"error":   slog.LevelError,
-		"warning": slog.LevelWarn,
-		"info":    slog.LevelInfo,
-		"debug":   slog.LevelDebug,
+		caseError:   slog.LevelError,
+		caseWarning: slog.LevelWarn,
+		caseInfo:    slog.LevelInfo,
+		caseDebug:   slog.LevelDebug,
 	}
 
 	for name, level := range levels {
@@ -173,20 +172,20 @@ func TestNotificationBarsAreDistinguishable(t *testing.T) {
 		name  string
 		level slog.Level
 	}{
-		{"error", slog.LevelError},
-		{"warning", slog.LevelWarn},
-		{"info", slog.LevelInfo},
-		{"debug", slog.LevelDebug},
+		{caseError, slog.LevelError},
+		{caseWarning, slog.LevelWarn},
+		{caseInfo, slog.LevelInfo},
+		{caseDebug, slog.LevelDebug},
 	}
 
-	for i := range len(bars) {
-		for j := i + 1; j < len(bars); j++ {
-			first, _ := ui.NotificationColors(bars[i].level)
-			second, _ := ui.NotificationColors(bars[j].level)
+	for index := range bars {
+		for other := index + 1; other < len(bars); other++ {
+			first, _ := ui.NotificationColors(bars[index].level)
+			second, _ := ui.NotificationColors(bars[other].level)
 
 			if d := themeDeltaE(first.Hex(), second.Hex()); d < minDeltaE {
 				t.Errorf("%s and %s bars differ by only dE %.1f, want at least %.1f",
-					bars[i].name, bars[j].name, d, minDeltaE)
+					bars[index].name, bars[other].name, d, minDeltaE)
 			}
 		}
 	}
@@ -201,7 +200,8 @@ func themeDeltaE(a, b int32) float64 {
 	return math.Sqrt((l1-l2)*(l1-l2) + (a1-a2)*(a1-a2) + (b1-b2)*(b1-b2))
 }
 
-func themeLab(hex int32) (lightness, aAxis, bAxis float64) {
+// themeLab converts an sRGB hex colour to CIE Lab, returning L*, a* and b*.
+func themeLab(hex int32) (float64, float64, float64) {
 	channel := func(shift uint) float64 {
 		v := float64((hex>>shift)&0xFF) / 255
 		if v <= 0.04045 {
@@ -213,11 +213,11 @@ func themeLab(hex int32) (lightness, aAxis, bAxis float64) {
 
 	red, green, blue := channel(16), channel(8), channel(0)
 
-	x := (0.4124*red + 0.3576*green + 0.1805*blue) / 0.95047
-	y := 0.2126*red + 0.7152*green + 0.0722*blue
-	z := (0.0193*red + 0.1192*green + 0.9505*blue) / 1.08883
+	cieX := (0.4124*red + 0.3576*green + 0.1805*blue) / 0.95047
+	cieY := 0.2126*red + 0.7152*green + 0.0722*blue
+	cieZ := (0.0193*red + 0.1192*green + 0.9505*blue) / 1.08883
 
-	f := func(t float64) float64 {
+	pivot := func(t float64) float64 {
 		if t > 0.008856 {
 			return math.Cbrt(t)
 		}
@@ -225,7 +225,7 @@ func themeLab(hex int32) (lightness, aAxis, bAxis float64) {
 		return 7.787*t + 16.0/116.0
 	}
 
-	fx, fy, fz := f(x), f(y), f(z)
+	pivotX, pivotY, pivotZ := pivot(cieX), pivot(cieY), pivot(cieZ)
 
-	return 116*fy - 16, 500 * (fx - fy), 200 * (fy - fz)
+	return 116*pivotY - 16, 500 * (pivotX - pivotY), 200 * (pivotY - pivotZ)
 }

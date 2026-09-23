@@ -17,6 +17,10 @@ const (
 	// WCAG AA for text. The glyphs here are single characters, so the
 	// large-text allowance of 3:1 does not apply.
 	minContrastRatio = 4.5
+
+	// maxColorHex is the largest value Color.Hex can report for a colour
+	// tcell knows; anything outside [0, maxColorHex] is not a colour.
+	maxColorHex = 0xFFFFFF
 )
 
 // relativeLuminance implements the WCAG definition for an sRGB colour.
@@ -116,7 +120,8 @@ func deltaE(a, b int32) float64 {
 	return math.Sqrt((l1-l2)*(l1-l2) + (a1-a2)*(a1-a2) + (b1-b2)*(b1-b2))
 }
 
-func toLab(hex int32) (lightness, aAxis, bAxis float64) {
+// toLab converts an sRGB hex colour to CIE Lab, returning L*, a* and b*.
+func toLab(hex int32) (float64, float64, float64) {
 	channel := func(shift uint) float64 {
 		v := float64((hex>>shift)&0xFF) / 255
 		if v <= 0.04045 {
@@ -129,11 +134,11 @@ func toLab(hex int32) (lightness, aAxis, bAxis float64) {
 	red, green, blue := channel(16), channel(8), channel(0)
 
 	// sRGB to CIE XYZ, D65, then normalised by the reference white.
-	x := (0.4124*red + 0.3576*green + 0.1805*blue) / 0.95047
-	y := 0.2126*red + 0.7152*green + 0.0722*blue
-	z := (0.0193*red + 0.1192*green + 0.9505*blue) / 1.08883
+	cieX := (0.4124*red + 0.3576*green + 0.1805*blue) / 0.95047
+	cieY := 0.2126*red + 0.7152*green + 0.0722*blue
+	cieZ := (0.0193*red + 0.1192*green + 0.9505*blue) / 1.08883
 
-	f := func(t float64) float64 {
+	pivot := func(t float64) float64 {
 		if t > 0.008856 {
 			return math.Cbrt(t)
 		}
@@ -141,9 +146,9 @@ func toLab(hex int32) (lightness, aAxis, bAxis float64) {
 		return 7.787*t + 16.0/116.0
 	}
 
-	fx, fy, fz := f(x), f(y), f(z)
+	pivotX, pivotY, pivotZ := pivot(cieX), pivot(cieY), pivot(cieZ)
 
-	return 116*fy - 16, 500 * (fx - fy), 200 * (fy - fz)
+	return 116*pivotY - 16, 500 * (pivotX - pivotY), 200 * (pivotY - pivotZ)
 }
 
 // TestBasicPaletteSlotsAreDistinct is the test that would have caught the
@@ -225,8 +230,10 @@ func TestBasicPaletteUsesNamedColors(t *testing.T) {
 				"so the terminal resolves them instead of tcell approximating", name)
 		}
 
-		if colour.Hex() > 0xFFFFFF || colour < 0 {
-			t.Errorf("%s is not a valid colour: %v", name, colour)
+		// Hex reports -1 for a colour tcell has no value for, which is what a
+		// slot left as ColorDefault or ColorNone would give.
+		if hex := colour.Hex(); hex < 0 || hex > maxColorHex {
+			t.Errorf("%s does not resolve to a colour tcell knows: Hex() = %d", name, hex)
 		}
 	}
 }
@@ -237,8 +244,11 @@ func TestBasicPaletteUsesNamedColors(t *testing.T) {
 // draw with zero-valued colours.
 //
 // Not parallel: mutates process-wide palette state.
+//
+//nolint:paralleltest // t.Parallel here would race every test that reads the palette.
 func TestSetPaletteRoundTrip(t *testing.T) {
 	original := activePalette.Load()
+
 	t.Cleanup(func() { activePalette.Store(original) })
 
 	activePalette.Store(nil)
@@ -263,8 +273,13 @@ func TestSetPaletteRoundTrip(t *testing.T) {
 // TestGetFlightLevelColorFollowsPalette proves the lookup actually reads the
 // active palette rather than a captured copy — the bug that would silently
 // undo all of this.
+//
+// Not parallel: mutates process-wide palette state.
+//
+//nolint:paralleltest // t.Parallel here would race every test that reads the palette.
 func TestGetFlightLevelColorFollowsPalette(t *testing.T) {
 	original := activePalette.Load()
+
 	t.Cleanup(func() { activePalette.Store(original) })
 
 	SetPalette(BasicPalette())

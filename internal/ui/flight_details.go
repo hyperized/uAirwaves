@@ -74,16 +74,16 @@ func UpdateFlightDetails(
 	detailsPanel.SetText(FormatFlightDetails(*snap, receiverLat, receiverLon))
 }
 
+// flightDetailsDashCell is the placeholder for a field the receiver has not
+// supplied. A function rather than a constant now that the tags follow the
+// terminal's colour depth.
+func flightDetailsDashCell() string { return DimTag() + "—" + ResetTag() }
+
 // FormatFlightDetails renders every field of an airplane snapshot
 // into a multi-line tview-coloured block. Pure string transform —
 // no I/O, no clocks beyond time.Since(snap.LastUpdate) which is
 // already used by Snapshot.Summary() and is deterministic enough
 // for golden-byte testing within a single tick.
-// flightDetailsDashCell() is the placeholder for a field the receiver has not
-// supplied. A function rather than a constant now that the tags follow the
-// terminal's colour depth.
-func flightDetailsDashCell() string { return DimTag() + "—" + ResetTag() }
-
 func FormatFlightDetails(snap airplane.Snapshot, receiverLat, receiverLon float64) string {
 	var builder strings.Builder
 

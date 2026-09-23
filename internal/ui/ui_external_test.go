@@ -37,17 +37,34 @@ const (
 func TestUpdateHeaderColorBatteryThresholds(t *testing.T) {
 	t.Parallel()
 
+	theme := ui.ActiveTheme()
+
 	tests := []struct {
 		name       string
 		percentage int8
 		wantBG     tcell.Color
 		wantText   tcell.Color
 	}{
-		{name: "red at exact threshold", percentage: ui.BatteryWarningRed, wantBG: ui.ActiveTheme().HeaderCriticalBackground, wantText: ui.ActiveTheme().HeaderCriticalText},
-		{name: "red below threshold", percentage: 5, wantBG: ui.ActiveTheme().HeaderCriticalBackground, wantText: ui.ActiveTheme().HeaderCriticalText},
-		{name: "orange at exact threshold", percentage: ui.BatteryWarningOrange, wantBG: ui.ActiveTheme().HeaderWarningBackground, wantText: ui.ActiveTheme().HeaderWarningText},
-		{name: "orange between red and orange", percentage: 30, wantBG: ui.ActiveTheme().HeaderWarningBackground, wantText: ui.ActiveTheme().HeaderWarningText},
-		{name: "green above orange threshold", percentage: 80, wantBG: ui.ActiveTheme().HeaderOKBackground, wantText: ui.ActiveTheme().HeaderOKText},
+		{
+			name: "red at exact threshold", percentage: ui.BatteryWarningRed,
+			wantBG: theme.HeaderCriticalBackground, wantText: theme.HeaderCriticalText,
+		},
+		{
+			name: "red below threshold", percentage: 5,
+			wantBG: theme.HeaderCriticalBackground, wantText: theme.HeaderCriticalText,
+		},
+		{
+			name: "orange at exact threshold", percentage: ui.BatteryWarningOrange,
+			wantBG: theme.HeaderWarningBackground, wantText: theme.HeaderWarningText,
+		},
+		{
+			name: "orange between red and orange", percentage: 30,
+			wantBG: theme.HeaderWarningBackground, wantText: theme.HeaderWarningText,
+		},
+		{
+			name: "green above orange threshold", percentage: 80,
+			wantBG: theme.HeaderOKBackground, wantText: theme.HeaderOKText,
+		},
 	}
 
 	for _, testCase := range tests {

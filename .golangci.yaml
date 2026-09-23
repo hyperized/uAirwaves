@@ -6,6 +6,7 @@ linters:
   disable:
     - depguard # We don't use dep
     - exhaustruct # mutexes don't require exhaustive structs
+    - exhaustruct_v5 # same intent: replaced exhaustruct in golangci-lint v2.13, and default:all enables the successor.
     - tagliatelle # We don't need opinions on struct tags
     - noinlineerr # We don't need opinions on error handling'
     - wsl # legacy

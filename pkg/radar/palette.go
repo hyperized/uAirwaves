@@ -38,6 +38,8 @@ type Palette struct {
 // TrueColorPalette is the tuned palette, for terminals with 256 colours or
 // more. Every entry clears WCAG 4.5:1 against both a black and a slate
 // background, and adjacent altitude bands are at least dE 25 apart.
+//
+//nolint:mnd // every value below is an sRGB literal; the field it fills already names what it colours.
 func TrueColorPalette() Palette {
 	return Palette{
 		AltBelowFL050: tcell.NewHexColor(0xFFFFFF), // white

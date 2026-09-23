@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
-
 	"github.com/hyperized/uAirwaves/internal/ui"
 	"github.com/hyperized/uAirwaves/pkg/radar"
 )
@@ -121,16 +120,16 @@ func TestBasicThemeSlotsAreDistinct(t *testing.T) {
 	basic := ui.BasicTheme()
 
 	assertColorsDistinct(t, "notification background", map[string]tcell.Color{
-		"error":   basic.NotifyErrorBackground,
-		"warning": basic.NotifyWarningBackground,
-		"info":    basic.NotifyInfoBackground,
-		"debug":   basic.NotifyDebugBackground,
+		caseError:   basic.NotifyErrorBackground,
+		caseWarning: basic.NotifyWarningBackground,
+		caseInfo:    basic.NotifyInfoBackground,
+		caseDebug:   basic.NotifyDebugBackground,
 	})
 
 	assertColorsDistinct(t, "header text", map[string]tcell.Color{
-		"ok":       basic.HeaderOKText,
-		"warning":  basic.HeaderWarningText,
-		"critical": basic.HeaderCriticalText,
+		"ok":         basic.HeaderOKText,
+		caseWarning:  basic.HeaderWarningText,
+		caseCritical: basic.HeaderCriticalText,
 	})
 
 	if basic.ConnectedTag == basic.DisconnectedTag {
@@ -147,9 +146,9 @@ func TestBasicThemeDotsAreVisibleOnEveryHeader(t *testing.T) {
 	basic := ui.BasicTheme()
 
 	backgrounds := map[string]tcell.Color{
-		"ok":       basic.HeaderOKBackground,
-		"warning":  basic.HeaderWarningBackground,
-		"critical": basic.HeaderCriticalBackground,
+		"ok":         basic.HeaderOKBackground,
+		caseWarning:  basic.HeaderWarningBackground,
+		caseCritical: basic.HeaderCriticalBackground,
 	}
 
 	// The tags carry the dot colours; compare them by name against the

@@ -49,6 +49,8 @@ type Theme struct {
 // TrueColorTheme is the tuned theme, for terminals with 256 colours or more.
 // Every text-on-background pair clears WCAG 4.5:1, and the notification bars
 // are at least dE 25 apart so severity stays readable at a glance.
+//
+//nolint:mnd // every value below is an sRGB literal; the field it fills already names what it colours.
 func TrueColorTheme() Theme {
 	return Theme{
 		DimTag:          "[#b0b8c4]",
