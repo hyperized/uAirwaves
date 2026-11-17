@@ -209,6 +209,16 @@ The estimate carries two numbers. The confidence radius is a hard bound from the
 
 **Phantom suppression.** Some Mode S frame types carry no verifiable checksum, and random noise can decode into plausible-looking aircraft. Those frames only count once the same aircraft has been seen in a properly CRC-verified frame, which keeps the plane list at real-airspace size.
 
+That gate can only check the address, and for the replies to radar interrogation (DF 0, 4, 5, 16, 20 and 21) the address is all there is to check. Those frames overlay the address on the parity, so the receiver gets it back as the CRC residual, and a burst of noise whose residual happens to be the address of an aircraft already on the list passes as that aircraft. Its other fields are random. On a busy feed most DF 4 and DF 20 altitudes are this kind of noise: in a 20-minute capture, 233 of 252 DF 4 altitudes and 444 of 476 DF 20 altitudes were more than 2,000 ft away from what the same aircraft broadcast in its own extended squitters around the same moment. So uAirwaves weighs what such a frame says before it uses it:
+
+- Only a frame with the address in clear (DF 11, 17 or 18) starts a track. An address-parity frame can update an aircraft that is already listed, never add one.
+- An altitude from an extended squitter (DF 17 or 18, address in clear, CRC checked) is always taken.
+- An altitude from an address-parity reply is taken when it is within 300 ft plus 6,000 ft/min of an altitude accepted at most 15 seconds earlier. The capture's fastest real change between squitters was 4,764 ft/min.
+- Otherwise it is held, and applied only if a second address-parity reply within 10 seconds agrees with it to within 300 ft plus 12,500 ft/min, and the aircraft has sent no squitter altitude for 15 seconds. That is how an aircraft heard only through radar replies gets an altitude at all, its first one included, and how a fast descent without ADS-B keeps updating. While squitters are coming in, replies cannot outvote them.
+- A squawk from DF 5 or DF 21, and a callsign read from a Comm-B reply, are taken when they repeat the current value or when a second reply within 30 seconds carries the same one. A single noise frame cannot raise a 7700.
+
+Times come from the frames, not the clock, so a replay is judged the way it was heard. On that capture the rule took 16 of 921 address-parity altitudes and held the rest, and the worst one it took was 966 ft from the aircraft's own broadcast. Two phantoms that agree with each other while an aircraft is not sending squitters can still get through; they stay until the next squitter or the next agreeing pair of real replies. readsb and dump1090-fa deal with the same problem along similar lines: a source priority that stops Mode S replies overriding fresh ADS-B, and in readsb a per-aircraft altitude reliability score.
+
 **Position without waiting.** With a known receiver position, a single position broadcast resolves to latitude and longitude immediately, instead of waiting to pair the two frame variants aircraft alternate between.
 
 Outside the stack itself, the TUI is drawn with [tview](https://github.com/rivo/tview) and GPS comes in through [go-gpsd](https://github.com/stratoberry/go-gpsd).
