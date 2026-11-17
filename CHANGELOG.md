@@ -4,6 +4,35 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `airplane.WithReportedAltitude`, `WithReportedSquawk` and
+  `WithReportedCallsign`, which take the value with its `airplane.Source`
+  and the time it was heard and decide whether to apply it, and
+  `Snapshot.AltitudeAt`, the time the current altitude was accepted.
+  `WithAltitude`, `WithSquawk` and `WithCallsign` still set a value
+  unconditionally.
+
+### Fixed
+
+- Altitudes no longer jump by thousands of feet for a few seconds. DF 4 and
+  DF 20 replies carry the aircraft address only in their parity, so noise
+  that recovers the address of a tracked aircraft passed the address filter
+  and its random altitude replaced the real one until the next extended
+  squitter. An address-parity altitude is now applied only when it is within
+  300 ft plus 6,000 ft/min of an altitude accepted in the last 15 seconds,
+  or when a second reply within 10 seconds agrees with it and the aircraft
+  has sent no extended-squitter altitude for 15 seconds. On a 20-minute
+  capture that holds 905 of 921 such altitudes, and the worst one applied is
+  966 ft from the aircraft's own broadcast, against 44,326 ft before.
+- A DF 5 or DF 21 squawk, emergency codes included, and a callsign from a
+  Comm-B reply need a second reply that agrees within 30 seconds, unless
+  they repeat the current value. One noise frame could raise a 7700.
+- An address-parity frame no longer creates an aircraft. Only DF 11, 17 and
+  18 start a track.
+
 ## [0.2.0] - 2026-09-23
 
 ### Added

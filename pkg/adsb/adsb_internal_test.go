@@ -3,6 +3,7 @@ package adsb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"testing"
@@ -790,33 +791,44 @@ func TestCPRCacheCleanupEvictsAgedEntries(t *testing.T) {
 }
 
 // streamSingleFrame is a test helper that pumps exactly one frame
-// through Stream() and returns the resulting plane snapshot.
+// through Stream() and returns the resulting airplanes list.
 //
 // For family-B frames (DF 0/4/5/16/20/21, residual carries the
-// ICAO) the helper pre-seeds the trust filter with the residual,
-// so the family-B admit gate doesn't reject the test frame for
-// not having a preceding family-A sighting. Real callers always
-// see a DF 17/18 before they see surveillance replies; tests that
-// want to verify the per-DF decoding don't need to re-enact that
-// timeline frame-by-frame. Family-A frames (residual=0) are
-// unaffected because the trust check is short-circuited for them.
+// ICAO) the helper pre-seeds the trust filter with the residual
+// and creates the track, which is what a preceding DF 11/17/18
+// would have done: a family-B frame may not start a track on its
+// own. Tests that want to verify the per-DF decoding don't need to
+// re-enact that timeline frame-by-frame. Family-A frames
+// (residual=0) are unaffected.
 func streamSingleFrame(t *testing.T, frame demod.Frame, opts ...Option) *airplanes.Airplanes {
 	t.Helper()
 
+	return streamFrames(t, []demod.Frame{frame}, opts...)
+}
+
+// streamFrames is streamSingleFrame for a sequence of frames, all
+// handed over in one Process call. Every non-zero residual is
+// trusted and tracked up front.
+func streamFrames(t *testing.T, frames []demod.Frame, opts ...Option) *airplanes.Airplanes {
+	t.Helper()
+
 	rcv := &fakeReceiver{reads: []fakeRead{{data: []byte{0x00}}}}
-	dem := &fakeDemodulator{frames: []demod.Frame{frame}}
+	dem := &fakeDemodulator{frames: frames}
 
 	all := append([]Option{
 		WithReceiverFactory(func() (Receiver, error) { return rcv, nil }),
 		WithDemodulatorFactory(func() Demodulator { return dem }),
 	}, opts...)
 	stream := New(all...)
+	planes := airplanes.New()
 
-	if frame.CRC != 0 {
-		stream.icaoFilter.Trust(modes.ICAO(frame.CRC), time.Now())
+	for _, frame := range frames {
+		if frame.CRC != 0 {
+			stream.icaoFilter.Trust(modes.ICAO(frame.CRC), time.Now())
+			planes.Ensure(fmt.Sprintf("%06X", frame.CRC))
+		}
 	}
 
-	planes := airplanes.New()
 	if err := stream.Stream(t.Context(), planes); err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
@@ -1265,8 +1277,10 @@ func TestHandleFrameRecoveredCounterIncrements(t *testing.T) {
 
 // TestApplySurveillanceAltitudeAppliesAltitude wires a hand-built
 // DF 4 frame with a valid Q-bit altitude code through Stream so
-// applySurveillanceAltitude reaches the WithAltitude branch (not
-// just the early-return error path).
+// applySurveillanceAltitude reaches the altitude branch (not
+// just the early-return error path). The frame goes in twice: an
+// address-parity altitude with nothing to compare against is held
+// until a second reply agrees with it.
 //
 // The altitude payload sits in the bottom 13 bits of bytes 2..3
 // of the 7-byte frame. We set Q=1 and a small N value so the
@@ -1284,7 +1298,7 @@ func TestApplySurveillanceAltitudeAppliesAltitude(t *testing.T) {
 		CRC:   0xAAA001,
 	}
 
-	planes := streamSingleFrame(t, demFrame)
+	planes := streamFrames(t, []demod.Frame{demFrame, demFrame})
 
 	plane, ok := planes.Get("AAA001")
 	if !ok {
@@ -1330,8 +1344,8 @@ func TestApplySurveillanceAltitudeRejectsMalformed(t *testing.T) {
 // TestApplySurveillanceIdentityAppliesSquawk reaches the
 // WithSquawk branch in applySurveillanceIdentity. The squawk
 // payload sits in the bottom 13 bits of bytes 2..3; we leave the
-// frame zeroed so the decoded squawk is "0000" — non-empty, so
-// WithSquawk applies.
+// frame zeroed so the decoded squawk is "0000". Sent twice,
+// because one address-parity squawk is only held.
 func TestApplySurveillanceIdentityAppliesSquawk(t *testing.T) {
 	t.Parallel()
 
@@ -1343,7 +1357,7 @@ func TestApplySurveillanceIdentityAppliesSquawk(t *testing.T) {
 		CRC:   0xCCC003,
 	}
 
-	planes := streamSingleFrame(t, demFrame)
+	planes := streamFrames(t, []demod.Frame{demFrame, demFrame})
 
 	plane, ok := planes.Get("CCC003")
 	if !ok {
@@ -1384,7 +1398,8 @@ func TestApplySurveillanceIdentityRejectsMalformed(t *testing.T) {
 // callsign branch in applyCommBAltitude. The frame's MB payload
 // begins with 0x20 (BDS code) followed by a valid 8-char
 // callsign in the Mode S 6-bit alphabet — the decoder folds it
-// into the airplane's callsign.
+// into the airplane's callsign. Sent twice so the second reply
+// confirms what the first one offered.
 func TestApplyCommBAltitudeReachesAllBranches(t *testing.T) {
 	t.Parallel()
 
@@ -1412,7 +1427,7 @@ func TestApplyCommBAltitudeReachesAllBranches(t *testing.T) {
 		CRC:   0xEEE005,
 	}
 
-	planes := streamSingleFrame(t, demFrame)
+	planes := streamFrames(t, []demod.Frame{demFrame, demFrame})
 
 	plane, ok := planes.Get("EEE005")
 	if !ok {
@@ -1457,7 +1472,8 @@ func TestApplyCommBAltitudeRejectsMalformed(t *testing.T) {
 
 // TestApplyCommBIdentityReachesAllBranches drives the squawk and
 // BDS 2,0 callsign branches in applyCommBIdentity. Same MB
-// payload shape as TestApplyCommBAltitudeReachesAllBranches.
+// payload shape as TestApplyCommBAltitudeReachesAllBranches, and
+// sent twice for the same reason.
 func TestApplyCommBIdentityReachesAllBranches(t *testing.T) {
 	t.Parallel()
 
@@ -1477,7 +1493,7 @@ func TestApplyCommBIdentityReachesAllBranches(t *testing.T) {
 		CRC:   0xABC007,
 	}
 
-	planes := streamSingleFrame(t, demFrame)
+	planes := streamFrames(t, []demod.Frame{demFrame, demFrame})
 
 	plane, ok := planes.Get("ABC007")
 	if !ok {

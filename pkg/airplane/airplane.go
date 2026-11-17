@@ -52,6 +52,9 @@ type Airplane struct {
 	altitude, heading, velocity, latitude, longitude, vertRate float64
 	lastUpdate                                                 time.Time
 	lastPositionTime                                           time.Time
+	altitudeAt                                                 time.Time
+	altTrust                                                   altitudeTrust
+	heldSquawk, heldCallsign                                   heldValue
 	emergency                                                  bool
 	messageCount                                               int64
 	positionHistory                                            []PositionEntry
@@ -99,6 +102,14 @@ type Snapshot struct {
 	Emergency       bool
 	MessageCount    int64
 	PositionHistory []PositionEntry
+
+	// AltitudeAt is when Altitude was last accepted through
+	// WithReportedAltitude, from the frame's own timestamp. It is zero when
+	// no timed altitude has been accepted, including when Altitude was set
+	// with WithAltitude. LastUpdate moves with every frame, including frames
+	// whose altitude was held, so this is the field that says how old the
+	// altitude is.
+	AltitudeAt time.Time
 }
 
 // SnapshotOption tunes what GetSnapshot copies out of the airplane.
@@ -139,6 +150,7 @@ func (a *Airplane) GetSnapshot(opts ...SnapshotOption) Snapshot {
 		ICAO:            a.icao,
 		Callsign:        a.callsign,
 		Altitude:        a.altitude,
+		AltitudeAt:      a.altitudeAt,
 		Heading:         a.heading,
 		Velocity:        a.velocity,
 		VertRate:        a.vertRate,
@@ -210,12 +222,17 @@ func WithCallsign(c string) Option {
 func WithSquawk(squawk string) Option {
 	return func(airplane *Airplane) {
 		if squawk != "" {
-			airplane.squawk = squawk
-			airplane.emergency = squawk == squawkHijacking ||
-				squawk == squawkRadioFailure ||
-				squawk == squawkGeneralEmergency
+			airplane.setSquawk(squawk)
 		}
 	}
+}
+
+// setSquawk stores squawk and recomputes the emergency flag from it.
+func (a *Airplane) setSquawk(squawk string) {
+	a.squawk = squawk
+	a.emergency = squawk == squawkHijacking ||
+		squawk == squawkRadioFailure ||
+		squawk == squawkGeneralEmergency
 }
 
 // WithLastUpdate returns an option to update the timestamp.
@@ -227,7 +244,9 @@ func WithLastUpdate(t time.Time) Option {
 	}
 }
 
-// WithAltitude returns an option to update the altitude.
+// WithAltitude returns an option that sets the altitude unconditionally. It
+// leaves Snapshot.AltitudeAt alone and does no plausibility check; decoders
+// should use WithReportedAltitude, which knows where the value came from.
 func WithAltitude(altitude float64) Option {
 	return func(a *Airplane) {
 		a.altitude = altitude
